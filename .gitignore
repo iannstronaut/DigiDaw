@@ -1,0 +1,44 @@
+# Build outputs and binaries
+bin/
+build/
+*.exe
+*.o
+*.obj
+*.a
+*.dll
+*.so
+*.dylib
+
+# Runtime output and user data
+digidaw_config.ini
+DigiDawUserData/
+*.odp
+*.wav
+*.mp3
+*.flac
+*.bak*
+*.tmp
+
+# IDE / Editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.vs/
+*.user
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Developments Docs
+docs/
+AGENT.md
+REQUIREMENT_LEDGER.md
+.agent/
