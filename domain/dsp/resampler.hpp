@@ -19,6 +19,10 @@ public:
         return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
+    static float interpolate_4pt(float ym1, float y0, float y1, float y2, float frac) noexcept {
+        return interpolate_cubic(ym1, y0, y1, y2, frac);
+    }
+
     // Linear interpolation
     static float interpolate_linear(float y0, float y1, float frac) noexcept {
         return y0 + (y1 - y0) * frac;
@@ -56,5 +60,7 @@ public:
         return out;
     }
 };
+
+using HermiteResampler = Resampler;
 
 } // namespace digidaw::domain::dsp

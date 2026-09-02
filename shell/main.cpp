@@ -1,6 +1,9 @@
 #include "../app/engine.hpp"
 #include "../adapters/plugins/synth_3xosc.hpp"
 #include "../adapters/plugins/limiter_device.hpp"
+#include "../adapters/gui/win32_window.hpp"
+#include "../adapters/desktop/file_association.hpp"
+#include "../adapters/desktop/crash_handler.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -18,6 +21,8 @@ void print_usage(const char* exe_name) {
     std::cout << "  " << exe_name << "                        Start interactive DAW session (auto-creates new project)\n";
     std::cout << "  " << exe_name << " <project_file.odp>      Open project in interactive session\n";
     std::cout << "  " << exe_name << " --render <in.odp> <out.wav> [bars]  Batch render project to WAV\n";
+    std::cout << "  " << exe_name << " --register-assoc       Register .odp file association in Windows Explorer\n";
+    std::cout << "  " << exe_name << " --unregister-assoc     Unregister .odp file association\n";
     std::cout << "  " << exe_name << " --info                  Display engine audio and plugin status\n";
     std::cout << "  " << exe_name << " --version               Display version\n\n";
 }
@@ -195,6 +200,9 @@ void run_interactive_repl(digidaw::app::Engine& engine) {
 }
 
 int main(int argc, char* argv[]) {
+    // 0. Initialize Desktop Crash Handler (DESKTOP-FR-007)
+    digidaw::adapters::desktop::CrashHandler::init("DigiDawUserData/Logs");
+
     print_banner();
 
     // 1. Initialize Engine & Config
@@ -203,6 +211,8 @@ int main(int argc, char* argv[]) {
     const int64_t runs = config.increment_launch_counter();
     std::cout << "[System] Launch counter: " << runs << "\n";
     std::cout << "[Audio]  Active Driver: " << engine.audio_device().device_name() << "\n";
+
+    bool cli_mode = false;
 
     // 2. Parse Command Line Arguments
     if (argc > 1) {
@@ -216,6 +226,28 @@ int main(int argc, char* argv[]) {
         if (arg1 == "--help" || arg1 == "-h") {
             print_usage(argv[0]);
             return 0;
+        }
+
+        if (arg1 == "--register-assoc") {
+            auto res = digidaw::adapters::desktop::FileAssociation::register_association(argv[0]);
+            if (res.is_ok()) {
+                std::cout << "[Desktop] Successfully registered .odp file association to: " << argv[0] << "\n";
+                return 0;
+            } else {
+                std::cerr << "[Desktop Error] Failed to register association: " << res.error().message() << "\n";
+                return 1;
+            }
+        }
+
+        if (arg1 == "--unregister-assoc") {
+            auto res = digidaw::adapters::desktop::FileAssociation::unregister_association();
+            if (res.is_ok()) {
+                std::cout << "[Desktop] Successfully unregistered .odp file association.\n";
+                return 0;
+            } else {
+                std::cerr << "[Desktop Error] Failed to unregister association: " << res.error().message() << "\n";
+                return 1;
+            }
         }
 
         if (arg1 == "--info") {
@@ -264,7 +296,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (arg1[0] != '-') {
+        if (arg1 == "--cli" || arg1 == "-c") {
+            cli_mode = true;
+        } else if (arg1[0] != '-') {
             // Treat as project file path from file association (%1)
             std::cout << "[Session] Opening project: " << arg1 << "\n";
             auto res = engine.session().open_project(arg1);
@@ -280,13 +314,21 @@ int main(int argc, char* argv[]) {
         std::cout << "[Session] No project file specified. Auto-creating new project...\n";
         engine.session().new_project("Untitled");
         setup_default_template(engine);
-        const std::string default_path = "DigiDawUserData/Projects/Untitled.odp";
-        engine.session().save_project(default_path);
-        std::cout << "[Session] Auto-saved new project template to '" << default_path << "'.\n";
     }
 
-    // 3. Start Interactive Session Loop
-    run_interactive_repl(engine);
+    // 3. Launch UI (Native Win32 GUI by default, CLI if --cli passed)
+    if (cli_mode) {
+        run_interactive_repl(engine);
+    } else {
+        std::cout << "[GUI] Launching DigiDAW 2026 Native Desktop Window...\n";
+        digidaw::adapters::gui::DigiDawWindow window(engine);
+        if (window.create_and_show(GetModuleHandle(NULL))) {
+            window.run_message_loop();
+        } else {
+            std::cerr << "[GUI Error] Failed to create Win32 window, falling back to CLI session.\n";
+            run_interactive_repl(engine);
+        }
+    }
 
     return 0;
 }

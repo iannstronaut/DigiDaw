@@ -26,6 +26,20 @@ struct ScannedPluginInfo {
     bool midi_in{true};
     bool midi_out{false};
     uint32_t latency_samples{0};
+
+    [[nodiscard]] std::string to_json() const {
+        std::string json = "{\n";
+        json += "  \"uid\": \"" + uid + "\",\n";
+        json += "  \"name\": \"" + name + "\",\n";
+        json += "  \"vendor\": \"" + vendor + "\",\n";
+        json += "  \"version\": \"" + version + "\",\n";
+        json += "  \"category\": \"" + category + "\",\n";
+        json += "  \"has_editor\": " + std::string(has_editor ? "true" : "false") + ",\n";
+        json += "  \"inputs\": " + std::to_string(audio_inputs) + ",\n";
+        json += "  \"outputs\": " + std::to_string(audio_outputs) + "\n";
+        json += "}";
+        return json;
+    }
 };
 
 class PluginScanner {

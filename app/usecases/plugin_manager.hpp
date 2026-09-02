@@ -3,8 +3,12 @@
 #include "../../domain/devices/device.hpp"
 #include "../../domain/common/result.hpp"
 #include "../../adapters/plugins/synth_3xosc.hpp"
+#include "../../adapters/plugins/sampler_device.hpp"
+#include "../../adapters/plugins/drum_sampler_device.hpp"
 #include "../../adapters/plugins/parametric_eq.hpp"
+#include "../../adapters/plugins/compressor_device.hpp"
 #include "../../adapters/plugins/delay_device.hpp"
+#include "../../adapters/plugins/reverb_device.hpp"
 #include "../../adapters/plugins/limiter_device.hpp"
 #include <unordered_map>
 #include <functional>
@@ -75,12 +79,28 @@ private:
             []() { return std::make_shared<adapters::plugins::Synth3xOsc>(); });
 
         register_factory(
+            "core.generator.sampler", "DirectWave Sampler", domain::DeviceCategory::Generator,
+            []() { return std::make_shared<adapters::plugins::SamplerDevice>(); });
+
+        register_factory(
+            "core.generator.drum_sampler", "FPC Drum Machine", domain::DeviceCategory::Generator,
+            []() { return std::make_shared<adapters::plugins::DrumSamplerDevice>(); });
+
+        register_factory(
             "core.fx.parametric_eq", "Parametric EQ", domain::DeviceCategory::Effect,
             []() { return std::make_shared<adapters::plugins::ParametricEQ>(); });
 
         register_factory(
+            "core.fx.compressor", "Stereo Compressor", domain::DeviceCategory::Effect,
+            []() { return std::make_shared<adapters::plugins::CompressorDevice>(); });
+
+        register_factory(
             "core.fx.delay", "Stereo Delay", domain::DeviceCategory::Effect,
             []() { return std::make_shared<adapters::plugins::DelayDevice>(); });
+
+        register_factory(
+            "core.fx.reverb", "Algorithmic Reverb", domain::DeviceCategory::Effect,
+            []() { return std::make_shared<adapters::plugins::ReverbDevice>(); });
 
         register_factory(
             "core.fx.limiter", "Master Limiter", domain::DeviceCategory::Effect,
