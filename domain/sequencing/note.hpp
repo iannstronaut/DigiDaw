@@ -60,6 +60,21 @@ public:
         return false;
     }
 
+    bool move_note(Tick old_start, uint8_t old_pitch, Tick new_start, uint8_t new_pitch) {
+        auto it = std::find_if(notes_.begin(), notes_.end(), [old_start, old_pitch](const Note& n) {
+            return n.start == old_start && n.pitch == old_pitch;
+        });
+        if (it != notes_.end()) {
+            Note n = *it;
+            notes_.erase(it);
+            n.start = new_start;
+            n.pitch = (new_pitch > 127) ? 127 : new_pitch;
+            add_note(n);
+            return true;
+        }
+        return false;
+    }
+
     void clear() noexcept {
         notes_.clear();
     }

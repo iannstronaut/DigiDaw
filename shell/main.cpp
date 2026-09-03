@@ -4,6 +4,7 @@
 #include "../adapters/gui/win32_window.hpp"
 #include "../adapters/desktop/file_association.hpp"
 #include "../adapters/desktop/crash_handler.hpp"
+#include "../adapters/gui/dpi_awareness.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -200,7 +201,10 @@ void run_interactive_repl(digidaw::app::Engine& engine) {
 }
 
 int main(int argc, char* argv[]) {
-    // 0. Initialize Desktop Crash Handler (DESKTOP-FR-007)
+    // 0. Initialize Per-Monitor V2 High-DPI Awareness (Crisp, native HD on all Windows displays)
+    digidaw::adapters::gui::DpiAwareness::enable_high_dpi_awareness();
+
+    // Initialize Desktop Crash Handler (DESKTOP-FR-007)
     digidaw::adapters::desktop::CrashHandler::init("DigiDawUserData/Logs");
 
     print_banner();

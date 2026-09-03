@@ -5,6 +5,7 @@
 #include "gui_renderer.hpp"
 #include "d2d_renderer.hpp"
 #include "d3d_shader_visualizer.hpp"
+#include "dpi_awareness.hpp"
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
@@ -47,8 +48,63 @@ public:
         instance = nullptr;
     }
 
+    void update_text_formats(float scale) {
+        if (!dwrite_factory_) return;
+        if (dwrite_small_) { dwrite_small_->Release(); dwrite_small_ = nullptr; }
+        if (dwrite_title_) { dwrite_title_->Release(); dwrite_title_ = nullptr; }
+        if (dwrite_bold_) { dwrite_bold_->Release(); dwrite_bold_ = nullptr; }
+        if (dwrite_main_) { dwrite_main_->Release(); dwrite_main_ = nullptr; }
+
+        float s = std::max(1.0f, scale);
+        float sz_main = std::round(12.0f * s);
+        float sz_bold = std::round(12.0f * s);
+        float sz_title = std::round(15.0f * s);
+        float sz_small = std::round(10.0f * s);
+
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_main, L"en-us", &dwrite_main_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_bold, L"en-us", &dwrite_bold_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_title, L"en-us", &dwrite_title_);
+        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_small, L"en-us", &dwrite_small_);
+    }
+
+    void update_gdi_fonts(float scale) {
+        if (font_main_) { DeleteObject(font_main_); font_main_ = nullptr; }
+        if (font_bold_) { DeleteObject(font_bold_); font_bold_ = nullptr; }
+        if (font_title_) { DeleteObject(font_title_); font_title_ = nullptr; }
+        if (font_small_) { DeleteObject(font_small_); font_small_ = nullptr; }
+
+        float s = std::max(1.0f, scale);
+        int h_main = static_cast<int>(std::round(14.0f * s));
+        int h_bold = static_cast<int>(std::round(14.0f * s));
+        int h_title = static_cast<int>(std::round(18.0f * s));
+        int h_small = static_cast<int>(std::round(11.0f * s));
+
+        font_main_ = CreateFontA(h_main, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+        font_bold_ = CreateFontA(h_bold, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+        font_title_ = CreateFontA(h_title, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+        font_small_ = CreateFontA(h_small, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+    }
+
     bool create_and_show(HINSTANCE hinst, int width = 1150, int height = 780) {
         hinst_ = hinst;
+        DpiAwareness::enable_high_dpi_awareness();
+
+        INITCOMMONCONTROLSEX icex{};
+        icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
+        icex.dwICC = ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES;
+        InitCommonControlsEx(&icex);
 
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(WNDCLASSEXW);
@@ -70,25 +126,15 @@ public:
             WS_EX_ACCEPTFILES,
             wc.lpszClassName,
             L"DigiDAW 2026 - Desktop Audio Workstation",
-            WS_OVERLAPPEDWINDOW | WS_MAXIMIZE | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW | WS_MAXIMIZE,
             x, y, width, height,
             NULL, NULL, hinst_, this
         );
 
         if (!hwnd_) return false;
 
-        font_main_ = CreateFontA(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
-        font_bold_ = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
-        font_title_ = CreateFontA(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
-        font_small_ = CreateFontA(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, VARIABLE_PITCH, "Segoe UI");
+        float scale = DpiAwareness::get_scale_factor(hwnd_);
+        update_gdi_fonts(scale);
 
         // 60 FPS update timer (16ms)
         SetTimer(hwnd_, 1, 16, NULL);
@@ -111,10 +157,14 @@ public:
         // Initialize Direct3D 11 & Direct2D GPU Pipeline at full maximized screen resolution
         use_d2d_d3d_ = init_d3d_and_d2d(hwnd_, width, height);
         if (use_d2d_d3d_) {
-            status_message_ = "Direct2D 1.1 + Direct3D 11 Shaders Active (Hardware Accelerated)";
+            status_message_ = "Direct2D 1.1 + Direct3D 11 Shaders Active (Hardware Accelerated • Native HD)";
         } else {
             status_message_ = "Running on GDI Double-Buffered Fallback";
         }
+
+        // Trigger immediate native HD redraw
+        InvalidateRect(hwnd_, NULL, FALSE);
+        UpdateWindow(hwnd_);
 
         return true;
     }
@@ -157,6 +207,56 @@ public:
         return std::min(256, max_b);
     }
 
+    struct PianoRollLayout {
+        float rack_top{70.0f};
+        float rack_bottom{0.0f};
+        float toolbar_y{76.0f};
+        float toolbar_h{26.0f};
+        float ruler_y{106.0f};
+        float ruler_h{20.0f};
+        float grid_top{128.0f};
+        float h_scroll_h{16.0f};
+        float v_scroll_w{16.0f};
+        float grid_bottom{0.0f};
+        float grid_h{0.0f};
+        float piano_x{20.0f};
+        float piano_w{64.0f};
+        float grid_x{86.0f};
+        float grid_w{0.0f};
+        float v_scroll_x{0.0f};
+        float h_scroll_y{0.0f};
+        float row_h{0.0f};
+        float step_w{0.0f};
+
+        void init(int client_w, int client_h, int num_pitches, int visible_steps) {
+            rack_bottom = static_cast<float>(client_h - 260);
+            grid_bottom = rack_bottom - h_scroll_h - 4.0f;
+            grid_h = std::max(100.0f, grid_bottom - grid_top);
+            v_scroll_x = static_cast<float>(client_w - 20) - v_scroll_w;
+            grid_w = std::max(200.0f, v_scroll_x - 4.0f - grid_x);
+            h_scroll_y = grid_bottom + 2.0f;
+            row_h = grid_h / static_cast<float>(num_pitches);
+            step_w = grid_w / static_cast<float>(visible_steps);
+        }
+    };
+
+    int get_max_piano_roll_steps() const {
+        int max_s = 64; // Default 4 bars (64 sixteenth notes)
+        auto* pat = engine_.session().project().get_pattern(1);
+        if (pat) {
+            auto ppq = engine_.session().project().time_map().ppq();
+            auto step_ticks = ppq / 4;
+            auto* note_set = pat->get_channel_notes(piano_roll_channel_);
+            if (note_set) {
+                for (const auto& n : note_set->notes()) {
+                    int end_s = static_cast<int>((n.start + n.length + step_ticks - 1) / step_ticks);
+                    if (end_s + 16 > max_s) max_s = end_s + 16;
+                }
+            }
+        }
+        return std::min(512, max_s);
+    }
+
     void toggle_fullscreen() {
         if (!is_fullscreen_) {
             GetWindowRect(hwnd_, &saved_win_rect_);
@@ -191,6 +291,7 @@ private:
     static LRESULT CALLBACK wnd_proc_static(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DigiDawWindow* self = nullptr;
         if (msg == WM_NCCREATE) {
+            DpiAwareness::enable_non_client_dpi_scaling(hwnd);
             auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
             self = reinterpret_cast<DigiDawWindow*>(cs->lpCreateParams);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
@@ -227,6 +328,32 @@ private:
                     resize_gpu_buffers(w, h);
                 } else {
                     resize_backbuffer(w, h);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
+            case WM_DPICHANGED: {
+                auto* prc = reinterpret_cast<RECT*>(lp);
+                if (prc) {
+                    SetWindowPos(hwnd, NULL,
+                        prc->left, prc->top,
+                        prc->right - prc->left, prc->bottom - prc->top,
+                        SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                float new_scale = static_cast<float>(LOWORD(wp)) / 96.0f;
+                update_text_formats(new_scale);
+                update_gdi_fonts(new_scale);
+                RECT cr{};
+                GetClientRect(hwnd, &cr);
+                int w = cr.right - cr.left;
+                int h = cr.bottom - cr.top;
+                if (w > 0 && h > 0) {
+                    if (use_d2d_d3d_) {
+                        resize_gpu_buffers(w, h);
+                    } else {
+                        resize_backbuffer(w, h);
+                    }
                 }
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -309,7 +436,7 @@ private:
                 if (is_mouse_down_) {
                     on_mouse_move(mouse_x, mouse_y);
                     InvalidateRect(hwnd, NULL, FALSE);
-                } else if (view_mode_ == ViewMode::ChannelRack) {
+                } else {
                     on_passive_mouse_move(mouse_x, mouse_y);
                 }
                 return 0;
@@ -329,6 +456,20 @@ private:
                         SetCursor(LoadCursor(NULL, IDC_SIZEALL));
                         return TRUE;
                     }
+                } else if (view_mode_ == ViewMode::PianoRoll) {
+                    if (dragging_piano_v_scrollbar_ || is_hovering_piano_v_scrollbar_) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                        return TRUE;
+                    }
+                    if (dragging_piano_h_scrollbar_ || is_hovering_piano_h_scrollbar_ ||
+                        note_drag_mode_ == NoteDragMode::Resize || is_hovering_note_edge_) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                        return TRUE;
+                    }
+                    if (note_drag_mode_ == NoteDragMode::Move || is_hovering_note_body_) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                        return TRUE;
+                    }
                 }
                 return DefWindowProc(hwnd, msg, wp, lp);
             }
@@ -337,8 +478,10 @@ private:
                 is_mouse_down_ = false;
                 dragging_spm_ = false;
                 dragging_seq_scrollbar_ = false;
+                dragging_piano_v_scrollbar_ = false;
+                dragging_piano_h_scrollbar_ = false;
                 dragging_mixer_track_ = -1;
-                resizing_note_ = false;
+                note_drag_mode_ = NoteDragMode::None;
                 if (clip_drag_mode_ != ClipDragMode::None) {
                     if (drag_clip_track_idx_ < engine_.session().project().tracks().size()) {
                         engine_.session().project().tracks()[drag_clip_track_idx_].sort_clips();
@@ -361,17 +504,38 @@ private:
             case WM_MOUSEWHEEL: {
                 short zDelta = GET_WHEEL_DELTA_WPARAM(wp);
                 int steps = zDelta / WHEEL_DELTA;
+                bool is_shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
                 if (view_mode_ == ViewMode::PianoRoll) {
-                    piano_roll_base_pitch_ = std::clamp(piano_roll_base_pitch_ + steps * 2, 0, 128 - PianoRollNumPitches);
-                    status_message_ = "Piano Roll Range: " + get_midi_note_name(piano_roll_base_pitch_) +
-                                      " to " + get_midi_note_name(piano_roll_base_pitch_ + PianoRollNumPitches - 1);
+                    if (is_shift) {
+                        int max_steps = get_max_piano_roll_steps();
+                        int max_scroll = std::max(0, max_steps - piano_roll_steps_);
+                        piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ - steps * 4, 0, max_scroll);
+                        status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
+                    } else {
+                        piano_roll_base_pitch_ = std::clamp(piano_roll_base_pitch_ + steps * 2, 0, 128 - PianoRollNumPitches);
+                        status_message_ = "Pitch Range: " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                          " to " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
+                    }
                     InvalidateRect(hwnd, NULL, FALSE);
                 } else if (view_mode_ == ViewMode::ChannelRack) {
-                    int max_bars = get_max_sequencer_bars();
-                    int bars_per_view = get_bars_per_view();
-                    int max_scroll = std::max(0, max_bars - bars_per_view);
-                    sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
-                    status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
+                    if (is_shift) {
+                        int max_bars = get_max_sequencer_bars();
+                        int bars_per_view = get_bars_per_view();
+                        int max_scroll = std::max(0, max_bars - bars_per_view);
+                        sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
+                        status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
+                    } else {
+                        int num_channels = static_cast<int>(engine_.session().project().channels().size());
+                        if (num_channels > 5) {
+                            sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_ - steps, 0, num_channels - 4);
+                        } else {
+                            int max_bars = get_max_sequencer_bars();
+                            int bars_per_view = get_bars_per_view();
+                            int max_scroll = std::max(0, max_bars - bars_per_view);
+                            sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
+                        }
+                    }
                     InvalidateRect(hwnd, NULL, FALSE);
                 }
                 return 0;
@@ -380,7 +544,13 @@ private:
             case WM_MOUSEHWHEEL: {
                 short zDelta = GET_WHEEL_DELTA_WPARAM(wp);
                 int steps = zDelta / WHEEL_DELTA;
-                if (view_mode_ == ViewMode::ChannelRack) {
+                if (view_mode_ == ViewMode::PianoRoll) {
+                    int max_steps = get_max_piano_roll_steps();
+                    int max_scroll = std::max(0, max_steps - piano_roll_steps_);
+                    piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ + steps * 4, 0, max_scroll);
+                    status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                } else if (view_mode_ == ViewMode::ChannelRack) {
                     int max_bars = get_max_sequencer_bars();
                     int bars_per_view = get_bars_per_view();
                     int max_scroll = std::max(0, max_bars - bars_per_view);
@@ -499,15 +669,8 @@ private:
                                 reinterpret_cast<IUnknown**>(&dwrite_factory_));
         if (FAILED(hr) || !dwrite_factory_) return false;
 
-        // 4. Create DirectWrite Text Formats
-        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-us", &dwrite_main_);
-        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"en-us", &dwrite_bold_);
-        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 15.0f, L"en-us", &dwrite_title_);
-        dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 10.0f, L"en-us", &dwrite_small_);
+        // 4. Create DirectWrite Text Formats scaled to window DPI
+        update_text_formats(DpiAwareness::get_scale_factor(hwnd));
 
         // 5. Create Render Target Views
         create_gpu_render_targets(width, height);
@@ -527,15 +690,72 @@ private:
             IDXGISurface* dxgi_surface = nullptr;
             hr = back_buffer->QueryInterface(__uuidof(IDXGISurface), reinterpret_cast<void**>(&dxgi_surface));
             if (SUCCEEDED(hr) && dxgi_surface) {
-                // 3. Create Direct2D Render Target
+                // 3. Create Direct2D Render Target with explicit 96.0f DPI for 1:1 physical pixel mapping
+                // D2D1_ALPHA_MODE_IGNORE ensures full ClearType subpixel rendering without grayscale fallback
                 D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
                     D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+                    96.0f, 96.0f);
 
-                d2d_factory_->CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &d2d_target_);
+                hr = d2d_factory_->CreateDxgiSurfaceRenderTarget(dxgi_surface, &props, &d2d_target_);
+                if (SUCCEEDED(hr) && d2d_target_) {
+                    // Set 1:1 physical pixel mapping so Direct2D coordinates map to exact physical backbuffer pixels
+                    d2d_target_->SetDpi(96.0f, 96.0f);
+
+                    // High-quality per-primitive geometric antialiasing
+                    d2d_target_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+                    // Force ClearType subpixel text antialiasing for maximum sharpness
+                    d2d_target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+
+                    // Configure DirectWrite text rendering parameters for maximum sharpness
+                    setup_dwrite_rendering_params();
+                }
                 dxgi_surface->Release();
             }
             back_buffer->Release();
+        }
+    }
+
+    void setup_dwrite_rendering_params() {
+        if (!dwrite_factory_ || !d2d_target_) return;
+
+        IDWriteRenderingParams* default_params = nullptr;
+        HMONITOR hmon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+        HRESULT hr = E_FAIL;
+        if (hmon) {
+            hr = dwrite_factory_->CreateMonitorRenderingParams(hmon, &default_params);
+        }
+        if (FAILED(hr) || !default_params) {
+            hr = dwrite_factory_->CreateRenderingParams(&default_params);
+        }
+
+        if (SUCCEEDED(hr) && default_params) {
+            IDWriteRenderingParams* custom_params = nullptr;
+            // DWRITE_RENDERING_MODE_CLEARTYPE_GDI_NATURAL ensures razor-sharp glyph stems
+            // snapped to physical pixel columns without the vertical blurriness of NATURAL_SYMMETRIC.
+            // Ensure RGB pixel geometry (never FLAT) so DirectWrite does not fall back to blurry grayscale.
+            DWRITE_PIXEL_GEOMETRY pixel_geom = default_params->GetPixelGeometry();
+            if (pixel_geom == DWRITE_PIXEL_GEOMETRY_FLAT) {
+                pixel_geom = DWRITE_PIXEL_GEOMETRY_RGB;
+            }
+            float gamma = (default_params->GetGamma() > 0.0f) ? default_params->GetGamma() : 1.8f;
+            float contrast = std::clamp(std::max(1.0f, default_params->GetEnhancedContrast()), 1.0f, 2.0f);
+            hr = dwrite_factory_->CreateCustomRenderingParams(
+                gamma,
+                contrast,
+                1.0f, // 100% ClearType level
+                pixel_geom,
+                DWRITE_RENDERING_MODE_CLEARTYPE_GDI_NATURAL,
+                &custom_params
+            );
+            if (SUCCEEDED(hr) && custom_params) {
+                d2d_target_->SetTextRenderingParams(custom_params);
+                custom_params->Release();
+            } else {
+                d2d_target_->SetTextRenderingParams(default_params);
+            }
+            default_params->Release();
         }
     }
 
@@ -625,33 +845,36 @@ private:
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, "⚡ D3D11+D2D", badge_rc, t.accent_cyan,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        // Buttons
+        // Buttons: Icon-only (Text removed)
         bool is_playing = engine_.transport().is_playing();
         bool is_paused = (engine_.transport().state() == app::TransportState::Paused);
 
-        D2D1_RECT_F play_rc = D2D1::RectF(215.0f, 12.0f, 285.0f, 48.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, play_rc, "▶ PLAY", is_playing, t.accent_green, t.bg_card);
+        // 1. PLAY Button [▶]
+        D2D1_RECT_F play_rc = D2D1::RectF(215.0f, 12.0f, 255.0f, 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, play_rc, "▶", is_playing, t.accent_green, t.bg_card);
 
-        D2D1_RECT_F pause_rc = D2D1::RectF(292.0f, 12.0f, 362.0f, 48.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, pause_rc, "❚❚ PAUSE", is_paused, t.accent_amber, t.bg_card);
+        // 2. PAUSE Button [❚❚]
+        D2D1_RECT_F pause_rc = D2D1::RectF(260.0f, 12.0f, 300.0f, 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, pause_rc, "❚❚", is_paused, t.accent_amber, t.bg_card);
 
-        D2D1_RECT_F stop_rc = D2D1::RectF(369.0f, 12.0f, 434.0f, 48.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, stop_rc, "■ STOP", false, t.accent_red, t.bg_card);
+        // 3. STOP Button [■]
+        D2D1_RECT_F stop_rc = D2D1::RectF(305.0f, 12.0f, 345.0f, 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, stop_rc, "■", false, t.accent_red, t.bg_card);
 
         // Tempo Controls
         double bpm = engine_.session().project().time_map().get_bpm_at(0);
         std::stringstream ss_bpm;
         ss_bpm << std::fixed << std::setprecision(1) << bpm << " BPM";
 
-        D2D1_RECT_F bpm_minus_rc = D2D1::RectF(445.0f, 15.0f, 470.0f, 45.0f);
+        D2D1_RECT_F bpm_minus_rc = D2D1::RectF(355.0f, 14.0f, 382.0f, 46.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_bold_, bpm_minus_rc, "-", false, t.bg_card, t.bg_card);
 
-        D2D1_RECT_F bpm_disp_rc = D2D1::RectF(475.0f, 15.0f, 565.0f, 45.0f);
+        D2D1_RECT_F bpm_disp_rc = D2D1::RectF(387.0f, 14.0f, 472.0f, 46.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, bpm_disp_rc, t.bg_input, t.border_dark, 4.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, ss_bpm.str(), bpm_disp_rc, t.accent_amber,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        D2D1_RECT_F bpm_plus_rc = D2D1::RectF(570.0f, 15.0f, 595.0f, 45.0f);
+        D2D1_RECT_F bpm_plus_rc = D2D1::RectF(477.0f, 14.0f, 504.0f, 46.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_bold_, bpm_plus_rc, "+", false, t.bg_card, t.bg_card);
 
         // Real-Time Position Clock starting from 00:00.00
@@ -671,150 +894,94 @@ private:
                << std::setfill('0') << std::setw(2) << centis
                << "  |  Bar " << bar;
 
-        D2D1_RECT_F pos_rc = D2D1::RectF(605.0f, 15.0f, 765.0f, 45.0f);
+        D2D1_RECT_F pos_rc = D2D1::RectF(514.0f, 14.0f, 665.0f, 46.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, pos_rc, t.bg_input, t.border_dark, 4.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, ss_pos.str(), pos_rc, t.accent_cyan,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        // View Mode Switcher
-        D2D1_RECT_F rack_btn_rc = D2D1::RectF(775.0f, 15.0f, 865.0f, 45.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, rack_btn_rc, "🎛 RACK",
+        // View Mode Switcher: Icon-only [🎛] and [🎹]
+        D2D1_RECT_F rack_btn_rc = D2D1::RectF(675.0f, 12.0f, 715.0f, 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, rack_btn_rc, "🎛",
                                 view_mode_ == ViewMode::ChannelRack, t.accent_orange, t.bg_card);
 
-        D2D1_RECT_F roll_btn_rc = D2D1::RectF(875.0f, 15.0f, 985.0f, 45.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, roll_btn_rc, "🎹 PIANO ROLL",
+        D2D1_RECT_F roll_btn_rc = D2D1::RectF(720.0f, 12.0f, 760.0f, 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, roll_btn_rc, "🎹",
                                 view_mode_ == ViewMode::PianoRoll, t.accent_cyan, t.bg_card);
 
-        // 7. Analog Real-Time Audio Signal Oscilloscope Section (Beside Piano Roll)
-        float spec_x = 1000.0f;
-        float spec_max_right = static_cast<float>(client_w_ - 225);
-        if (spec_max_right > spec_x + 90.0f) {
-            float spec_w = std::min(360.0f, spec_max_right - spec_x);
-            float spec_y = 10.0f;
-            float spec_h = 40.0f;
+        // 7. Analog Real-Time Audio Signal Oscilloscope Section (Beside Piano Roll - matches screenshot)
+        float spec_x = 772.0f;
+        float spec_max_right = static_cast<float>(client_w_ - 105);
+        if (spec_max_right > spec_x + 60.0f) {
+            float spec_w = std::min(240.0f, spec_max_right - spec_x);
+            float spec_y = 12.0f;
+            float spec_h = 36.0f;
             D2D1_RECT_F chassis_rc = D2D1::RectF(spec_x, spec_y, spec_x + spec_w, spec_y + spec_h);
 
-            // Dark Analog Chassis Bezel
-            D2DRenderer::draw_rounded_box(d2d_target_, chassis_rc, D2D1::ColorF(0.045f, 0.06f, 0.08f, 0.95f),
-                                          D2D1::ColorF(0.18f, 0.24f, 0.32f, 1.0f), 5.0f);
+            // Dark Analog Chassis Bezel (matching screenshot)
+            D2DRenderer::draw_rounded_box(d2d_target_, chassis_rc, D2D1::ColorF(0.19f, 0.22f, 0.26f, 1.0f),
+                                          D2D1::ColorF(0.28f, 0.32f, 0.38f, 1.0f), 4.0f);
 
-            // Inset CRT Screen Glass
-            D2D1_RECT_F screen_rc = D2D1::RectF(spec_x + 3.0f, spec_y + 3.0f, spec_x + spec_w - 3.0f, spec_y + spec_h - 3.0f);
-            D2DRenderer::draw_rounded_box(d2d_target_, screen_rc, D2D1::ColorF(0.015f, 0.03f, 0.045f, 1.0f),
-                                          D2D1::ColorF(0.08f, 0.12f, 0.16f, 1.0f), 3.0f);
+            // Inset Screen Glass (clean dark slate, no text, no graticules, no LEDs)
+            D2D1_RECT_F screen_rc = D2D1::RectF(spec_x + 2.0f, spec_y + 2.0f, spec_x + spec_w - 2.0f, spec_y + spec_h - 2.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, screen_rc, D2D1::ColorF(0.12f, 0.15f, 0.18f, 1.0f),
+                                          D2D1::ColorF(0.08f, 0.10f, 0.12f, 1.0f), 2.0f);
 
             float center_y = (screen_rc.top + screen_rc.bottom) * 0.5f;
-            float max_amp = (screen_rc.bottom - screen_rc.top) * 0.5f - 4.0f;
+            float max_amp = (screen_rc.bottom - screen_rc.top) * 0.5f - 2.0f;
 
-            // Oscilloscope Graticule Reticle Lines
-            ID2D1SolidColorBrush* br_grid = nullptr;
-            ID2D1SolidColorBrush* br_center = nullptr;
-            d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.14f, 0.18f, 0.5f), &br_grid);
-            d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.22f, 0.28f, 0.7f), &br_center);
-
-            if (br_grid && br_center) {
-                // Upper (+0.5) and Lower (-0.5) Reference Rails
-                float y_pos = center_y - max_amp * 0.5f;
-                float y_neg = center_y + max_amp * 0.5f;
-                d2d_target_->DrawLine(D2D1::Point2F(screen_rc.left + 4.0f, y_pos), D2D1::Point2F(screen_rc.right - 4.0f, y_pos), br_grid, 0.7f);
-                d2d_target_->DrawLine(D2D1::Point2F(screen_rc.left + 4.0f, y_neg), D2D1::Point2F(screen_rc.right - 4.0f, y_neg), br_grid, 0.7f);
-
-                // Center 0V Zero-Voltage Baseline (where line rests at idle)
-                d2d_target_->DrawLine(D2D1::Point2F(screen_rc.left + 4.0f, center_y), D2D1::Point2F(screen_rc.right - 4.0f, center_y), br_center, 0.9f);
-            }
-
-            // Screen Header: Title Label & Peak LED Lamp
-            D2D1_RECT_F lbl_rc = D2D1::RectF(screen_rc.left + 6.0f, screen_rc.top + 2.0f, screen_rc.left + 160.0f, screen_rc.top + 14.0f);
-            D2DRenderer::draw_text(d2d_target_, dwrite_small_, "ANALOG OSCILLOSCOPE", lbl_rc, D2D1::ColorF(0.0f, 0.85f, 0.75f, 0.85f));
-
-            // Peak / Clip LED Lamp
-            float led_cx = screen_rc.right - 8.0f;
-            float led_cy = screen_rc.top + 7.0f;
-            bool is_peaking = (meter_peaks_[0] > 0.92f);
-            D2D1_ELLIPSE led_el = D2D1::Ellipse(D2D1::Point2F(led_cx, led_cy), 3.0f, 3.0f);
-            ID2D1SolidColorBrush* br_led = nullptr;
-            d2d_target_->CreateSolidColorBrush(is_peaking ? D2D1::ColorF(1.0f, 0.1f, 0.2f, 1.0f) : D2D1::ColorF(0.35f, 0.08f, 0.10f, 0.8f), &br_led);
-            if (br_led) {
-                d2d_target_->FillEllipse(led_el, br_led);
-                br_led->Release();
-            }
-
-            // Continuous Real-Time Audio Signal Oscilloscope Line (Rests in the middle at idle, forms waveform when active)
-            float start_x = screen_rc.left + 6.0f;
-            float end_x = screen_rc.right - 6.0f;
-            constexpr size_t num_pts = 96;
+            // Continuous Real-Time Audio Signal Oscilloscope Line (Dense waveform matching screenshot)
+            float start_x = screen_rc.left + 2.0f;
+            float end_x = screen_rc.right - 2.0f;
+            constexpr size_t num_pts = 128;
             float step_x = (end_x - start_x) / static_cast<float>(num_pts - 1);
 
             ID2D1PathGeometry* scope_geo = nullptr;
-            ID2D1PathGeometry* fill_geo = nullptr;
-            if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&scope_geo)) &&
-                SUCCEEDED(d2d_factory_->CreatePathGeometry(&fill_geo))) {
+            if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&scope_geo))) {
                 ID2D1GeometrySink* sink = nullptr;
-                ID2D1GeometrySink* sink_fill = nullptr;
-                if (SUCCEEDED(scope_geo->Open(&sink)) && SUCCEEDED(fill_geo->Open(&sink_fill))) {
+                if (SUCCEEDED(scope_geo->Open(&sink))) {
                     float s0 = std::clamp(meter_waveform_[0], -1.0f, 1.0f);
                     float y0 = std::clamp(center_y - s0 * max_amp, screen_rc.top + 2.0f, screen_rc.bottom - 2.0f);
                     D2D1_POINT_2F p0 = D2D1::Point2F(start_x, y0);
 
                     sink->BeginFigure(p0, D2D1_FIGURE_BEGIN_HOLLOW);
-                    sink_fill->BeginFigure(D2D1::Point2F(start_x, center_y), D2D1_FIGURE_BEGIN_FILLED);
-                    sink_fill->AddLine(p0);
 
                     for (size_t i = 1; i < num_pts; ++i) {
                         float s = std::clamp(meter_waveform_[i], -1.0f, 1.0f);
                         float y = std::clamp(center_y - s * max_amp, screen_rc.top + 2.0f, screen_rc.bottom - 2.0f);
                         D2D1_POINT_2F pt = D2D1::Point2F(start_x + static_cast<float>(i) * step_x, y);
                         sink->AddLine(pt);
-                        sink_fill->AddLine(pt);
                     }
 
                     sink->EndFigure(D2D1_FIGURE_END_OPEN);
-                    sink_fill->AddLine(D2D1::Point2F(end_x, center_y));
-                    sink_fill->EndFigure(D2D1_FIGURE_END_CLOSED);
-
                     sink->Close();
                     sink->Release();
-                    sink_fill->Close();
-                    sink_fill->Release();
 
-                    // Subtle Phosphor Persistence Glow under/above the center line
-                    ID2D1SolidColorBrush* br_wave_fill = nullptr;
-                    d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.90f, 1.0f, 0.12f), &br_wave_fill);
-                    if (br_wave_fill) {
-                        d2d_target_->FillGeometry(fill_geo, br_wave_fill);
-                        br_wave_fill->Release();
-                    }
-
-                    // Outer Phosphor Halo Bloom Line (3.5px)
+                    // Outer Phosphor Glow Bloom (Pale ice cyan)
                     ID2D1SolidColorBrush* br_glow = nullptr;
-                    d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.92f, 1.0f, 0.42f), &br_glow);
+                    d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.85f, 1.0f, 0.35f), &br_glow);
                     if (br_glow) {
-                        d2d_target_->DrawGeometry(scope_geo, br_glow, 3.5f);
+                        d2d_target_->DrawGeometry(scope_geo, br_glow, 2.8f);
                         br_glow->Release();
                     }
 
-                    // Inner Sharp Neon Laser Core Line (1.6px)
+                    // Inner Core Filament (Bright pale white-cyan, matching screenshot)
                     ID2D1SolidColorBrush* br_core = nullptr;
-                    d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.92f, 1.0f, 0.98f, 1.0f), &br_core);
+                    d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.88f, 0.96f, 0.99f, 1.0f), &br_core);
                     if (br_core) {
                         d2d_target_->DrawGeometry(scope_geo, br_core, 1.6f);
                         br_core->Release();
                     }
                 }
                 if (scope_geo) scope_geo->Release();
-                if (fill_geo) fill_geo->Release();
             }
-
-            if (br_grid) br_grid->Release();
-            if (br_center) br_center->Release();
         }
 
-        // Save & Export
-        D2D1_RECT_F save_rc = D2D1::RectF(static_cast<float>(client_w_ - 210), 15.0f, static_cast<float>(client_w_ - 115), 45.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, save_rc, "💾 Save", false, t.bg_card, t.bg_card);
+        // Action Buttons: Icon-only [💾] and [💿]
+        D2D1_RECT_F save_rc = D2D1::RectF(static_cast<float>(client_w_ - 95), 12.0f, static_cast<float>(client_w_ - 55), 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, save_rc, "💾", false, t.bg_card, t.bg_card);
 
-        D2D1_RECT_F exp_rc = D2D1::RectF(static_cast<float>(client_w_ - 105), 15.0f, static_cast<float>(client_w_ - 15), 45.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, exp_rc, "💿 Export", false, t.bg_card, t.bg_card);
+        D2D1_RECT_F exp_rc = D2D1::RectF(static_cast<float>(client_w_ - 50), 12.0f, static_cast<float>(client_w_ - 10), 48.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, exp_rc, "💿", false, t.bg_card, t.bg_card);
     }
 
     void render_channel_rack_d2d() {
@@ -867,14 +1034,15 @@ private:
             int cur_bar_idx = sequencer_scroll_bar_ + b + 1;
             D2DRenderer::draw_text(d2d_target_, dwrite_small_, std::to_string(cur_bar_idx), num_rc, t.text_secondary);
 
-            // Bar tick lines
+            // Bar tick lines (half-pixel snapped for razor-sharp 1px line)
             if (br_border_dark && b > 0) {
-                d2d_target_->DrawLine(D2D1::Point2F(bx, ruler_y), D2D1::Point2F(bx, ruler_y + ruler_h), br_border_dark, 1.0f);
+                float snap_bx = std::floor(bx) + 0.5f;
+                d2d_target_->DrawLine(D2D1::Point2F(snap_bx, ruler_y), D2D1::Point2F(snap_bx, ruler_y + ruler_h), br_border_dark, 1.0f);
             }
             if (br_border_faint) {
                 for (int bt = 1; bt < 4; ++bt) {
-                    float btx = bx + bt * beat_w;
-                    d2d_target_->DrawLine(D2D1::Point2F(btx, ruler_y + ruler_h - 6.0f), D2D1::Point2F(btx, ruler_y + ruler_h), br_border_faint, 1.0f);
+                    float snap_btx = std::floor(bx + bt * beat_w) + 0.5f;
+                    d2d_target_->DrawLine(D2D1::Point2F(snap_btx, ruler_y + ruler_h - 6.0f), D2D1::Point2F(snap_btx, ruler_y + ruler_h), br_border_faint, 1.0f);
                 }
             }
         }
@@ -921,16 +1089,17 @@ private:
             D2D1_COLOR_F lane_bg = (ch_idx % 2 == 0) ? D2D1::ColorF(0.078f, 0.098f, 0.133f, 1.0f) : D2D1::ColorF(0.067f, 0.086f, 0.118f, 1.0f);
             D2DRenderer::draw_rounded_box(d2d_target_, lane_rc, lane_bg, t.border_dark, 2.0f);
 
-            // Beat grid lines across lane
+            // Beat grid lines across lane (half-pixel snapped for razor-sharp 1px line)
             for (int b = 0; b < bars_per_view; ++b) {
                 float bx = ruler_x + b * bar_w;
+                float snap_bx = std::floor(bx) + 0.5f;
                 if (br_border_dark && b > 0) {
-                    d2d_target_->DrawLine(D2D1::Point2F(bx, ch_y), D2D1::Point2F(bx, ch_y + step_h), br_border_dark, 1.0f);
+                    d2d_target_->DrawLine(D2D1::Point2F(snap_bx, ch_y), D2D1::Point2F(snap_bx, ch_y + step_h), br_border_dark, 1.0f);
                 }
                 if (br_border_faint) {
                     for (int bt = 1; bt < 4; ++bt) {
-                        float btx = bx + bt * beat_w;
-                        d2d_target_->DrawLine(D2D1::Point2F(btx, ch_y), D2D1::Point2F(btx, ch_y + step_h), br_border_faint, 0.5f);
+                        float snap_btx = std::floor(bx + bt * beat_w) + 0.5f;
+                        d2d_target_->DrawLine(D2D1::Point2F(snap_btx, ch_y), D2D1::Point2F(snap_btx, ch_y + step_h), br_border_faint, 1.0f);
                     }
                 }
             }
@@ -998,9 +1167,9 @@ private:
                         }
                     }
 
-                    // Right Resize Handle Grip
+                    // Right Resize Handle Grip (half-pixel snapped for crisp lines)
                     if (cw > 20.0f && br_border_light) {
-                        float rx = cx + cw - 4.0f;
+                        float rx = std::floor(cx + cw - 4.0f) + 0.5f;
                         d2d_target_->DrawLine(D2D1::Point2F(rx - 2.0f, ch_y + 16.0f), D2D1::Point2F(rx - 2.0f, ch_y + step_h - 6.0f), br_border_light, 1.0f);
                         d2d_target_->DrawLine(D2D1::Point2F(rx, ch_y + 16.0f), D2D1::Point2F(rx, ch_y + step_h - 6.0f), br_border_light, 1.0f);
                     }
@@ -1046,15 +1215,15 @@ private:
         D2D1_COLOR_F thumb_col = dragging_seq_scrollbar_ ? t.accent_amber : t.accent_orange;
         D2DRenderer::draw_rounded_box(d2d_target_, thumb_rc, thumb_col, t.accent_amber, 3.0f);
 
-        // 3 Grip Notches on Thumb Center
+        // 3 Grip Notches on Thumb Center (half-pixel snapped for crisp lines)
         if (br_border_dark && thumb_w > 20.0f) {
-            float mid_tx = thumb_x + thumb_w * 0.5f;
+            float mid_tx = std::floor(thumb_x + thumb_w * 0.5f) + 0.5f;
             d2d_target_->DrawLine(D2D1::Point2F(mid_tx - 4.0f, scroll_track_y + 3.0f),
-                                  D2D1::Point2F(mid_tx - 4.0f, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.2f);
+                                  D2D1::Point2F(mid_tx - 4.0f, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.0f);
             d2d_target_->DrawLine(D2D1::Point2F(mid_tx, scroll_track_y + 3.0f),
-                                  D2D1::Point2F(mid_tx, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.2f);
+                                  D2D1::Point2F(mid_tx, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.0f);
             d2d_target_->DrawLine(D2D1::Point2F(mid_tx + 4.0f, scroll_track_y + 3.0f),
-                                  D2D1::Point2F(mid_tx + 4.0f, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.2f);
+                                  D2D1::Point2F(mid_tx + 4.0f, scroll_track_y + scroll_track_h - 3.0f), br_border_dark, 1.0f);
         }
 
         if (br_border_light) br_border_light->Release();
@@ -1064,60 +1233,49 @@ private:
 
     void render_piano_roll_d2d() {
         const auto& t = D2DRenderer::theme();
-        D2D1_RECT_F roll_rc = D2D1::RectF(10.0f, 70.0f, static_cast<float>(client_w_ - 10), static_cast<float>(client_h_ - 260));
+        PianoRollLayout lay;
+        lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+
+        D2D1_RECT_F roll_rc = D2D1::RectF(10.0f, lay.rack_top, static_cast<float>(client_w_ - 10), lay.rack_bottom);
         D2DRenderer::draw_rounded_box(d2d_target_, roll_rc, t.bg_panel, t.border_dark, 8.0f);
 
-        // Header Title & Controls
+        // 1. Toolbar: Title, Back to Rack, Step Toggle, Note Length, Clear, and Shortcuts
         auto* ch = engine_.session().project().get_channel(piano_roll_channel_);
-        std::string roll_title = "PIANO ROLL: " + (ch ? ch->settings().name : "Track") +
-                                 "   (C0-B10 Scrollable | Drag Note Edge to Lengthen)";
-        D2D1_RECT_F title_rc = D2D1::RectF(25.0f, 75.0f, 500.0f, 100.0f);
-        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, roll_title, title_rc, t.text_secondary);
+        std::string ch_name = ch ? ch->settings().name : "Instrument";
 
-        // Octave Jump & Step Controls
-        D2D1_RECT_F oct_m_rc = D2D1::RectF(static_cast<float>(client_w_ - 620), 75.0f, static_cast<float>(client_w_ - 560), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, oct_m_rc, "◄ Oct -", false, t.bg_card, t.bg_card, 3.0f);
+        // Back to Rack button
+        D2D1_RECT_F back_rc = D2D1::RectF(25.0f, lay.toolbar_y, 150.0f, lay.toolbar_y + lay.toolbar_h);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, back_rc, "🎛 Back to Rack", false, t.accent_cyan, t.bg_card, 3.0f);
 
-        int cur_oct = piano_roll_base_pitch_ / 12;
-        std::string oct_lbl = "Oct " + std::to_string(cur_oct);
-        D2D1_RECT_F oct_disp_rc = D2D1::RectF(static_cast<float>(client_w_ - 555), 75.0f, static_cast<float>(client_w_ - 505), 100.0f);
-        D2DRenderer::draw_rounded_box(d2d_target_, oct_disp_rc, t.bg_input, t.border_dark, 3.0f);
-        D2DRenderer::draw_text(d2d_target_, dwrite_small_, oct_lbl, oct_disp_rc, t.accent_cyan,
+        // Pitch Range Display Badge (Full 128 semitones C0..B10)
+        int max_base_pitch = 128 - PianoRollNumPitches;
+        std::string range_str = ch_name + "  |  " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                " — " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1)) +
+                                " (C0..B10)";
+        D2D1_RECT_F range_rc = D2D1::RectF(158.0f, lay.toolbar_y, 380.0f, lay.toolbar_y + lay.toolbar_h);
+        D2DRenderer::draw_rounded_box(d2d_target_, range_rc, t.bg_input, t.border_dark, 3.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, range_str, range_rc, t.accent_amber,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        D2D1_RECT_F oct_p_rc = D2D1::RectF(static_cast<float>(client_w_ - 500), 75.0f, static_cast<float>(client_w_ - 440), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, oct_p_rc, "Oct + ►", false, t.bg_card, t.bg_card, 3.0f);
+        // Steps Toggle (16 or 32 visible)
+        std::string step_str = (piano_roll_steps_ == 16) ? "16 Steps" : "32 Steps";
+        D2D1_RECT_F step_rc = D2D1::RectF(388.0f, lay.toolbar_y, 470.0f, lay.toolbar_y + lay.toolbar_h);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, step_rc, step_str, (piano_roll_steps_ == 32), t.accent_cyan, t.bg_card, 3.0f);
 
-        D2D1_RECT_F semi_dn_rc = D2D1::RectF(static_cast<float>(client_w_ - 435), 75.0f, static_cast<float>(client_w_ - 405), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, semi_dn_rc, "▼", false, t.bg_card, t.bg_card, 3.0f);
-
-        D2D1_RECT_F semi_up_rc = D2D1::RectF(static_cast<float>(client_w_ - 400), 75.0f, static_cast<float>(client_w_ - 370), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, semi_up_rc, "▲", false, t.bg_card, t.bg_card, 3.0f);
-
-        std::string len_str = "📏 Len: " + std::to_string(piano_roll_note_len_steps_);
-        D2D1_RECT_F len_rc = D2D1::RectF(static_cast<float>(client_w_ - 365), 75.0f, static_cast<float>(client_w_ - 290), 100.0f);
+        // Default Note Length
+        std::string len_str = "📏 Len: " + std::to_string(piano_roll_note_len_steps_) + (piano_roll_note_len_steps_ == 1 ? " Stp" : " Stps");
+        D2D1_RECT_F len_rc = D2D1::RectF(478.0f, lay.toolbar_y, 580.0f, lay.toolbar_y + lay.toolbar_h);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, len_rc, len_str, false, t.accent_orange, t.bg_card, 3.0f);
 
-        std::string step_str = (piano_roll_steps_ == 16) ? "16 Steps" : "32 Steps";
-        D2D1_RECT_F step_rc = D2D1::RectF(static_cast<float>(client_w_ - 285), 75.0f, static_cast<float>(client_w_ - 210), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, step_rc, step_str, false, t.bg_card, t.bg_card, 3.0f);
+        // Clear Notes button
+        D2D1_RECT_F clear_rc = D2D1::RectF(588.0f, lay.toolbar_y, 650.0f, lay.toolbar_y + lay.toolbar_h);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, clear_rc, "Clear", false, t.bg_card, t.accent_red, 3.0f);
 
-        D2D1_RECT_F clear_rc = D2D1::RectF(static_cast<float>(client_w_ - 205), 75.0f, static_cast<float>(client_w_ - 145), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, clear_rc, "Clear", false, t.bg_card, t.bg_card, 3.0f);
-
-        D2D1_RECT_F close_rc = D2D1::RectF(static_cast<float>(client_w_ - 140), 75.0f, static_cast<float>(client_w_ - 25), 100.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, close_rc, "🎛 Back to Rack", false, t.accent_cyan, t.bg_card, 3.0f);
-
-        // Keyboard & Grid Dimensions
-        float key_x = 25.0f;
-        float key_w = 60.0f;
-        float grid_x = 90.0f;
-        float grid_w = static_cast<float>((client_w_ - 35) - 90);
-        float grid_top = 110.0f;
-        float grid_bottom = static_cast<float>(client_h_ - 270);
-        float grid_h = grid_bottom - grid_top;
-        float row_h = grid_h / static_cast<float>(PianoRollNumPitches);
-        float col_w = grid_w / static_cast<float>(piano_roll_steps_);
+        // Keyboard & Mouse Controls Guide Hint
+        D2D1_RECT_F hint_rc = D2D1::RectF(660.0f, lay.toolbar_y, static_cast<float>(client_w_ - 40), lay.toolbar_y + lay.toolbar_h);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_,
+                              "💡 Left-Click: Add/Drag Note  •  Right-Click: Delete  •  Right Edge: Resize  •  Wheel: Pitch/Scroll",
+                              hint_rc, t.text_secondary, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         ID2D1SolidColorBrush* br_border_faint = nullptr;
         ID2D1SolidColorBrush* br_border_dark = nullptr;
@@ -1128,61 +1286,106 @@ private:
         auto ppq = engine_.session().project().time_map().ppq();
         auto step_ticks = ppq / 4;
 
-        // Render Pitch Rows & Piano Keys
+        // 2. Ruler Header (Timeline Bar & Beat Indicators)
+        for (int col = 0; col < piano_roll_steps_; ++col) {
+            int abs_step = piano_roll_scroll_step_ + col;
+            int bar = (abs_step / 16) + 1;
+            int beat = ((abs_step % 16) / 4) + 1;
+            int sub_step = (abs_step % 4) + 1;
+
+            float rx = lay.grid_x + col * lay.step_w;
+            D2D1_RECT_F r_cell = D2D1::RectF(rx, lay.ruler_y, rx + lay.step_w, lay.ruler_y + lay.ruler_h);
+
+            bool is_bar_start = (sub_step == 1 && beat == 1);
+            bool is_beat_start = (sub_step == 1);
+            D2D1_COLOR_F r_bg = ((abs_step / 4) % 2 == 0) ? t.bg_card : t.bg_input;
+            D2DRenderer::draw_rounded_box(d2d_target_, r_cell, r_bg, t.border_dark, 1.0f);
+
+            if (is_bar_start) {
+                std::string lbl = std::to_string(bar) + "." + std::to_string(beat);
+                D2DRenderer::draw_text(d2d_target_, dwrite_small_, lbl, r_cell, t.accent_amber,
+                                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            } else if (is_beat_start) {
+                std::string lbl = std::to_string(beat);
+                D2DRenderer::draw_text(d2d_target_, dwrite_small_, lbl, r_cell, t.text_secondary,
+                                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
+        }
+
+        // 3. Render Pitch Rows & Piano Keys (Exact row_h and grid_top alignment)
         for (int row = 0; row < PianoRollNumPitches; ++row) {
             int pitch_val = (piano_roll_base_pitch_ + PianoRollNumPitches - 1) - row;
-            float ry = grid_top + row * row_h;
+            float ry = lay.grid_top + row * lay.row_h;
             bool is_black = is_midi_black_key(static_cast<uint8_t>(pitch_val));
+            bool is_c_root = (pitch_val % 12 == 0);
 
-            // 1. Piano Key
-            D2D1_RECT_F key_rc = D2D1::RectF(key_x, ry, key_x + key_w, ry + row_h);
+            // A. Piano Key
+            D2D1_RECT_F key_rc = D2D1::RectF(lay.piano_x, ry, lay.piano_x + lay.piano_w, ry + lay.row_h);
             D2D1_COLOR_F key_bg = is_black ? D2D1::ColorF(0.12f, 0.15f, 0.20f, 1.0f) : D2D1::ColorF(0.92f, 0.94f, 0.96f, 1.0f);
-            D2D1_COLOR_F key_txt = is_black ? t.text_secondary : D2D1::ColorF(0.1f, 0.12f, 0.15f, 1.0f);
-            D2DRenderer::draw_rounded_box(d2d_target_, key_rc, key_bg, t.border_dark, 2.0f);
+            D2D1_COLOR_F key_txt = is_black ? t.accent_cyan : (is_c_root ? t.accent_orange : D2D1::ColorF(0.1f, 0.12f, 0.15f, 1.0f));
+            D2D1_COLOR_F key_border = is_c_root ? t.accent_orange : t.border_dark;
+            D2DRenderer::draw_rounded_box(d2d_target_, key_rc, key_bg, key_border, 2.0f);
             std::string note_name = get_midi_note_name(static_cast<uint8_t>(pitch_val));
             D2DRenderer::draw_text(d2d_target_, dwrite_small_, note_name, key_rc, key_txt,
                                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-            // 2. Grid Row Background
-            D2D1_RECT_F r_row_rc = D2D1::RectF(grid_x, ry, grid_x + grid_w, ry + row_h);
+            // B. Grid Row Background
+            D2D1_RECT_F r_row_rc = D2D1::RectF(lay.grid_x, ry, lay.grid_x + lay.grid_w, ry + lay.row_h);
             D2D1_COLOR_F row_bg = is_black ? D2D1::ColorF(0.063f, 0.078f, 0.106f, 1.0f) : D2D1::ColorF(0.082f, 0.102f, 0.137f, 1.0f);
             D2DRenderer::draw_rounded_box(d2d_target_, r_row_rc, row_bg, t.border_faint, 0.0f);
         }
 
-        // Render Grid Columns (Steps)
+        // 4. Render Grid Columns (Steps) (half-pixel snapped for razor-sharp 1px line)
         for (int col = 0; col <= piano_roll_steps_; ++col) {
-            float cx = grid_x + col * col_w;
-            bool is_beat = (col % 4 == 0);
-            if (is_beat && br_border_dark) {
-                d2d_target_->DrawLine(D2D1::Point2F(cx, grid_top), D2D1::Point2F(cx, grid_bottom), br_border_dark, 1.5f);
+            float cx = lay.grid_x + col * lay.step_w;
+            float snap_cx = std::floor(cx) + 0.5f;
+            int abs_s = piano_roll_scroll_step_ + col;
+            bool is_bar = (abs_s % 16 == 0);
+            bool is_beat = (abs_s % 4 == 0);
+
+            if (is_bar && br_border_dark) {
+                d2d_target_->DrawLine(D2D1::Point2F(snap_cx, lay.grid_top), D2D1::Point2F(snap_cx, lay.grid_bottom), br_border_dark, 1.5f);
+            } else if (is_beat && br_border_dark) {
+                d2d_target_->DrawLine(D2D1::Point2F(snap_cx, lay.grid_top), D2D1::Point2F(snap_cx, lay.grid_bottom), br_border_dark, 1.0f);
             } else if (br_border_faint) {
-                d2d_target_->DrawLine(D2D1::Point2F(cx, grid_top), D2D1::Point2F(cx, grid_bottom), br_border_faint, 0.5f);
+                d2d_target_->DrawLine(D2D1::Point2F(snap_cx, lay.grid_top), D2D1::Point2F(snap_cx, lay.grid_bottom), br_border_faint, 1.0f);
             }
         }
 
-        // Render Active Notes
+        // 5. Render Active Notes (Fully aligned with PianoRollLayout)
         if (pat) {
             auto* note_set = pat->get_channel_notes(piano_roll_channel_);
             if (note_set) {
+                int min_vis_p = piano_roll_base_pitch_;
+                int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+                domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+                domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+
                 for (const auto& note : note_set->notes()) {
                     int p = note.pitch;
-                    int min_vis_p = piano_roll_base_pitch_;
-                    int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
                     if (p < min_vis_p || p > max_vis_p) continue;
+                    domain::Tick note_end = note.start + note.length;
+                    if (note_end <= view_start_tick || note.start >= view_end_tick) continue;
 
                     int row = max_vis_p - p;
-                    float ny = grid_top + row * row_h;
+                    float ny = lay.grid_top + row * lay.row_h;
 
-                    float start_col = static_cast<float>(note.start) / static_cast<float>(step_ticks);
-                    float dur_cols = static_cast<float>(note.length) / static_cast<float>(step_ticks);
+                    float rel_start = float(note.start - view_start_tick) / float(step_ticks);
+                    float rel_len = float(note.length) / float(step_ticks);
 
-                    float nx = grid_x + start_col * col_w;
-                    float nw = std::max(6.0f, dur_cols * col_w);
+                    float nx = lay.grid_x + rel_start * lay.step_w;
+                    float nw = std::max(6.0f, rel_len * lay.step_w);
 
-                    D2D1_RECT_F note_rc = D2D1::RectF(nx + 1.0f, ny + 1.0f, nx + nw - 1.0f, ny + row_h - 1.0f);
-                    D2DRenderer::draw_rounded_box(d2d_target_, note_rc, t.accent_orange, t.accent_amber, 3.0f);
+                    // Note body box
+                    D2D1_RECT_F note_rc = D2D1::RectF(nx + 1.0f, ny + 1.0f, nx + nw - 1.0f, ny + lay.row_h - 1.0f);
+                    bool is_dragged = (note_drag_mode_ != NoteDragMode::None &&
+                                       drag_note_cur_start_ == note.start &&
+                                       drag_note_cur_pitch_ == note.pitch);
+                    D2D1_COLOR_F note_col = is_dragged ? t.accent_amber : t.accent_orange;
 
-                    // Note text readout
+                    D2DRenderer::draw_rounded_box(d2d_target_, note_rc, note_col, t.accent_amber, 3.0f);
+
+                    // Note text label
                     int dur_steps = std::max(1, static_cast<int>(note.length / step_ticks));
                     std::string n_lbl = get_midi_note_name(note.pitch);
                     if (dur_steps > 1) n_lbl += " (" + std::to_string(dur_steps) + ")";
@@ -1190,11 +1393,12 @@ private:
 
                     // Right Edge Resize Handle Grip
                     if (nw > 14.0f) {
-                        float hx = nx + nw - 4.0f;
+                        float hx = std::floor(nx + nw - 4.0f) + 0.5f;
                         ID2D1SolidColorBrush* br_handle = nullptr;
-                        d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.12f, 0.15f, 0.6f), &br_handle);
+                        d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.1f, 0.12f, 0.15f, 0.65f), &br_handle);
                         if (br_handle) {
-                            d2d_target_->DrawLine(D2D1::Point2F(hx, ny + 2.0f), D2D1::Point2F(hx, ny + row_h - 2.0f), br_handle, 1.5f);
+                            d2d_target_->DrawLine(D2D1::Point2F(hx - 2.0f, ny + 2.0f), D2D1::Point2F(hx - 2.0f, ny + lay.row_h - 2.0f), br_handle, 1.0f);
+                            d2d_target_->DrawLine(D2D1::Point2F(hx, ny + 2.0f), D2D1::Point2F(hx, ny + lay.row_h - 2.0f), br_handle, 1.0f);
                             br_handle->Release();
                         }
                     }
@@ -1202,11 +1406,62 @@ private:
             }
         }
 
-        // Playhead Marker on Piano Roll
+        // 6. Playhead Marker on Piano Roll
         auto cur_tick = engine_.transport().is_playing() ? engine_.transport().current_tick() : song_position_marker_;
-        float head_col = static_cast<float>(cur_tick % (piano_roll_steps_ * step_ticks)) / static_cast<float>(step_ticks);
-        float head_x = grid_x + head_col * col_w;
-        D2DRenderer::draw_playhead(d2d_target_, head_x, grid_top - 15.0f, grid_bottom, t.accent_lime, "SPM", dwrite_small_);
+        domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+        domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+        if (cur_tick >= view_start_tick && cur_tick <= view_end_tick) {
+            float head_col = float(cur_tick - view_start_tick) / float(step_ticks);
+            float head_x = lay.grid_x + head_col * lay.step_w;
+            D2DRenderer::draw_playhead(d2d_target_, head_x, lay.ruler_y, lay.grid_bottom, t.accent_lime, "SPM", dwrite_small_);
+        }
+
+        // 7. Vertical Scrollbar (Pitch Up / Down across full 128 Semitones)
+        D2D1_RECT_F v_track_rc = D2D1::RectF(lay.v_scroll_x, lay.grid_top, lay.v_scroll_x + lay.v_scroll_w, lay.grid_bottom);
+        D2DRenderer::draw_rounded_box(d2d_target_, v_track_rc, t.bg_input, t.border_dark, 3.0f);
+
+        float v_thumb_h = std::max(28.0f, (float(PianoRollNumPitches) / 128.0f) * lay.grid_h);
+        float p_ratio = (max_base_pitch > 0) ? (float(max_base_pitch - piano_roll_base_pitch_) / float(max_base_pitch)) : 0.0f;
+        float v_thumb_y = lay.grid_top + p_ratio * (lay.grid_h - v_thumb_h);
+        D2D1_RECT_F v_thumb_rc = D2D1::RectF(lay.v_scroll_x + 1.0f, v_thumb_y, lay.v_scroll_x + lay.v_scroll_w - 1.0f, v_thumb_y + v_thumb_h);
+        D2D1_COLOR_F v_thumb_col = dragging_piano_v_scrollbar_ ? t.accent_amber : t.accent_cyan;
+        D2DRenderer::draw_rounded_box(d2d_target_, v_thumb_rc, v_thumb_col, t.border_dark, 2.0f);
+
+        // Notches on vertical thumb
+        if (br_border_dark && v_thumb_h > 18.0f) {
+            float mid_vy = std::floor(v_thumb_y + v_thumb_h * 0.5f) + 0.5f;
+            d2d_target_->DrawLine(D2D1::Point2F(lay.v_scroll_x + 3.0f, mid_vy - 3.0f),
+                                  D2D1::Point2F(lay.v_scroll_x + lay.v_scroll_w - 3.0f, mid_vy - 3.0f), br_border_dark, 1.0f);
+            d2d_target_->DrawLine(D2D1::Point2F(lay.v_scroll_x + 3.0f, mid_vy),
+                                  D2D1::Point2F(lay.v_scroll_x + lay.v_scroll_w - 3.0f, mid_vy), br_border_dark, 1.0f);
+            d2d_target_->DrawLine(D2D1::Point2F(lay.v_scroll_x + 3.0f, mid_vy + 3.0f),
+                                  D2D1::Point2F(lay.v_scroll_x + lay.v_scroll_w - 3.0f, mid_vy + 3.0f), br_border_dark, 1.0f);
+        }
+
+        // 8. Horizontal Scrollbar (Timeline Left / Right across all steps)
+        int max_steps = get_max_piano_roll_steps();
+        int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
+
+        D2D1_RECT_F h_track_rc = D2D1::RectF(lay.grid_x, lay.h_scroll_y, lay.grid_x + lay.grid_w, lay.h_scroll_y + lay.h_scroll_h);
+        D2DRenderer::draw_rounded_box(d2d_target_, h_track_rc, t.bg_input, t.border_dark, 3.0f);
+
+        float h_thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
+        float s_ratio = (max_scroll_step > 0) ? (float(piano_roll_scroll_step_) / float(max_scroll_step)) : 0.0f;
+        float h_thumb_x = lay.grid_x + s_ratio * (lay.grid_w - h_thumb_w);
+        D2D1_RECT_F h_thumb_rc = D2D1::RectF(h_thumb_x, lay.h_scroll_y + 1.0f, h_thumb_x + h_thumb_w, lay.h_scroll_y + lay.h_scroll_h - 1.0f);
+        D2D1_COLOR_F h_thumb_col = dragging_piano_h_scrollbar_ ? t.accent_amber : t.accent_orange;
+        D2DRenderer::draw_rounded_box(d2d_target_, h_thumb_rc, h_thumb_col, t.border_dark, 2.0f);
+
+        // Notches on horizontal thumb
+        if (br_border_dark && h_thumb_w > 20.0f) {
+            float mid_hx = std::floor(h_thumb_x + h_thumb_w * 0.5f) + 0.5f;
+            d2d_target_->DrawLine(D2D1::Point2F(mid_hx - 3.0f, lay.h_scroll_y + 3.0f),
+                                  D2D1::Point2F(mid_hx - 3.0f, lay.h_scroll_y + lay.h_scroll_h - 3.0f), br_border_dark, 1.0f);
+            d2d_target_->DrawLine(D2D1::Point2F(mid_hx, lay.h_scroll_y + 3.0f),
+                                  D2D1::Point2F(mid_hx, lay.h_scroll_y + lay.h_scroll_h - 3.0f), br_border_dark, 1.0f);
+            d2d_target_->DrawLine(D2D1::Point2F(mid_hx + 3.0f, lay.h_scroll_y + 3.0f),
+                                  D2D1::Point2F(mid_hx + 3.0f, lay.h_scroll_y + lay.h_scroll_h - 3.0f), br_border_dark, 1.0f);
+        }
 
         if (br_border_faint) br_border_faint->Release();
         if (br_border_dark) br_border_dark->Release();
@@ -1414,35 +1669,35 @@ private:
 
         SelectObject(mem_dc_, font_bold_);
 
-        // Transport Buttons: PLAY, PAUSE, STOP
+        // Transport Buttons: PLAY, PAUSE, STOP (Icon-only)
         bool is_playing = engine_.transport().is_playing();
         bool is_paused = (engine_.transport().state() == app::TransportState::Paused);
 
-        // 1. PLAY Button
-        RECT play_rc{215, 12, 285, 48};
-        GuiRenderer::draw_button(mem_dc_, play_rc, "▶ PLAY", is_playing, t.accent_green, t.bg_card);
+        // 1. PLAY Button [▶]
+        RECT play_rc{215, 12, 255, 48};
+        GuiRenderer::draw_button(mem_dc_, play_rc, "▶", is_playing, t.accent_green, t.bg_card);
 
-        // 2. PAUSE Button
-        RECT pause_rc{292, 12, 362, 48};
-        GuiRenderer::draw_button(mem_dc_, pause_rc, "❚❚ PAUSE", is_paused, t.accent_amber, t.bg_card);
+        // 2. PAUSE Button [❚❚]
+        RECT pause_rc{260, 12, 300, 48};
+        GuiRenderer::draw_button(mem_dc_, pause_rc, "❚❚", is_paused, t.accent_amber, t.bg_card);
 
-        // 3. STOP Button (Rewinds to tick 0 & SPM)
-        RECT stop_rc{369, 12, 434, 48};
-        GuiRenderer::draw_button(mem_dc_, stop_rc, "■ STOP", false, t.accent_red, t.bg_card);
+        // 3. STOP Button [■]
+        RECT stop_rc{305, 12, 345, 48};
+        GuiRenderer::draw_button(mem_dc_, stop_rc, "■", false, t.accent_red, t.bg_card);
 
         // Tempo BPM Controls
         double bpm = engine_.session().project().time_map().get_bpm_at(0);
         std::stringstream ss_bpm;
         ss_bpm << std::fixed << std::setprecision(1) << bpm << " BPM";
 
-        RECT bpm_minus_rc{445, 15, 470, 45};
+        RECT bpm_minus_rc{355, 14, 382, 46};
         GuiRenderer::draw_button(mem_dc_, bpm_minus_rc, "-", false, t.bg_card, t.bg_card);
 
-        RECT bpm_disp_rc{475, 15, 565, 45};
+        RECT bpm_disp_rc{387, 14, 472, 46};
         GuiRenderer::draw_rounded_box(mem_dc_, bpm_disp_rc, t.bg_input, t.border_dark, 4);
         GuiRenderer::draw_text(mem_dc_, ss_bpm.str(), bpm_disp_rc, t.accent_amber, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        RECT bpm_plus_rc{570, 15, 595, 45};
+        RECT bpm_plus_rc{477, 14, 504, 46};
         GuiRenderer::draw_button(mem_dc_, bpm_plus_rc, "+", false, t.bg_card, t.bg_card);
 
         // Real-Time Position Clock starting from 00:00.00
@@ -1462,75 +1717,64 @@ private:
                << std::setfill('0') << std::setw(2) << centis
                << "  |  Bar " << bar;
 
-        RECT pos_rc{605, 15, 765, 45};
+        RECT pos_rc{514, 14, 665, 46};
         GuiRenderer::draw_rounded_box(mem_dc_, pos_rc, t.bg_input, t.border_dark, 4);
         GuiRenderer::draw_text(mem_dc_, ss_pos.str(), pos_rc, t.accent_cyan, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // View Mode Tabs: [ 🎛 RACK ] & [ 🎹 PIANO ROLL ]
-        RECT rack_tab_rc{775, 15, 865, 45};
-        GuiRenderer::draw_button(mem_dc_, rack_tab_rc, "🎛 RACK", (view_mode_ == ViewMode::ChannelRack),
+        // View Mode Tabs: Icon-only [🎛] & [🎹]
+        RECT rack_tab_rc{675, 12, 715, 48};
+        GuiRenderer::draw_button(mem_dc_, rack_tab_rc, "🎛", (view_mode_ == ViewMode::ChannelRack),
                                  t.accent_orange, t.bg_card);
 
-        RECT roll_tab_rc{875, 15, 985, 45};
-        GuiRenderer::draw_button(mem_dc_, roll_tab_rc, "🎹 PIANO ROLL", (view_mode_ == ViewMode::PianoRoll),
+        RECT roll_tab_rc{720, 12, 760, 48};
+        GuiRenderer::draw_button(mem_dc_, roll_tab_rc, "🎹", (view_mode_ == ViewMode::PianoRoll),
                                  t.accent_cyan, t.bg_card);
 
-        // Analog Real-Time Audio Signal Oscilloscope Section (Beside Piano Roll)
-        int spec_x = 1000;
-        int spec_max_right = client_w_ - 225;
-        if (spec_max_right > spec_x + 90) {
-            int spec_w = std::min(360, spec_max_right - spec_x);
-            int spec_y = 10;
-            int spec_h = 40;
+        // Analog Real-Time Audio Signal Oscilloscope Section (Beside Piano Roll - matches screenshot)
+        int spec_x = 772;
+        int spec_max_right = client_w_ - 105;
+        if (spec_max_right > spec_x + 60) {
+            int spec_w = std::min(240, spec_max_right - spec_x);
+            int spec_y = 12;
+            int spec_h = 36;
             RECT chassis_rc{spec_x, spec_y, spec_x + spec_w, spec_y + spec_h};
-            GuiRenderer::draw_rounded_box(mem_dc_, chassis_rc, RGB(12, 16, 22), RGB(35, 48, 64), 5);
+            GuiRenderer::draw_rounded_box(mem_dc_, chassis_rc, RGB(48, 56, 66), RGB(70, 80, 95), 4);
 
-            RECT screen_rc{spec_x + 3, spec_y + 3, spec_x + spec_w - 3, spec_y + spec_h - 3};
-            GuiRenderer::fill_rect(mem_dc_, screen_rc, RGB(6, 10, 15));
+            RECT screen_rc{spec_x + 2, spec_y + 2, spec_x + spec_w - 2, spec_y + spec_h - 2};
+            GuiRenderer::fill_rect(mem_dc_, screen_rc, RGB(30, 38, 46));
 
             int center_y = (screen_rc.top + screen_rc.bottom) / 2;
-            int max_amp = (screen_rc.bottom - screen_rc.top) / 2 - 4;
+            int max_amp = (screen_rc.bottom - screen_rc.top) / 2 - 2;
 
-            // Center Baseline Graticule (faint gray-cyan 0V line)
-            HPEN pen_center = CreatePen(PS_DOT, 1, RGB(20, 50, 65));
-            HPEN old_pen = (HPEN)SelectObject(mem_dc_, pen_center);
-            MoveToEx(mem_dc_, screen_rc.left + 4, center_y, NULL);
-            LineTo(mem_dc_, screen_rc.right - 4, center_y);
-
-            RECT lbl_rc{screen_rc.left + 5, screen_rc.top + 2, screen_rc.left + 160, screen_rc.top + 14};
-            SelectObject(mem_dc_, font_small_);
-            GuiRenderer::draw_text(mem_dc_, "ANALOG OSCILLOSCOPE", lbl_rc, RGB(0, 210, 180), DT_LEFT | DT_SINGLELINE);
-
-            int disp_w = (screen_rc.right - 6) - (screen_rc.left + 6);
-            constexpr size_t num_pts = 96;
+            int disp_w = (screen_rc.right - 2) - (screen_rc.left + 2);
+            constexpr size_t num_pts = 128;
             float step_x = float(disp_w) / float(num_pts - 1);
 
             POINT pts[num_pts];
             for (size_t i = 0; i < num_pts; ++i) {
-                float px = float(screen_rc.left + 6) + float(i) * step_x;
+                float px = float(screen_rc.left + 2) + float(i) * step_x;
                 float s = std::clamp(meter_waveform_[i], -1.0f, 1.0f);
                 int py = center_y - static_cast<int>(s * float(max_amp));
                 pts[i].x = static_cast<int>(px);
                 pts[i].y = py;
             }
 
-            // Real-Time Oscilloscope Line (Cyan) - Rests in the middle at idle, forms wave when active
-            HPEN pen_cyan = CreatePen(PS_SOLID, 2, RGB(0, 229, 255));
-            SelectObject(mem_dc_, pen_cyan);
+            // Real-Time Oscilloscope Line (Bright Pale Cyan/White - matching screenshot)
+            HPEN pen_wave = CreatePen(PS_SOLID, 2, RGB(226, 246, 252));
+            HPEN old_pen = (HPEN)SelectObject(mem_dc_, pen_wave);
             Polyline(mem_dc_, pts, num_pts);
 
             SelectObject(mem_dc_, old_pen);
-            DeleteObject(pen_center);
-            DeleteObject(pen_cyan);
+            DeleteObject(pen_wave);
         }
 
-        // Action Buttons: Save & Export WAV
+        // Action Buttons: Icon-only [💾] and [💿]
         SelectObject(mem_dc_, font_main_);
-        RECT save_rc{client_w_ - 210, 15, client_w_ - 115, 45};
-        GuiRenderer::draw_button(mem_dc_, save_rc, "SAVE .ODP", false, t.bg_card, t.bg_card);
+        RECT save_rc{client_w_ - 95, 12, client_w_ - 55, 48};
+        GuiRenderer::draw_button(mem_dc_, save_rc, "💾", false, t.bg_card, t.bg_card);
 
-        RECT rend_rc{client_w_ - 105, 15, client_w_ - 15, 45};
-        GuiRenderer::draw_button(mem_dc_, rend_rc, "EXPORT WAV", false, t.bg_card, t.accent_orange);
+        RECT rend_rc{client_w_ - 50, 12, client_w_ - 10, 48};
+        GuiRenderer::draw_button(mem_dc_, rend_rc, "💿", false, t.bg_card, t.accent_orange);
     }
 
     void render_channel_rack() {
@@ -1813,13 +2057,13 @@ private:
         GuiRenderer::draw_rounded_box(mem_dc_, thumb_rc, thumb_col, RGB(255, 200, 70), 3);
     }
 
-    // --- Interactive Piano Roll View ---
+    // --- Interactive Piano Roll View (GDI Fallback) ---
     void render_piano_roll() {
         const auto& t = get_theme();
-        int rack_top = 70;
-        int rack_bottom = client_h_ - 225;
-        RECT roll_rc{15, rack_top, client_w_ - 15, rack_bottom};
+        PianoRollLayout lay;
+        lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
 
+        RECT roll_rc{10, static_cast<int>(lay.rack_top), client_w_ - 10, static_cast<int>(lay.rack_bottom)};
         GuiRenderer::draw_rounded_box(mem_dc_, roll_rc, t.bg_panel, t.border_dark, 8);
 
         auto& proj = engine_.session().project();
@@ -1828,206 +2072,185 @@ private:
         auto step_ticks = ppq / 4;
 
         auto* cur_ch = proj.get_channel(piano_roll_channel_);
-        std::string ch_name = cur_ch ? cur_ch->settings().name : "3xOsc Synth #1";
+        std::string ch_name = cur_ch ? cur_ch->settings().name : "Instrument";
 
         // 1. Piano Roll Toolbar
-        SelectObject(mem_dc_, font_bold_);
-        RECT title_rc{25, rack_top + 8, 230, rack_top + 28};
-        GuiRenderer::draw_text(mem_dc_, "PIANO ROLL — " + ch_name, title_rc, t.accent_cyan);
-
         SelectObject(mem_dc_, font_main_);
-        RECT back_rc{235, rack_top + 5, 345, rack_top + 29};
+        RECT back_rc{25, static_cast<int>(lay.toolbar_y), 150, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
         GuiRenderer::draw_button(mem_dc_, back_rc, "🎛 Back to Rack", false, t.bg_card, t.bg_card);
 
-        // Octave / Pitch Scroll Buttons (Covering full C0 to B10)
-        int num_pitches = PianoRollNumPitches;
-        RECT oct_dn_rc{355, rack_top + 5, 425, rack_top + 29};
-        GuiRenderer::draw_button(mem_dc_, oct_dn_rc, "◄ Oct -", false, t.bg_card, t.bg_card);
+        // Pitch Range Display Badge (Full 128 semitones C0..B10)
+        int max_base_pitch = 128 - PianoRollNumPitches;
+        std::string range_str = ch_name + "  |  " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                " — " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1)) +
+                                " (C0..B10)";
+        RECT range_rc{158, static_cast<int>(lay.toolbar_y), 380, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        GuiRenderer::draw_rounded_box(mem_dc_, range_rc, t.bg_input, t.border_dark, 3);
+        GuiRenderer::draw_text(mem_dc_, range_str, range_rc, t.accent_amber, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        RECT semi_dn_rc{430, rack_top + 5, 465, rack_top + 29};
-        GuiRenderer::draw_button(mem_dc_, semi_dn_rc, "▼", false, t.bg_card, t.bg_card);
+        // Steps Toggle (16 or 32 visible)
+        std::string step_str = (piano_roll_steps_ == 16) ? "16 Steps" : "32 Steps";
+        RECT step_rc{388, static_cast<int>(lay.toolbar_y), 470, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        GuiRenderer::draw_button(mem_dc_, step_rc, step_str, (piano_roll_steps_ == 32), t.accent_cyan, t.bg_card);
 
-        std::string oct_str = get_midi_note_name(piano_roll_base_pitch_) + "—" +
-                              get_midi_note_name(std::min(127, piano_roll_base_pitch_ + num_pitches - 1)) + " (C0..B10)";
-        RECT oct_disp_rc{470, rack_top + 5, 615, rack_top + 29};
-        GuiRenderer::draw_rounded_box(mem_dc_, oct_disp_rc, t.bg_input, t.border_dark, 4);
-        GuiRenderer::draw_text(mem_dc_, oct_str, oct_disp_rc, t.accent_amber, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        RECT semi_up_rc{620, rack_top + 5, 655, rack_top + 29};
-        GuiRenderer::draw_button(mem_dc_, semi_up_rc, "▲", false, t.bg_card, t.bg_card);
-
-        RECT oct_up_rc{660, rack_top + 5, 730, rack_top + 29};
-        GuiRenderer::draw_button(mem_dc_, oct_up_rc, "Oct + ►", false, t.bg_card, t.bg_card);
-
-        // Steps Toggle (16 or 32)
-        RECT steps_rc{740, rack_top + 5, 825, rack_top + 29};
-        std::string steps_str = std::to_string(piano_roll_steps_) + " Steps";
-        GuiRenderer::draw_button(mem_dc_, steps_rc, steps_str, (piano_roll_steps_ == 32), t.accent_cyan, t.bg_card);
-
-        // Note Length Toggle (1, 2, 4, 8 Steps)
-        RECT len_btn_rc{835, rack_top + 5, 930, rack_top + 29};
+        // Default Note Length
         std::string len_str = "📏 Len: " + std::to_string(piano_roll_note_len_steps_) + (piano_roll_note_len_steps_ == 1 ? " Stp" : " Stps");
-        GuiRenderer::draw_button(mem_dc_, len_btn_rc, len_str, (piano_roll_note_len_steps_ > 1), t.accent_orange, t.bg_card);
+        RECT len_rc{478, static_cast<int>(lay.toolbar_y), 580, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        GuiRenderer::draw_button(mem_dc_, len_rc, len_str, false, t.accent_orange, t.bg_card);
 
         // Clear Notes button
-        RECT clear_rc{940, rack_top + 5, 1005, rack_top + 29};
-        GuiRenderer::draw_button(mem_dc_, clear_rc, "Clear", false, t.accent_red, t.bg_card);
+        RECT clear_rc{588, static_cast<int>(lay.toolbar_y), 650, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        GuiRenderer::draw_button(mem_dc_, clear_rc, "Clear", false, t.bg_card, t.accent_red);
 
-        // 2. Geometry Setup
-        int ruler_y = rack_top + 34;
-        int grid_top = ruler_y + 22;
-        int grid_bottom = rack_bottom - 10;
-        int grid_h = grid_bottom - grid_top;
-
-        int piano_x = 25;
-        int piano_w = 68;
-        int grid_x = piano_x + piano_w + 4;
-        int grid_w = (client_w_ - 45) - grid_x;
-
-        int row_h = std::max(12, grid_h / num_pitches);
-        int step_w = std::max(16, grid_w / piano_roll_steps_);
-
-        // Current Playhead & SPM
-        int current_step = -1;
-        if (engine_.transport().is_playing()) {
-            auto tick = engine_.transport().current_tick();
-            current_step = static_cast<int>((tick / step_ticks) % piano_roll_steps_);
-        }
-        int spm_step = static_cast<int>((song_position_marker_ / step_ticks) % piano_roll_steps_);
-
-        // 3. Ruler Bar
+        // Guide Hint
         SelectObject(mem_dc_, font_small_);
-        for (int s = 0; s < piano_roll_steps_; ++s) {
-            int sx = grid_x + s * step_w;
-            RECT ruler_cell_rc{sx, ruler_y, sx + step_w - 1, ruler_y + 18};
+        RECT hint_rc{660, static_cast<int>(lay.toolbar_y), client_w_ - 40, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        GuiRenderer::draw_text(mem_dc_, "💡 Left: Add/Drag  •  Right: Delete  •  Edge: Resize  •  Wheel: Scroll",
+                              hint_rc, t.text_secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-            bool is_spm = (s == spm_step);
-            bool is_cur = (s == current_step);
-            COLORREF bg = ((s / 4) % 2 == 0) ? t.step_off_light : t.step_off_dark;
-            COLORREF border = is_spm ? t.accent_orange : (is_cur ? t.accent_cyan : t.border_dark);
-            GuiRenderer::draw_rounded_box(mem_dc_, ruler_cell_rc, bg, border, 2);
+        // 2. Ruler Header
+        for (int col = 0; col < piano_roll_steps_; ++col) {
+            int abs_step = piano_roll_scroll_step_ + col;
+            int bar = (abs_step / 16) + 1;
+            int beat = ((abs_step % 16) / 4) + 1;
+            int sub_step = (abs_step % 4) + 1;
 
-            int bar = (s / 4) + 1;
-            int beat = (s % 4) + 1;
-            std::string label = std::to_string(bar) + "." + std::to_string(beat);
-            COLORREF txt_col = is_spm ? t.accent_orange : t.text_secondary;
-            GuiRenderer::draw_text(mem_dc_, label, ruler_cell_rc, txt_col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            int rx = static_cast<int>(lay.grid_x + col * lay.step_w);
+            RECT r_cell{rx, static_cast<int>(lay.ruler_y), static_cast<int>(rx + lay.step_w), static_cast<int>(lay.ruler_y + lay.ruler_h)};
+
+            bool is_bar_start = (sub_step == 1 && beat == 1);
+            bool is_beat_start = (sub_step == 1);
+            COLORREF r_bg = ((abs_step / 4) % 2 == 0) ? t.step_off_light : t.step_off_dark;
+            GuiRenderer::draw_rounded_box(mem_dc_, r_cell, r_bg, t.border_dark, 1);
+
+            if (is_bar_start) {
+                std::string lbl = std::to_string(bar) + "." + std::to_string(beat);
+                GuiRenderer::draw_text(mem_dc_, lbl, r_cell, t.accent_amber, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            } else if (is_beat_start) {
+                std::string lbl = std::to_string(beat);
+                GuiRenderer::draw_text(mem_dc_, lbl, r_cell, t.text_secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
         }
 
-        // 4. Piano Keys on Left & Grid Rows on Right
-        for (int r = 0; r < num_pitches; ++r) {
-            uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (num_pitches - 1 - r));
-            int ry = grid_top + r * row_h;
+        // 3. Piano Keys & Grid Rows
+        for (int r = 0; r < PianoRollNumPitches; ++r) {
+            uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (PianoRollNumPitches - 1 - r));
+            int ry = static_cast<int>(lay.grid_top + r * lay.row_h);
             bool is_black = is_midi_black_key(pitch);
             bool is_c_root = (pitch % 12 == 0);
 
-            // Piano Key
-            RECT key_rc{piano_x, ry, piano_x + piano_w, ry + row_h - 1};
+            // A. Piano Key
+            RECT key_rc{static_cast<int>(lay.piano_x), ry, static_cast<int>(lay.piano_x + lay.piano_w), static_cast<int>(ry + lay.row_h)};
             COLORREF key_bg = is_black ? RGB(32, 35, 42) : RGB(235, 238, 245);
             COLORREF key_border = is_c_root ? t.accent_orange : RGB(60, 64, 75);
             GuiRenderer::draw_rounded_box(mem_dc_, key_rc, key_bg, key_border, 2);
 
-            COLORREF key_txt = is_black ? t.accent_cyan : RGB(20, 20, 20);
-            if (is_c_root) key_txt = t.accent_orange;
-            GuiRenderer::draw_text(mem_dc_, get_midi_note_name(pitch), key_rc, key_txt,
-                                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            COLORREF key_txt = is_black ? t.accent_cyan : (is_c_root ? t.accent_orange : RGB(20, 20, 20));
+            GuiRenderer::draw_text(mem_dc_, get_midi_note_name(pitch), key_rc, key_txt, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-            // Row Grid Strip
-            RECT row_grid_rc{grid_x, ry, grid_x + piano_roll_steps_ * step_w, ry + row_h - 1};
-            COLORREF grid_row_bg = is_black ? RGB(22, 24, 30) : RGB(30, 34, 42);
+            // B. Grid Row Background
+            RECT row_grid_rc{static_cast<int>(lay.grid_x), ry, static_cast<int>(lay.grid_x + lay.grid_w), static_cast<int>(ry + lay.row_h)};
+            COLORREF grid_row_bg = is_black ? RGB(16, 20, 27) : RGB(21, 26, 35);
             GuiRenderer::fill_rect(mem_dc_, row_grid_rc, grid_row_bg);
 
-            // Grid column boundaries
-            for (int s = 0; s < piano_roll_steps_; ++s) {
-                int sx = grid_x + s * step_w;
-                RECT step_box_rc{sx, ry, sx + step_w - 1, ry + row_h - 1};
-                COLORREF grid_border = (s % 4 == 0) ? RGB(55, 60, 72) : RGB(38, 42, 50);
-                GuiRenderer::draw_border(mem_dc_, step_box_rc, grid_border);
+            // Column Lines
+            for (int col = 0; col < piano_roll_steps_; ++col) {
+                int cx = static_cast<int>(lay.grid_x + col * lay.step_w);
+                int abs_s = piano_roll_scroll_step_ + col;
+                COLORREF grid_border = (abs_s % 16 == 0) ? RGB(65, 75, 90) : ((abs_s % 4 == 0) ? RGB(45, 52, 65) : RGB(28, 34, 42));
+                RECT cell_rc{cx, ry, static_cast<int>(cx + lay.step_w), static_cast<int>(ry + lay.row_h)};
+                GuiRenderer::draw_border(mem_dc_, cell_rc, grid_border);
             }
         }
 
-        // 5. Vertical Scrollbar for full C0..B10 Pitch Range
-        int scroll_x = grid_x + piano_roll_steps_ * step_w + 5;
-        int track_h = num_pitches * row_h;
-        RECT scroll_track_rc{scroll_x, grid_top, scroll_x + 14, grid_top + track_h};
-        GuiRenderer::draw_rounded_box(mem_dc_, scroll_track_rc, RGB(22, 25, 32), RGB(42, 46, 58), 2);
-
-        int max_base_pitch = 128 - num_pitches;
-        int thumb_h = std::max(20, static_cast<int>((float(num_pitches) / 128.0f) * track_h));
-        float scroll_ratio = float(max_base_pitch - piano_roll_base_pitch_) / float(max_base_pitch);
-        int thumb_y = grid_top + static_cast<int>(scroll_ratio * (track_h - thumb_h));
-        RECT thumb_rc{scroll_x + 1, thumb_y, scroll_x + 13, thumb_y + thumb_h};
-        GuiRenderer::draw_rounded_box(mem_dc_, thumb_rc, t.accent_orange, RGB(255, 190, 60), 3);
-
-        // 6. Draw Existing Notes for this Channel
+        // 4. Draw Active Notes
         if (pat) {
             auto* note_set = pat->get_channel_notes(piano_roll_channel_);
             if (note_set) {
+                int min_vis_p = piano_roll_base_pitch_;
+                int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+                domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+                domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+
                 for (const auto& n : note_set->notes()) {
-                    if (n.pitch >= piano_roll_base_pitch_ &&
-                        n.pitch < piano_roll_base_pitch_ + num_pitches) {
-                        int r = (piano_roll_base_pitch_ + num_pitches - 1) - n.pitch;
-                        int ny = grid_top + r * row_h + 1;
+                    if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
+                    domain::Tick note_end = n.start + n.length;
+                    if (note_end <= view_start_tick || n.start >= view_end_tick) continue;
 
-                        float s_start = float(n.start) / float(step_ticks);
-                        float s_len = float(n.length) / float(step_ticks);
-                        if (s_start < float(piano_roll_steps_)) {
-                            int nx = grid_x + static_cast<int>(s_start * step_w) + 1;
-                            int nw = std::max(8, static_cast<int>(s_len * step_w) - 2);
+                    int r = max_vis_p - n.pitch;
+                    int ny = static_cast<int>(lay.grid_top + r * lay.row_h + 1);
 
-                            RECT note_rc{nx, ny, nx + nw, ny + row_h - 3};
+                    float rel_start = float(n.start - view_start_tick) / float(step_ticks);
+                    float rel_len = float(n.length) / float(step_ticks);
+                    int nx = static_cast<int>(lay.grid_x + rel_start * lay.step_w + 1);
+                    int nw = std::max(6, static_cast<int>(rel_len * lay.step_w - 2));
 
-                            bool is_resizing_this = (resizing_note_ && n.start == resize_note_start_ && n.pitch == resize_note_pitch_);
-                            COLORREF border_col = is_resizing_this ? RGB(0, 255, 255) : RGB(255, 255, 220);
-                            COLORREF fill_col = is_resizing_this ? RGB(255, 175, 40) : t.step_on;
+                    RECT note_rc{nx, ny, nx + nw, static_cast<int>(ny + lay.row_h - 2)};
+                    bool is_dragged = (note_drag_mode_ != NoteDragMode::None &&
+                                       drag_note_cur_start_ == n.start &&
+                                       drag_note_cur_pitch_ == n.pitch);
+                    COLORREF fill_col = is_dragged ? RGB(255, 175, 40) : t.step_on;
+                    COLORREF border_col = is_dragged ? RGB(255, 255, 255) : RGB(255, 220, 100);
 
-                            GuiRenderer::draw_rounded_box(mem_dc_, note_rc, fill_col, border_col, 3);
+                    GuiRenderer::draw_rounded_box(mem_dc_, note_rc, fill_col, border_col, 3);
 
-                            // Resize Grip Handle on right edge of note
-                            int handle_w = std::min(10, nw / 3);
-                            if (handle_w >= 4) {
-                                RECT handle_rc{nx + nw - handle_w, ny + 1, nx + nw - 1, ny + row_h - 4};
-                                GuiRenderer::fill_rect(mem_dc_, handle_rc, is_resizing_this ? RGB(255, 255, 255) : RGB(240, 140, 20));
-                                HPEN gPen = CreatePen(PS_SOLID, 1, RGB(50, 50, 50));
-                                HGDIOBJ oldPen = SelectObject(mem_dc_, gPen);
-                                MoveToEx(mem_dc_, nx + nw - handle_w / 2, ny + 2, NULL);
-                                LineTo(mem_dc_, nx + nw - handle_w / 2, ny + row_h - 5);
-                                SelectObject(mem_dc_, oldPen);
-                                DeleteObject(gPen);
-                            }
+                    // Resize Grip Handle on right edge of note
+                    int handle_w = std::min(10, nw / 3);
+                    if (handle_w >= 4) {
+                        RECT handle_rc{nx + nw - handle_w, ny + 1, nx + nw - 1, static_cast<int>(ny + lay.row_h - 3)};
+                        GuiRenderer::fill_rect(mem_dc_, handle_rc, RGB(220, 130, 20));
+                    }
 
-                            // Note label inside note block
-                            if (nw >= 26) {
-                                SelectObject(mem_dc_, font_small_);
-                                std::string n_txt = get_midi_note_name(n.pitch);
-                                if (s_len > 1.05f) {
-                                    int steps = static_cast<int>(std::round(s_len));
-                                    n_txt += " (" + std::to_string(steps) + ")";
-                                }
-                                RECT lbl_rc{nx + 2, ny, nx + nw - handle_w, ny + row_h - 3};
-                                GuiRenderer::draw_text(mem_dc_, n_txt, lbl_rc,
-                                                      RGB(20, 20, 20), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                            }
-                        }
+                    // Note label inside note block
+                    if (nw >= 24) {
+                        SelectObject(mem_dc_, font_small_);
+                        std::string n_txt = get_midi_note_name(n.pitch);
+                        int dur_steps = std::max(1, static_cast<int>(n.length / step_ticks));
+                        if (dur_steps > 1) n_txt += " (" + std::to_string(dur_steps) + ")";
+                        RECT lbl_rc{nx + 2, ny, nx + nw - handle_w, static_cast<int>(ny + lay.row_h - 2)};
+                        GuiRenderer::draw_text(mem_dc_, n_txt, lbl_rc, RGB(20, 20, 20), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     }
                 }
             }
         }
 
-        // 7. Draw Downward-Pointing Triangle SPM & Playhead Indicator across all rows
-        int spm_x = grid_x + spm_step * step_w + step_w / 2;
-        int grid_actual_bottom = grid_top + num_pitches * row_h;
-
-        if (!engine_.transport().is_playing()) {
-            GuiRenderer::draw_playhead(mem_dc_, spm_x, ruler_y - 2, grid_actual_bottom, t.accent_orange, "SPM ▼");
-        } else {
-            GuiRenderer::draw_playhead(mem_dc_, spm_x, ruler_y - 2, grid_actual_bottom, RGB(180, 100, 10), "SPM");
-
-            auto tick = engine_.transport().current_tick();
-            float fractional_step = float(tick % (step_ticks * piano_roll_steps_)) / float(step_ticks);
-            int playhead_x = grid_x + static_cast<int>(fractional_step * step_w) + step_w / 2;
-            GuiRenderer::draw_playhead(mem_dc_, playhead_x, ruler_y - 2, grid_actual_bottom, RGB(0, 230, 255), "▶");
+        // 5. Playhead & SPM
+        auto cur_tick = engine_.transport().is_playing() ? engine_.transport().current_tick() : song_position_marker_;
+        domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+        domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+        if (cur_tick >= view_start_tick && cur_tick <= view_end_tick) {
+            float head_col = float(cur_tick - view_start_tick) / float(step_ticks);
+            int head_x = static_cast<int>(lay.grid_x + head_col * lay.step_w);
+            GuiRenderer::draw_playhead(mem_dc_, head_x, static_cast<int>(lay.ruler_y), static_cast<int>(lay.grid_bottom), RGB(175, 225, 90), "SPM");
         }
+
+        // 6. Vertical Scrollbar (Pitch Up / Down)
+        RECT v_track_rc{static_cast<int>(lay.v_scroll_x), static_cast<int>(lay.grid_top),
+                        static_cast<int>(lay.v_scroll_x + lay.v_scroll_w), static_cast<int>(lay.grid_bottom)};
+        GuiRenderer::draw_rounded_box(mem_dc_, v_track_rc, RGB(16, 20, 26), RGB(40, 48, 60), 2);
+
+        float v_thumb_h = std::max(28.0f, (float(PianoRollNumPitches) / 128.0f) * lay.grid_h);
+        float p_ratio = (max_base_pitch > 0) ? (float(max_base_pitch - piano_roll_base_pitch_) / float(max_base_pitch)) : 0.0f;
+        float v_thumb_y = lay.grid_top + p_ratio * (lay.grid_h - v_thumb_h);
+        RECT v_thumb_rc{static_cast<int>(lay.v_scroll_x + 1), static_cast<int>(v_thumb_y),
+                        static_cast<int>(lay.v_scroll_x + lay.v_scroll_w - 1), static_cast<int>(v_thumb_y + v_thumb_h)};
+        COLORREF v_thumb_col = dragging_piano_v_scrollbar_ ? RGB(255, 180, 40) : RGB(0, 200, 230);
+        GuiRenderer::draw_rounded_box(mem_dc_, v_thumb_rc, v_thumb_col, RGB(255, 220, 100), 2);
+
+        // 7. Horizontal Scrollbar (Timeline Left / Right)
+        int max_steps = get_max_piano_roll_steps();
+        int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
+        RECT h_track_rc{static_cast<int>(lay.grid_x), static_cast<int>(lay.h_scroll_y),
+                        static_cast<int>(lay.grid_x + lay.grid_w), static_cast<int>(lay.h_scroll_y + lay.h_scroll_h)};
+        GuiRenderer::draw_rounded_box(mem_dc_, h_track_rc, RGB(16, 20, 26), RGB(40, 48, 60), 2);
+
+        float h_thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
+        float s_ratio = (max_scroll_step > 0) ? (float(piano_roll_scroll_step_) / float(max_scroll_step)) : 0.0f;
+        float h_thumb_x = lay.grid_x + s_ratio * (lay.grid_w - h_thumb_w);
+        RECT h_thumb_rc{static_cast<int>(h_thumb_x), static_cast<int>(lay.h_scroll_y + 1),
+                        static_cast<int>(h_thumb_x + h_thumb_w), static_cast<int>(lay.h_scroll_y + lay.h_scroll_h - 1)};
+        COLORREF h_thumb_col = dragging_piano_h_scrollbar_ ? RGB(255, 180, 40) : t.accent_orange;
+        GuiRenderer::draw_rounded_box(mem_dc_, h_thumb_rc, h_thumb_col, RGB(255, 200, 70), 2);
     }
 
     void render_mixer_panel() {
@@ -2222,54 +2445,54 @@ private:
         }
 
         // B. Top Transport Bar
-        // 1. PLAY Button
-        if (x >= 215 && x <= 285 && y >= 12 && y <= 48) {
+        // 1. PLAY Button [▶]
+        if (x >= 215 && x <= 255 && y >= 12 && y <= 48) {
             start_playback_from_spm();
             return;
         }
 
-        // 2. PAUSE Button
-        if (x >= 292 && x <= 362 && y >= 12 && y <= 48) {
+        // 2. PAUSE Button [❚❚]
+        if (x >= 260 && x <= 300 && y >= 12 && y <= 48) {
             pause_playback();
             return;
         }
 
-        // 3. STOP Button
-        if (x >= 369 && x <= 434 && y >= 12 && y <= 48) {
+        // 3. STOP Button [■]
+        if (x >= 305 && x <= 345 && y >= 12 && y <= 48) {
             stop_playback();
             return;
         }
 
         // 4. Tempo - / +
-        if (x >= 445 && x <= 470 && y >= 15 && y <= 45) {
+        if (x >= 355 && x <= 382 && y >= 14 && y <= 46) {
             double bpm = engine_.session().project().time_map().get_bpm_at(0);
             engine_.session().project().time_map().set_tempo(std::max(20.0, bpm - 1.0));
             return;
         }
-        if (x >= 570 && x <= 595 && y >= 15 && y <= 45) {
+        if (x >= 477 && x <= 504 && y >= 14 && y <= 46) {
             double bpm = engine_.session().project().time_map().get_bpm_at(0);
             engine_.session().project().time_map().set_tempo(std::min(999.0, bpm + 1.0));
             return;
         }
 
-        // 5. View Mode Switcher: [ 🎛 RACK ] / [ 🎹 PIANO ROLL ]
-        if (x >= 775 && x <= 865 && y >= 15 && y <= 45) {
+        // 5. View Mode Switcher: [ 🎛 ] / [ 🎹 ]
+        if (x >= 675 && x <= 715 && y >= 12 && y <= 48) {
             view_mode_ = ViewMode::ChannelRack;
             status_message_ = "Switched to Channel Rack View (F6)";
             return;
         }
-        if (x >= 875 && x <= 985 && y >= 15 && y <= 45) {
+        if (x >= 720 && x <= 760 && y >= 12 && y <= 48) {
             view_mode_ = ViewMode::PianoRoll;
             status_message_ = "Switched to Piano Roll View (F7)";
             return;
         }
 
-        // 6. Save & Export WAV buttons
-        if (x >= client_w_ - 210 && x <= client_w_ - 115 && y >= 15 && y <= 45) {
+        // 6. Save & Export WAV buttons: [ 💾 ] / [ 💿 ]
+        if (x >= client_w_ - 95 && x <= client_w_ - 55 && y >= 12 && y <= 48) {
             save_project();
             return;
         }
-        if (x >= client_w_ - 105 && x <= client_w_ - 15 && y >= 15 && y <= 45) {
+        if (x >= client_w_ - 50 && x <= client_w_ - 10 && y >= 12 && y <= 48) {
             render_wav();
             return;
         }
@@ -2485,200 +2708,208 @@ private:
 
     void handle_piano_roll_click(int x, int y) {
         std::lock_guard<std::mutex> lock(engine_.audio_mutex());
-        int rack_top = 70;
-        int rack_bottom = client_h_ - 225;
+        PianoRollLayout lay;
+        lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+        auto ppq = engine_.session().project().time_map().ppq();
+        auto step_ticks = ppq / 4;
+        int max_base_pitch = 128 - PianoRollNumPitches;
+        int max_steps = get_max_piano_roll_steps();
+        int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
 
-        // 1. Toolbar buttons
-        // Back to Rack
-        if (x >= 235 && x <= 345 && y >= rack_top + 5 && y <= rack_top + 29) {
-            view_mode_ = ViewMode::ChannelRack;
-            status_message_ = "Returned to Channel Rack View (F6)";
-            return;
-        }
+        // 1. Toolbar clicks
+        if (float(y) >= lay.toolbar_y && float(y) <= lay.toolbar_y + lay.toolbar_h) {
+            // [ 🎛 Back to Rack ]
+            if (x >= 25 && x <= 150) {
+                view_mode_ = ViewMode::ChannelRack;
+                status_message_ = "Returned to Channel Rack View (F6)";
+                return;
+            }
+            // [ 16 Steps / 32 Steps ]
+            if (x >= 388 && x <= 470) {
+                piano_roll_steps_ = (piano_roll_steps_ == 16) ? 32 : 16;
+                status_message_ = "Grid resolution set to " + std::to_string(piano_roll_steps_) + " Steps";
+                return;
+            }
+            // [ 📏 Len: X ]
+            if (x >= 478 && x <= 580) {
+                if (piano_roll_note_len_steps_ == 1) piano_roll_note_len_steps_ = 2;
+                else if (piano_roll_note_len_steps_ == 2) piano_roll_note_len_steps_ = 4;
+                else if (piano_roll_note_len_steps_ == 4) piano_roll_note_len_steps_ = 8;
+                else piano_roll_note_len_steps_ = 1;
 
-        int num_pitches = PianoRollNumPitches;
-        int max_base_pitch = 128 - num_pitches;
-
-        // Octave Down (-12)
-        if (x >= 355 && x <= 425 && y >= rack_top + 5 && y <= rack_top + 29) {
-            piano_roll_base_pitch_ = std::max(0, piano_roll_base_pitch_ - 12);
-            status_message_ = "Octave shifted down: " + get_midi_note_name(piano_roll_base_pitch_) +
-                              " to " + get_midi_note_name(piano_roll_base_pitch_ + num_pitches - 1);
-            return;
-        }
-
-        // Semitone Down (-1)
-        if (x >= 430 && x <= 465 && y >= rack_top + 5 && y <= rack_top + 29) {
-            piano_roll_base_pitch_ = std::max(0, piano_roll_base_pitch_ - 1);
-            status_message_ = "Pitch shifted down: " + get_midi_note_name(piano_roll_base_pitch_) +
-                              " to " + get_midi_note_name(piano_roll_base_pitch_ + num_pitches - 1);
-            return;
-        }
-
-        // Semitone Up (+1)
-        if (x >= 620 && x <= 655 && y >= rack_top + 5 && y <= rack_top + 29) {
-            piano_roll_base_pitch_ = std::min(max_base_pitch, piano_roll_base_pitch_ + 1);
-            status_message_ = "Pitch shifted up: " + get_midi_note_name(piano_roll_base_pitch_) +
-                              " to " + get_midi_note_name(piano_roll_base_pitch_ + num_pitches - 1);
-            return;
-        }
-
-        // Octave Up (+12)
-        if (x >= 660 && x <= 730 && y >= rack_top + 5 && y <= rack_top + 29) {
-            piano_roll_base_pitch_ = std::min(max_base_pitch, piano_roll_base_pitch_ + 12);
-            status_message_ = "Octave shifted up: " + get_midi_note_name(piano_roll_base_pitch_) +
-                              " to " + get_midi_note_name(piano_roll_base_pitch_ + num_pitches - 1);
-            return;
-        }
-
-        // Steps Toggle (16 or 32)
-        if (x >= 740 && x <= 825 && y >= rack_top + 5 && y <= rack_top + 29) {
-            piano_roll_steps_ = (piano_roll_steps_ == 16) ? 32 : 16;
-            status_message_ = "Grid resolution set to " + std::to_string(piano_roll_steps_) + " Steps";
-            return;
-        }
-
-        // Note Length Toggle (1 -> 2 -> 4 -> 8 -> 1)
-        if (x >= 835 && x <= 930 && y >= rack_top + 5 && y <= rack_top + 29) {
-            if (piano_roll_note_len_steps_ == 1) piano_roll_note_len_steps_ = 2;
-            else if (piano_roll_note_len_steps_ == 2) piano_roll_note_len_steps_ = 4;
-            else if (piano_roll_note_len_steps_ == 4) piano_roll_note_len_steps_ = 8;
-            else piano_roll_note_len_steps_ = 1;
-
-            status_message_ = "Default Note Length set to " + std::to_string(piano_roll_note_len_steps_) +
-                              " Steps (" + std::to_string(piano_roll_note_len_steps_ * 240) + " Ticks)";
-            return;
-        }
-
-        // Clear Notes
-        if (x >= 940 && x <= 1005 && y >= rack_top + 5 && y <= rack_top + 29) {
-            auto& proj = engine_.session().project();
-            auto* pat = proj.get_pattern(1);
-            if (pat) {
-                auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
-                notes.clear();
-                status_message_ = "Cleared all notes in Piano Roll";
+                status_message_ = "Default Note Length set to " + std::to_string(piano_roll_note_len_steps_) + " Steps";
+                return;
+            }
+            // [ Clear ]
+            if (x >= 588 && x <= 650) {
+                auto& proj = engine_.session().project();
+                auto* pat = proj.get_pattern(1);
+                if (pat) {
+                    auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
+                    notes.clear();
+                    status_message_ = "Cleared all notes in Piano Roll";
+                }
+                return;
             }
             return;
         }
 
-        // 2. Geometry
-        int ruler_y = rack_top + 34;
-        int grid_top = ruler_y + 22;
-        int grid_bottom = rack_bottom - 10;
-        int grid_h = grid_bottom - grid_top;
+        // 2. Vertical Scrollbar (Pitch Up / Down across full 128 semitones)
+        if (float(x) >= lay.v_scroll_x && float(x) <= lay.v_scroll_x + lay.v_scroll_w &&
+            float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+            float thumb_h = std::max(28.0f, (float(PianoRollNumPitches) / 128.0f) * lay.grid_h);
+            float p_ratio = (max_base_pitch > 0) ? (float(max_base_pitch - piano_roll_base_pitch_) / float(max_base_pitch)) : 0.0f;
+            float thumb_y = lay.grid_top + p_ratio * (lay.grid_h - thumb_h);
 
-        int piano_x = 25;
-        int piano_w = 68;
-        int grid_x = piano_x + piano_w + 4;
-        int grid_w = (client_w_ - 45) - grid_x;
+            if (float(y) >= thumb_y && float(y) <= thumb_y + thumb_h) {
+                // Clicked on thumb -> engage vertical dragging
+                dragging_piano_v_scrollbar_ = true;
+                drag_piano_v_scroll_start_y_ = float(y);
+                drag_piano_v_scroll_orig_pitch_ = piano_roll_base_pitch_;
+            } else if (float(y) < thumb_y) {
+                // Page up (higher pitch by 1 octave)
+                piano_roll_base_pitch_ = std::min(max_base_pitch, piano_roll_base_pitch_ + 12);
+            } else {
+                // Page down (lower pitch by 1 octave)
+                piano_roll_base_pitch_ = std::max(0, piano_roll_base_pitch_ - 12);
+            }
+            status_message_ = "Pitch Range: " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                              " to " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
+            return;
+        }
 
-        int row_h = std::max(12, grid_h / num_pitches);
-        int step_w = std::max(16, grid_w / piano_roll_steps_);
-        auto ppq = engine_.session().project().time_map().ppq();
-        auto step_ticks = ppq / 4;
+        // 3. Horizontal Scrollbar (Timeline Left / Right)
+        if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+            float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_y + lay.h_scroll_h) {
+            float thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
+            float s_ratio = (max_scroll_step > 0) ? (float(piano_roll_scroll_step_) / float(max_scroll_step)) : 0.0f;
+            float thumb_x = lay.grid_x + s_ratio * (lay.grid_w - thumb_w);
 
-        // 3. Vertical Scrollbar Click (Covering C0 to B10)
-        int scroll_x = grid_x + piano_roll_steps_ * step_w + 5;
-        int track_h = num_pitches * row_h;
-        if (x >= scroll_x && x <= scroll_x + 16 && y >= grid_top && y <= grid_top + track_h) {
-            float ratio = float(y - grid_top) / float(track_h);
-            piano_roll_base_pitch_ = std::clamp(static_cast<int>((1.0f - ratio) * max_base_pitch), 0, max_base_pitch);
-            status_message_ = "Piano Roll Range: " + get_midi_note_name(piano_roll_base_pitch_) +
-                              " to " + get_midi_note_name(piano_roll_base_pitch_ + num_pitches - 1);
+            if (float(x) >= thumb_x && float(x) <= thumb_x + thumb_w) {
+                // Clicked on thumb -> engage horizontal dragging
+                dragging_piano_h_scrollbar_ = true;
+                drag_piano_h_scroll_start_x_ = float(x);
+                drag_piano_h_scroll_orig_step_ = piano_roll_scroll_step_;
+            } else if (float(x) < thumb_x) {
+                // Page left by 16 steps (1 bar)
+                piano_roll_scroll_step_ = std::max(0, piano_roll_scroll_step_ - 16);
+            } else {
+                // Page right by 16 steps (1 bar)
+                piano_roll_scroll_step_ = std::min(max_scroll_step, piano_roll_scroll_step_ + 16);
+            }
+            status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
             return;
         }
 
         // 4. Ruler SPM Click
-        if (x >= grid_x && x <= grid_x + piano_roll_steps_ * step_w && y >= ruler_y - 8 && y <= ruler_y + 20) {
+        if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+            float(y) >= lay.ruler_y && float(y) <= lay.ruler_y + lay.ruler_h) {
             dragging_spm_ = true;
-            int s = std::clamp((x - grid_x) / step_w, 0, piano_roll_steps_ - 1);
-            song_position_marker_ = s * step_ticks;
+            int rel_step = std::clamp(static_cast<int>((float(x) - lay.grid_x) / lay.step_w), 0, piano_roll_steps_ - 1);
+            int abs_step = piano_roll_scroll_step_ + rel_step;
+            song_position_marker_ = abs_step * step_ticks;
             engine_.transport().seek(song_position_marker_);
-            status_message_ = "Piano Roll SPM set to Step " + std::to_string(s + 1) +
-                              " (Tick " + std::to_string(song_position_marker_) + ")";
+            status_message_ = "SPM set to Step " + std::to_string(abs_step + 1);
             return;
         }
 
-        // 5. Piano Key Clicks (Audition sound across full C0..B10 range)
-        if (x >= piano_x && x <= piano_x + piano_w && y >= grid_top && y <= grid_top + num_pitches * row_h) {
-            int r = std::clamp((y - grid_top) / row_h, 0, num_pitches - 1);
-            uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (num_pitches - 1 - r));
+        // 5. Piano Key Click (Audition Sound)
+        if (float(x) >= lay.piano_x && float(x) <= lay.piano_x + lay.piano_w &&
+            float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+            int r = std::clamp(static_cast<int>((float(y) - lay.grid_top) / lay.row_h), 0, PianoRollNumPitches - 1);
+            uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (PianoRollNumPitches - 1 - r));
             audition_note(pitch);
             status_message_ = "Auditioning " + get_midi_note_name(pitch) + " (MIDI " + std::to_string(pitch) + ")";
             return;
         }
 
-        // 6. Note Grid Click (Add / Resize / Remove Note)
-        if (x >= grid_x && x <= grid_x + piano_roll_steps_ * step_w && y >= grid_top && y <= grid_top + num_pitches * row_h) {
+        // 6. Note Grid Interaction (Add, Move, or Resize Note)
+        if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+            float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
             auto& proj = engine_.session().project();
             auto* pat = proj.get_pattern(1);
-            if (pat) {
-                auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
+            if (!pat) return;
+            auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
 
-                // Check if an existing note was clicked
-                domain::Tick hit_start = 0;
-                uint8_t hit_pitch = 0;
-                bool hit_note = false;
-                bool hit_resize_handle = false;
+            int min_vis_p = piano_roll_base_pitch_;
+            int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+            domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+            domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
 
-                for (const auto& n : notes.notes()) {
-                    if (n.pitch >= piano_roll_base_pitch_ &&
-                        n.pitch < piano_roll_base_pitch_ + num_pitches) {
-                        int r = (piano_roll_base_pitch_ + num_pitches - 1) - n.pitch;
-                        int ny = grid_top + r * row_h + 1;
-                        float s_start = float(n.start) / float(step_ticks);
-                        float s_len = float(n.length) / float(step_ticks);
-                        int nx = grid_x + static_cast<int>(s_start * step_w) + 1;
-                        int nw = std::max(8, static_cast<int>(s_len * step_w) - 2);
+            // Check if an existing note was clicked
+            bool hit_note = false;
+            domain::Note clicked_note{};
+            bool hit_resize = false;
 
-                        if (x >= nx && x <= nx + nw && y >= ny && y <= ny + row_h - 3) {
-                            hit_note = true;
-                            hit_start = n.start;
-                            hit_pitch = n.pitch;
-                            int handle_w = std::max(8, std::min(14, nw / 2));
-                            if (x >= nx + nw - handle_w) {
-                                hit_resize_handle = true;
-                            }
-                            break;
-                        }
+            for (const auto& n : notes.notes()) {
+                if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
+                domain::Tick n_end = n.start + n.length;
+                if (n_end <= view_start_tick || n.start >= view_end_tick) continue;
+
+                int r = max_vis_p - n.pitch;
+                float ny = lay.grid_top + r * lay.row_h;
+                float rel_start = float(n.start - view_start_tick) / float(step_ticks);
+                float rel_len = float(n.length) / float(step_ticks);
+                float nx = lay.grid_x + rel_start * lay.step_w;
+                float nw = std::max(6.0f, rel_len * lay.step_w);
+
+                if (float(x) >= nx && float(x) <= nx + nw && float(y) >= ny && float(y) <= ny + lay.row_h) {
+                    hit_note = true;
+                    clicked_note = n;
+                    if (float(x) >= nx + nw - 10.0f) {
+                        hit_resize = true;
                     }
+                    break;
                 }
-
-                if (hit_note) {
-                    if (hit_resize_handle) {
-                        resizing_note_ = true;
-                        resize_note_start_ = hit_start;
-                        resize_note_pitch_ = hit_pitch;
-                        resize_start_x_ = x;
-                        status_message_ = "Resizing note " + get_midi_note_name(hit_pitch) +
-                                          " (Drag mouse rightward to lengthen)";
-                    } else {
-                        notes.remove_note(hit_start, hit_pitch);
-                        status_message_ = "Removed note " + get_midi_note_name(hit_pitch);
-                    }
-                    return;
-                }
-
-                // Add new note with length = piano_roll_note_len_steps_
-                int s = std::clamp((x - grid_x) / step_w, 0, piano_roll_steps_ - 1);
-                int r = std::clamp((y - grid_top) / row_h, 0, num_pitches - 1);
-                uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (num_pitches - 1 - r));
-                domain::Tick note_start = s * step_ticks;
-                domain::Tick note_len = piano_roll_note_len_steps_ * step_ticks;
-
-                notes.add_note(domain::Note{note_start, note_len, pitch, 100, 0, 0});
-                audition_note(pitch);
-
-                // Enable drag-resizing immediately
-                resizing_note_ = true;
-                resize_note_start_ = note_start;
-                resize_note_pitch_ = pitch;
-                resize_start_x_ = x;
-
-                status_message_ = "Added " + get_midi_note_name(pitch) + " (" +
-                                  std::to_string(piano_roll_note_len_steps_) + " Steps). Drag right to lengthen!";
             }
+
+            if (hit_note) {
+                if (hit_resize) {
+                    note_drag_mode_ = NoteDragMode::Resize;
+                    drag_note_orig_start_ = clicked_note.start;
+                    drag_note_orig_pitch_ = clicked_note.pitch;
+                    drag_note_cur_start_ = clicked_note.start;
+                    drag_note_cur_pitch_ = clicked_note.pitch;
+                    drag_note_orig_len_ = clicked_note.length;
+                    drag_note_start_mouse_x_ = x;
+                    drag_note_start_mouse_y_ = y;
+                    status_message_ = "Resizing note " + get_midi_note_name(clicked_note.pitch) + " (Drag right/left to adjust length)";
+                } else {
+                    note_drag_mode_ = NoteDragMode::Move;
+                    drag_note_orig_start_ = clicked_note.start;
+                    drag_note_orig_pitch_ = clicked_note.pitch;
+                    drag_note_cur_start_ = clicked_note.start;
+                    drag_note_cur_pitch_ = clicked_note.pitch;
+                    drag_note_orig_len_ = clicked_note.length;
+                    drag_note_start_mouse_x_ = x;
+                    drag_note_start_mouse_y_ = y;
+                    audition_note(clicked_note.pitch);
+                    status_message_ = "Moving note " + get_midi_note_name(clicked_note.pitch) + " (Drag across grid to move/pitch)";
+                }
+                return;
+            }
+
+            // Clicked empty space -> Add new note at clicked pitch and step!
+            int rel_step = std::clamp(static_cast<int>((float(x) - lay.grid_x) / lay.step_w), 0, piano_roll_steps_ - 1);
+            int r = std::clamp(static_cast<int>((float(y) - lay.grid_top) / lay.row_h), 0, PianoRollNumPitches - 1);
+            uint8_t pitch = static_cast<uint8_t>(piano_roll_base_pitch_ + (PianoRollNumPitches - 1 - r));
+            domain::Tick note_start = (piano_roll_scroll_step_ + rel_step) * step_ticks;
+            domain::Tick note_len = piano_roll_note_len_steps_ * step_ticks;
+
+            notes.add_note(domain::Note{note_start, note_len, pitch, 100, 0, 0});
+            audition_note(pitch);
+
+            // Immediately engage resize so user can lengthen note if desired
+            note_drag_mode_ = NoteDragMode::Resize;
+            drag_note_orig_start_ = note_start;
+            drag_note_orig_pitch_ = pitch;
+            drag_note_cur_start_ = note_start;
+            drag_note_cur_pitch_ = pitch;
+            drag_note_orig_len_ = note_len;
+            drag_note_start_mouse_x_ = x;
+            drag_note_start_mouse_y_ = y;
+
+            status_message_ = "Added " + get_midi_note_name(pitch) + " (" + std::to_string(piano_roll_note_len_steps_) + " Steps). Drag edge to lengthen!";
             return;
         }
     }
@@ -2723,93 +2954,160 @@ private:
     }
 
     void on_passive_mouse_move(int x, int y) {
-        int rack_top = 70;
-        int ruler_y = rack_top + 32;
-        int ruler_h = 24;
-        int ch_y = ruler_y + ruler_h + 4;
-        int step_h = 52;
-        int start_x = 265;
-        int bars_per_view = get_bars_per_view();
-        int total_seq_w = (client_w_ - 25) - start_x;
-        auto ppq = engine_.session().project().time_map().ppq();
-        auto bar_ticks = 4 * ppq;
-        domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
-        domain::Tick view_duration = bars_per_view * bar_ticks;
-        domain::Tick view_end_tick = view_start_tick + view_duration;
-        auto& proj = engine_.session().project();
+        if (view_mode_ == ViewMode::ChannelRack) {
+            int rack_top = 70;
+            int ruler_y = rack_top + 32;
+            int ruler_h = 24;
+            int ch_y = ruler_y + ruler_h + 4;
+            int step_h = 52;
+            int start_x = 265;
+            int bars_per_view = get_bars_per_view();
+            int total_seq_w = (client_w_ - 25) - start_x;
+            auto ppq = engine_.session().project().time_map().ppq();
+            auto bar_ticks = 4 * ppq;
+            domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
+            domain::Tick view_duration = bars_per_view * bar_ticks;
+            domain::Tick view_end_tick = view_start_tick + view_duration;
+            auto& proj = engine_.session().project();
 
-        bool hovering_edge = false;
-        for (size_t ch_idx = 0; ch_idx < proj.channels().size(); ++ch_idx) {
-            if (ch_idx < proj.tracks().size() && y >= ch_y && y <= ch_y + step_h && x >= start_x) {
-                const auto& track = proj.tracks()[ch_idx];
-                for (const auto& clip : track.clips()) {
-                    if (clip.end() <= view_start_tick || clip.start >= view_end_tick) continue;
-                    double norm_start = double(clip.start - view_start_tick) / double(view_duration);
-                    double norm_len = double(clip.length) / double(view_duration);
-                    int cx = start_x + static_cast<int>(norm_start * total_seq_w);
-                    int cw = std::max(16, static_cast<int>(norm_len * total_seq_w));
+            bool hovering_edge = false;
+            for (size_t ch_idx = 0; ch_idx < proj.channels().size(); ++ch_idx) {
+                if (ch_idx < proj.tracks().size() && y >= ch_y && y <= ch_y + step_h && x >= start_x) {
+                    const auto& track = proj.tracks()[ch_idx];
+                    for (const auto& clip : track.clips()) {
+                        if (clip.end() <= view_start_tick || clip.start >= view_end_tick) continue;
+                        double norm_start = double(clip.start - view_start_tick) / double(view_duration);
+                        double norm_len = double(clip.length) / double(view_duration);
+                        int cx = start_x + static_cast<int>(norm_start * total_seq_w);
+                        int cw = std::max(16, static_cast<int>(norm_len * total_seq_w));
 
-                    if (x >= cx + cw - 8 && x <= cx + cw + 4) {
-                        hovering_edge = true;
-                        break;
+                        if (x >= cx + cw - 8 && x <= cx + cw + 4) {
+                            hovering_edge = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+                ch_y += step_h + 4;
+            }
+
+            int rack_bottom = client_h_ - 260;
+            int scroll_y = rack_bottom - 22;
+            int scroll_h = 16;
+            is_hovering_seq_scrollbar_ = (x >= start_x && x <= start_x + total_seq_w && y >= scroll_y - 2 && y <= scroll_y + scroll_h + 2);
+
+            if (is_hovering_seq_scrollbar_) {
+                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                return;
+            }
+
+            if (is_hovering_clip_edge_ != hovering_edge) {
+                is_hovering_clip_edge_ = hovering_edge;
+                SetCursor(LoadCursor(NULL, hovering_edge ? IDC_SIZEWE : IDC_ARROW));
+            }
+        } else if (view_mode_ == ViewMode::PianoRoll) {
+            PianoRollLayout lay;
+            lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+            auto ppq = engine_.session().project().time_map().ppq();
+            auto step_ticks = ppq / 4;
+
+            is_hovering_note_edge_ = false;
+            is_hovering_note_body_ = false;
+            is_hovering_piano_v_scrollbar_ = false;
+            is_hovering_piano_h_scrollbar_ = false;
+
+            // Check vertical scrollbar hover
+            if (float(x) >= lay.v_scroll_x && float(x) <= lay.v_scroll_x + lay.v_scroll_w &&
+                float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+                is_hovering_piano_v_scrollbar_ = true;
+                SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                return;
+            }
+
+            // Check horizontal scrollbar hover
+            if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+                float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_y + lay.h_scroll_h) {
+                is_hovering_piano_h_scrollbar_ = true;
+                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                return;
+            }
+
+            // Check note body or resize edge hover
+            if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+                float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+                auto& proj = engine_.session().project();
+                auto* pat = proj.get_pattern(1);
+                if (pat) {
+                    auto* note_set = pat->get_channel_notes(piano_roll_channel_);
+                    if (note_set) {
+                        int min_vis_p = piano_roll_base_pitch_;
+                        int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+                        domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+                        domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+
+                        for (const auto& n : note_set->notes()) {
+                            if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
+                            domain::Tick n_end = n.start + n.length;
+                            if (n_end <= view_start_tick || n.start >= view_end_tick) continue;
+
+                            int r = max_vis_p - n.pitch;
+                            float ny = lay.grid_top + r * lay.row_h;
+                            float rel_start = float(n.start - view_start_tick) / float(step_ticks);
+                            float rel_len = float(n.length) / float(step_ticks);
+                            float nx = lay.grid_x + rel_start * lay.step_w;
+                            float nw = std::max(6.0f, rel_len * lay.step_w);
+
+                            if (float(x) >= nx && float(x) <= nx + nw && float(y) >= ny && float(y) <= ny + lay.row_h) {
+                                if (float(x) >= nx + nw - 10.0f) {
+                                    is_hovering_note_edge_ = true;
+                                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                                } else {
+                                    is_hovering_note_body_ = true;
+                                    SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                                }
+                                return;
+                            }
+                        }
                     }
                 }
-                break;
             }
-            ch_y += step_h + 4;
-        }
-
-        int rack_bottom = client_h_ - 260;
-        int scroll_y = rack_bottom - 22;
-        int scroll_h = 16;
-        is_hovering_seq_scrollbar_ = (x >= start_x && x <= start_x + total_seq_w && y >= scroll_y - 2 && y <= scroll_y + scroll_h + 2);
-
-        if (is_hovering_seq_scrollbar_) {
-            SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-            return;
-        }
-
-        if (is_hovering_clip_edge_ != hovering_edge) {
-            is_hovering_clip_edge_ = hovering_edge;
-            SetCursor(LoadCursor(NULL, hovering_edge ? IDC_SIZEWE : IDC_ARROW));
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
         }
     }
 
     void handle_piano_roll_right_click(int x, int y) {
-        int rack_top = 70;
-        int ruler_y = rack_top + 34;
-        int grid_top = ruler_y + 22;
-        int grid_bottom = client_h_ - 235;
-        int grid_h = grid_bottom - grid_top;
-        int piano_x = 25;
-        int piano_w = 68;
-        int grid_x = piano_x + piano_w + 4;
-        int grid_w = (client_w_ - 45) - grid_x;
-        int num_pitches = PianoRollNumPitches;
-        int row_h = std::max(12, grid_h / num_pitches);
-        int step_w = std::max(16, grid_w / piano_roll_steps_);
+        PianoRollLayout lay;
+        lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
         auto ppq = engine_.session().project().time_map().ppq();
         auto step_ticks = ppq / 4;
 
-        if (x >= grid_x && x <= grid_x + piano_roll_steps_ * step_w && y >= grid_top && y <= grid_top + num_pitches * row_h) {
+        if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+            float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
             auto& proj = engine_.session().project();
             auto* pat = proj.get_pattern(1);
             if (pat) {
                 auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
-                for (const auto& n : notes.notes()) {
-                    if (n.pitch >= piano_roll_base_pitch_ && n.pitch < piano_roll_base_pitch_ + num_pitches) {
-                        int r = (piano_roll_base_pitch_ + num_pitches - 1) - n.pitch;
-                        int ny = grid_top + r * row_h + 1;
-                        float s_start = float(n.start) / float(step_ticks);
-                        float s_len = float(n.length) / float(step_ticks);
-                        int nx = grid_x + static_cast<int>(s_start * step_w) + 1;
-                        int nw = std::max(8, static_cast<int>(s_len * step_w) - 2);
+                int min_vis_p = piano_roll_base_pitch_;
+                int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+                domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+                domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
 
-                        if (x >= nx && x <= nx + nw && y >= ny && y <= ny + row_h - 3) {
-                            notes.remove_note(n.start, n.pitch);
-                            status_message_ = "Removed note " + get_midi_note_name(n.pitch);
-                            return;
-                        }
+                for (const auto& n : notes.notes()) {
+                    if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
+                    domain::Tick n_end = n.start + n.length;
+                    if (n_end <= view_start_tick || n.start >= view_end_tick) continue;
+
+                    int r = max_vis_p - n.pitch;
+                    float ny = lay.grid_top + r * lay.row_h;
+                    float rel_start = float(n.start - view_start_tick) / float(step_ticks);
+                    float rel_len = float(n.length) / float(step_ticks);
+                    float nx = lay.grid_x + rel_start * lay.step_w;
+                    float nw = std::max(6.0f, rel_len * lay.step_w);
+
+                    if (float(x) >= nx && float(x) <= nx + nw && float(y) >= ny && float(y) <= ny + lay.row_h) {
+                        notes.remove_note(n.start, n.pitch);
+                        status_message_ = "Removed note " + get_midi_note_name(n.pitch);
+                        return;
                     }
                 }
             }
@@ -2842,6 +3140,45 @@ private:
                 if (new_bar != sequencer_scroll_bar_) {
                     sequencer_scroll_bar_ = new_bar;
                     status_message_ = "Scrolled timeline to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
+                }
+            }
+            return;
+        }
+
+        if (dragging_piano_v_scrollbar_) {
+            PianoRollLayout lay;
+            lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+            int max_base_pitch = 128 - PianoRollNumPitches;
+            float thumb_h = std::max(28.0f, (float(PianoRollNumPitches) / 128.0f) * lay.grid_h);
+            float avail_h = lay.grid_h - thumb_h;
+            if (avail_h > 0.0f) {
+                float dy = float(y) - drag_piano_v_scroll_start_y_;
+                float delta_ratio = dy / avail_h;
+                int delta_pitch = static_cast<int>(std::round(-delta_ratio * float(max_base_pitch)));
+                int new_pitch = std::clamp(drag_piano_v_scroll_orig_pitch_ + delta_pitch, 0, max_base_pitch);
+                if (new_pitch != piano_roll_base_pitch_) {
+                    piano_roll_base_pitch_ = new_pitch;
+                    status_message_ = "Pitch Range: " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                      " to " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
+                }
+            }
+            return;
+        }
+
+        if (dragging_piano_h_scrollbar_) {
+            PianoRollLayout lay;
+            lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+            int max_steps = get_max_piano_roll_steps();
+            int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
+            float thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
+            float avail_w = lay.grid_w - thumb_w;
+            if (avail_w > 0.0f) {
+                float dx = float(x) - drag_piano_h_scroll_start_x_;
+                float delta_steps = (dx / avail_w) * float(max_scroll_step);
+                int new_step = std::clamp(drag_piano_h_scroll_orig_step_ + static_cast<int>(std::round(delta_steps)), 0, max_scroll_step);
+                if (new_step != piano_roll_scroll_step_) {
+                    piano_roll_scroll_step_ = new_step;
+                    status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
                 }
             }
             return;
@@ -2913,28 +3250,61 @@ private:
             return;
         }
 
-        if (resizing_note_) {
-            int piano_w = 68;
-            int grid_x = 25 + piano_w + 4;
-            int grid_w = (client_w_ - 45) - grid_x;
-            int step_w = std::max(16, grid_w / piano_roll_steps_);
+        if (note_drag_mode_ == NoteDragMode::Resize) {
+            PianoRollLayout lay;
+            lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
             auto ppq = engine_.session().project().time_map().ppq();
             auto step_ticks = ppq / 4;
 
-            int start_step = static_cast<int>(resize_note_start_ / step_ticks);
-            int current_step = std::clamp((x - grid_x) / step_w, 0, piano_roll_steps_ - 1);
-
-            int new_steps = std::max(1, current_step - start_step + 1);
-            domain::Tick new_length = new_steps * step_ticks;
+            int dx = x - drag_note_start_mouse_x_;
+            int delta_steps = static_cast<int>(std::round(float(dx) / lay.step_w));
+            int orig_steps = std::max(1, static_cast<int>(drag_note_orig_len_ / step_ticks));
+            int new_steps = std::max(1, orig_steps + delta_steps);
+            domain::Tick new_len = new_steps * step_ticks;
 
             auto& proj = engine_.session().project();
             auto* pat = proj.get_pattern(1);
             if (pat) {
                 auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
-                notes.set_note_length(resize_note_start_, resize_note_pitch_, new_length);
-                status_message_ = "Note " + get_midi_note_name(resize_note_pitch_) +
+                notes.set_note_length(drag_note_cur_start_, drag_note_cur_pitch_, new_len);
+                status_message_ = "Note " + get_midi_note_name(drag_note_cur_pitch_) +
                                   " Length: " + std::to_string(new_steps) + " Steps (" +
-                                  std::to_string(new_length) + " Ticks)";
+                                  std::to_string(new_len) + " Ticks)";
+            }
+            return;
+        }
+
+        if (note_drag_mode_ == NoteDragMode::Move) {
+            PianoRollLayout lay;
+            lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+            auto ppq = engine_.session().project().time_map().ppq();
+            auto step_ticks = ppq / 4;
+
+            int dx = x - drag_note_start_mouse_x_;
+            int dy = y - drag_note_start_mouse_y_;
+            int delta_steps = static_cast<int>(std::round(float(dx) / lay.step_w));
+            int delta_pitch = -static_cast<int>(std::round(float(dy) / lay.row_h));
+
+            int64_t target_start_int = static_cast<int64_t>(drag_note_orig_start_) + delta_steps * step_ticks;
+            domain::Tick target_start = std::max(domain::Tick(0), static_cast<domain::Tick>(target_start_int));
+            int target_pitch_int = std::clamp(static_cast<int>(drag_note_orig_pitch_) + delta_pitch, 0, 127);
+            uint8_t target_pitch = static_cast<uint8_t>(target_pitch_int);
+
+            if (target_start != drag_note_cur_start_ || target_pitch != drag_note_cur_pitch_) {
+                auto& proj = engine_.session().project();
+                auto* pat = proj.get_pattern(1);
+                if (pat) {
+                    auto& notes = pat->get_or_create_channel_notes(piano_roll_channel_);
+                    if (notes.move_note(drag_note_cur_start_, drag_note_cur_pitch_, target_start, target_pitch)) {
+                        if (target_pitch != drag_note_cur_pitch_) {
+                            audition_note(target_pitch);
+                        }
+                        drag_note_cur_start_ = target_start;
+                        drag_note_cur_pitch_ = target_pitch;
+                        int s_num = static_cast<int>(target_start / step_ticks) + 1;
+                        status_message_ = "Moved note to " + get_midi_note_name(target_pitch) + " (Step " + std::to_string(s_num) + ")";
+                    }
+                }
             }
             return;
         }
@@ -2959,13 +3329,12 @@ private:
                 int bt_num = static_cast<int>((song_position_marker_ % bar_ticks) / beat_ticks) + 1;
                 status_message_ = "SPM dragged to Bar " + std::to_string(b_num) + " Beat " + std::to_string(bt_num);
             } else {
-                int piano_w = 68;
-                int grid_x = 25 + piano_w + 4;
-                int grid_w = (client_w_ - 45) - grid_x;
-                int step_w = std::max(16, grid_w / piano_roll_steps_);
-                int s = std::clamp((x - grid_x) / step_w, 0, piano_roll_steps_ - 1);
-                song_position_marker_ = s * step_ticks;
-                status_message_ = "SPM dragged to Step " + std::to_string(s + 1);
+                PianoRollLayout lay;
+                lay.init(client_w_, client_h_, PianoRollNumPitches, piano_roll_steps_);
+                int rel_s = std::clamp(static_cast<int>((float(x) - lay.grid_x) / lay.step_w), 0, piano_roll_steps_ - 1);
+                int abs_s = piano_roll_scroll_step_ + rel_s;
+                song_position_marker_ = abs_s * step_ticks;
+                status_message_ = "SPM dragged to Step " + std::to_string(abs_s + 1);
             }
 
             engine_.transport().seek(song_position_marker_);
@@ -3209,19 +3578,46 @@ private:
     domain::ChannelId piano_roll_channel_{1};
     int piano_roll_base_pitch_{48}; // C4 root
     static constexpr int PianoRollNumPitches = 20; // 20 semitones visible
-    int piano_roll_steps_{16}; // 16 or 32 steps
-    int piano_roll_note_len_steps_{1}; // 1, 2, 4, 8 steps
-    bool resizing_note_{false};
-    domain::Tick resize_note_start_{0};
-    uint8_t resize_note_pitch_{0};
-    int resize_start_x_{0};
+    int piano_roll_steps_{16}; // 16 or 32 steps visible
+    int piano_roll_scroll_step_{0}; // Horizontal step scroll offset
+    int piano_roll_note_len_steps_{1}; // 1, 2, 4, 8 steps default
+    bool dragging_piano_v_scrollbar_{false};
+    float drag_piano_v_scroll_start_y_{0.0f};
+    int drag_piano_v_scroll_orig_pitch_{0};
+    bool dragging_piano_h_scrollbar_{false};
+    float drag_piano_h_scroll_start_x_{0.0f};
+    int drag_piano_h_scroll_orig_step_{0};
+    bool is_hovering_piano_v_scrollbar_{false};
+    bool is_hovering_piano_h_scrollbar_{false};
+
+    // Note Interaction Drag State (Move / Resize)
+    enum class NoteDragMode {
+        None,
+        Move,
+        Resize
+    };
+    NoteDragMode note_drag_mode_{NoteDragMode::None};
+    domain::Tick drag_note_orig_start_{0};
+    uint8_t drag_note_orig_pitch_{0};
+    domain::Tick drag_note_cur_start_{0};
+    uint8_t drag_note_cur_pitch_{0};
+    domain::Tick drag_note_orig_len_{0};
+    int drag_note_start_mouse_x_{0};
+    int drag_note_start_mouse_y_{0};
+    bool is_hovering_note_edge_{false};
+    bool is_hovering_note_body_{false};
 
     // Sequencer & Mixer State
     int sequencer_scroll_bar_{0}; // Horizontal bar offset (Bar 1, Bar 5, etc.)
+    int sequencer_scroll_track_{0}; // Vertical channel track offset
     bool dragging_seq_scrollbar_{false};
     float drag_seq_scroll_start_mouse_x_{0.0f};
     int drag_seq_scroll_orig_bar_{0};
     bool is_hovering_seq_scrollbar_{false};
+    bool dragging_seq_v_scrollbar_{false};
+    float drag_seq_v_scroll_start_y_{0.0f};
+    int drag_seq_v_scroll_orig_track_{0};
+    bool is_hovering_seq_v_scrollbar_{false};
     bool is_fullscreen_{false};
     RECT saved_win_rect_{};
     DWORD saved_win_style_{0};

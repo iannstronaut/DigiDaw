@@ -55,7 +55,16 @@ public:
         return t;
     }
 
-    // 1. Smooth Anti-Aliased Rounded Box
+    // Pixel-snapping helpers for razor-sharp 1px line rendering
+    static inline float snap_pixel(float v) {
+        return std::floor(v);
+    }
+
+    static inline float snap_half_pixel(float v) {
+        return std::floor(v) + 0.5f;
+    }
+
+    // 1. Smooth Anti-Aliased Rounded Box with half-pixel border inset
     static void draw_rounded_box(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc,
                                  D2D1_COLOR_F fill_color, D2D1_COLOR_F border_color,
                                  float radius = 4.0f, float stroke_width = 1.0f) {
@@ -64,22 +73,44 @@ public:
         ID2D1SolidColorBrush* fill_brush = nullptr;
         ID2D1SolidColorBrush* border_brush = nullptr;
         rt->CreateSolidColorBrush(fill_color, &fill_brush);
-        rt->CreateSolidColorBrush(border_color, &border_brush);
-
-        D2D1_ROUNDED_RECT rrc = D2D1::RoundedRect(rc, radius, radius);
-
-        if (fill_brush) {
-            rt->FillRoundedRectangle(rrc, fill_brush);
-            fill_brush->Release();
+        if (stroke_width > 0.0f) {
+            rt->CreateSolidColorBrush(border_color, &border_brush);
         }
 
-        if (border_brush && stroke_width > 0.0f) {
-            rt->DrawRoundedRectangle(rrc, border_brush, stroke_width);
-            border_brush->Release();
+        if (radius <= 0.0f) {
+            if (fill_brush) {
+                rt->FillRectangle(rc, fill_brush);
+            }
+            if (border_brush && stroke_width > 0.0f) {
+                float half_w = stroke_width * 0.5f;
+                D2D1_RECT_F stroke_rc = D2D1::RectF(
+                    rc.left + half_w, rc.top + half_w,
+                    rc.right - half_w, rc.bottom - half_w
+                );
+                rt->DrawRectangle(stroke_rc, border_brush, stroke_width);
+            }
+        } else {
+            D2D1_ROUNDED_RECT rrc = D2D1::RoundedRect(rc, radius, radius);
+            if (fill_brush) {
+                rt->FillRoundedRectangle(rrc, fill_brush);
+            }
+            if (border_brush && stroke_width > 0.0f) {
+                float half_w = stroke_width * 0.5f;
+                D2D1_ROUNDED_RECT stroke_rrc = D2D1::RoundedRect(
+                    D2D1::RectF(rc.left + half_w, rc.top + half_w,
+                                rc.right - half_w, rc.bottom - half_w),
+                    std::max(0.0f, radius - half_w),
+                    std::max(0.0f, radius - half_w)
+                );
+                rt->DrawRoundedRectangle(stroke_rrc, border_brush, stroke_width);
+            }
         }
+
+        if (fill_brush) fill_brush->Release();
+        if (border_brush) border_brush->Release();
     }
 
-    // 2. Hardware Anti-Aliased DirectWrite Text
+    // 2. Hardware Anti-Aliased DirectWrite Text with pixel-snapped layout rect
     static void draw_text(ID2D1RenderTarget* rt, IDWriteTextFormat* format,
                           const std::string& text, const D2D1_RECT_F& rc,
                           D2D1_COLOR_F color,
@@ -91,11 +122,19 @@ public:
         format->SetTextAlignment(align_h);
         format->SetParagraphAlignment(align_v);
 
+        // Snap text layout bounds to physical pixel coordinates to eliminate fractional stem blur
+        D2D1_RECT_F snapped_rc = D2D1::RectF(
+            std::floor(rc.left),
+            std::floor(rc.top),
+            std::ceil(rc.right),
+            std::ceil(rc.bottom)
+        );
+
         ID2D1SolidColorBrush* brush = nullptr;
         rt->CreateSolidColorBrush(color, &brush);
         if (brush) {
             rt->DrawText(wtext.c_str(), static_cast<UINT32>(wtext.length()),
-                         format, rc, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                         format, snapped_rc, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
             brush->Release();
         }
     }
@@ -192,6 +231,9 @@ public:
                               D2D1_COLOR_F color, const std::string& label = "", IDWriteTextFormat* font = nullptr) {
         if (!rt) return;
 
+        // Snap center_x to whole integer for symmetric crisp 2.0px stroke
+        float snap_cx = std::round(center_x);
+
         // Downward-pointing vector triangle
         ID2D1PathGeometry* path = nullptr;
         ID2D1Factory* factory = nullptr;
@@ -202,9 +244,9 @@ public:
                 ID2D1GeometrySink* sink = nullptr;
                 path->Open(&sink);
                 if (sink) {
-                    sink->BeginFigure(D2D1::Point2F(center_x - 9.0f, top_y), D2D1_FIGURE_BEGIN_FILLED);
-                    sink->AddLine(D2D1::Point2F(center_x + 9.0f, top_y));
-                    sink->AddLine(D2D1::Point2F(center_x, top_y + 15.0f));
+                    sink->BeginFigure(D2D1::Point2F(snap_cx - 9.0f, top_y), D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(D2D1::Point2F(snap_cx + 9.0f, top_y));
+                    sink->AddLine(D2D1::Point2F(snap_cx, top_y + 15.0f));
                     sink->EndFigure(D2D1_FIGURE_END_CLOSED);
                     sink->Close();
                     sink->Release();
@@ -220,12 +262,12 @@ public:
                     if (border_br) rt->DrawGeometry(path, border_br, 1.0f);
 
                     // Vertical line descending all the way down through tracks
-                    rt->DrawLine(D2D1::Point2F(center_x, top_y + 15.0f),
-                                 D2D1::Point2F(center_x, bottom_y), br, 2.0f);
+                    rt->DrawLine(D2D1::Point2F(snap_cx, top_y + 15.0f),
+                                 D2D1::Point2F(snap_cx, bottom_y), br, 2.0f);
 
                     // Foot cap
-                    rt->DrawLine(D2D1::Point2F(center_x - 4.0f, bottom_y),
-                                 D2D1::Point2F(center_x + 4.0f, bottom_y), br, 2.0f);
+                    rt->DrawLine(D2D1::Point2F(snap_cx - 4.0f, bottom_y),
+                                 D2D1::Point2F(snap_cx + 4.0f, bottom_y), br, 2.0f);
 
                     br->Release();
                 }
@@ -237,7 +279,7 @@ public:
 
         // Optional badge above triangle
         if (!label.empty() && font) {
-            D2D1_RECT_F lbl_rc = D2D1::RectF(center_x - 30.0f, top_y - 14.0f, center_x + 30.0f, top_y);
+            D2D1_RECT_F lbl_rc = D2D1::RectF(snap_cx - 30.0f, top_y - 14.0f, snap_cx + 30.0f, top_y);
             draw_text(rt, font, label, lbl_rc, color, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }

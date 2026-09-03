@@ -65,10 +65,17 @@ public:
 
     static void draw_text(HDC hdc, const std::string& text, const RECT& rc, COLORREF color,
                           UINT format = DT_LEFT | DT_VCENTER | DT_SINGLELINE) {
+        if (text.empty()) return;
         SetTextColor(hdc, color);
         SetBkMode(hdc, TRANSPARENT);
         RECT temp_rc = rc;
-        DrawTextA(hdc, text.c_str(), -1, &temp_rc, format);
+        int len = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+        if (len > 0) {
+            std::wstring wstr(len, 0);
+            MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wstr[0], len);
+            if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
+            DrawTextW(hdc, wstr.c_str(), -1, &temp_rc, format);
+        }
     }
 
     static void draw_button(HDC hdc, const RECT& rc, const std::string& text, bool active,

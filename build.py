@@ -9,10 +9,23 @@ def main():
     bin_dir = os.path.join(root_dir, "bin")
     os.makedirs(bin_dir, exist_ok=True)
 
-    gpp = r"D:\mingw64\bin\g++.exe"
-    if not os.path.exists(gpp):
-        print(f"Error: {gpp} not found!")
-        sys.exit(1)
+    possible_gpp = [
+        r"D:\mingw64\bin\g++.exe",
+        r"C:\mingw64\bin\g++.exe",
+        r"C:\msys64\mingw64\bin\g++.exe",
+        r"C:\tools\mingw64\bin\g++.exe"
+    ]
+    gpp = None
+    for p in possible_gpp:
+        if os.path.exists(p):
+            gpp = p
+            break
+    if not gpp:
+        import shutil
+        gpp = shutil.which("g++")
+        if not gpp or not os.path.exists(gpp):
+            print("Error: g++.exe not found in MinGW directories or system PATH!")
+            sys.exit(1)
 
     print("=========================================================")
     print("  DigiDAW Build & Verification Engine                    ")
@@ -88,13 +101,42 @@ def main():
         sys.exit(res.returncode)
     print(f"[Build SUCCESS] Compiled PluginScanner.exe in {time.time() - t0:.2f}s\n")
 
+    # Ensure any running DigiDAW.exe instance is terminated before linking
+    subprocess.run("taskkill /f /im DigiDAW.exe 2>nul", shell=True)
+
     shell_sources = [
         os.path.join(root_dir, "shell", "main.cpp"),
         os.path.join(root_dir, "adapters", "c_api", "c_api_impl.cpp")
     ]
+
+    # Compile and embed Windows Resource Script (Per-Monitor V2 High-DPI Manifest & Comctl32 v6)
+    windres = os.path.join(os.path.dirname(gpp), "windres.exe")
+    resource_rc = os.path.join(root_dir, "shell", "resource.rc")
+    resource_obj = os.path.join(bin_dir, "resource.o")
+    if os.path.exists(windres) and os.path.exists(resource_rc):
+        print("[Build] Compiling Windows Resource Script & High-DPI Manifest (resource.o)...")
+        cmd_rc = [windres, "-I", os.path.join(root_dir, "shell"), "-i", resource_rc, "-o", resource_obj]
+        res_rc = subprocess.run(cmd_rc, cwd=root_dir)
+        if res_rc.returncode == 0:
+            shell_sources.append(resource_obj)
+            print("[Build SUCCESS] Embedded Per-Monitor V2 Manifest Resource directly into DigiDAW.exe")
+
+    # Deploy High-DPI Per-Monitor V2 Application Manifest next to executable
+    manifest_src = os.path.join(root_dir, "shell", "DigiDAW.manifest")
+    manifest_dst = os.path.join(bin_dir, "DigiDAW.exe.manifest")
+    if os.path.exists(manifest_src):
+        import shutil
+        shutil.copyfile(manifest_src, manifest_dst)
+        print("[Build] Deployed Per-Monitor V2 High-DPI Manifest (DigiDAW.exe.manifest)")
+
+    # Override MinGW default-manifest.o to cleanly embed our custom Per-Monitor V2 manifest without conflict
+    spec_path = os.path.join(bin_dir, "no-default-manifest.spec")
+    with open(spec_path, "w") as sf:
+        sf.write("*endfile:\n%{mdaz-ftz:crtfastmath.o%s;Ofast|ffast-math|funsafe-math-optimizations:%{!shared:%{!mno-daz-ftz:crtfastmath.o%s}}} %{fvtable-verify=none:%s; fvtable-verify=preinit:vtv_end.o%s; fvtable-verify=std:vtv_end.o%s} crtend.o%s\n")
+
     app_exe = os.path.join(bin_dir, "DigiDAW.exe")
     print("[Build] Compiling Application Shell (DigiDAW.exe)...")
-    cmd_app = [gpp] + common_flags + shell_sources + [
+    cmd_app = [gpp, f"-specs={spec_path}"] + common_flags + shell_sources + [
         "-o", app_exe,
         "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm",
         "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32"
