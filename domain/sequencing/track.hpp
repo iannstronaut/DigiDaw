@@ -52,6 +52,31 @@ public:
         }
     }
 
+    bool remove_clip_at(Tick start_tick) {
+        auto it = std::find_if(clips_.begin(), clips_.end(), [start_tick](const Clip& c) {
+            return c.start == start_tick;
+        });
+        if (it != clips_.end()) {
+            clips_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool has_clip_at(Tick start_tick) const noexcept {
+        for (const auto& c : clips_) {
+            if (c.start == start_tick) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] const Clip* get_clip_at_tick(Tick t) const noexcept {
+        for (const auto& c : clips_) {
+            if (c.contains_tick(t)) return &c;
+        }
+        return nullptr;
+    }
+
     void clear_clips() noexcept {
         clips_.clear();
     }

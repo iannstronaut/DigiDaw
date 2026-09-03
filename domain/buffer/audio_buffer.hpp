@@ -102,6 +102,10 @@ struct MidiEvent {
         return ((status & 0xF0) == 0x80) || ((status & 0xF0) == 0x90 && data2 == 0);
     }
 
+    [[nodiscard]] constexpr bool is_control_change() const noexcept {
+        return (status & 0xF0) == 0xB0;
+    }
+
     [[nodiscard]] constexpr uint8_t channel() const noexcept {
         return status & 0x0F;
     }

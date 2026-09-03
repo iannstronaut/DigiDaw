@@ -70,6 +70,8 @@ public:
                 trigger_note(ev.note_number(), static_cast<float>(ev.velocity()) / 127.0f);
             } else if (ev.is_note_off()) {
                 release_note(ev.note_number());
+            } else if (ev.is_control_change() && (ev.data1 == 120 || ev.data1 == 123)) {
+                all_notes_off();
             }
         }
 
@@ -221,6 +223,19 @@ public:
 
 private:
     void trigger_note(uint8_t note, float velocity) {
+        // If this exact note is already playing, retrigger it cleanly
+        for (auto& v : voices_) {
+            if (v.active && v.note == note) {
+                v.velocity = velocity;
+                v.stage = Voice::EnvStage::Attack;
+                v.env_val = 0.0f;
+                v.phase1 = 0.0;
+                v.phase2 = 0.0;
+                v.phase3 = 0.0;
+                return;
+            }
+        }
+
         // Find free voice or steal oldest
         Voice* chosen = nullptr;
         for (auto& v : voices_) {
@@ -235,6 +250,7 @@ private:
         chosen->note = note;
         chosen->velocity = velocity;
         chosen->stage = Voice::EnvStage::Attack;
+        chosen->env_val = 0.0f;
         chosen->phase1 = 0.0;
         chosen->phase2 = 0.0;
         chosen->phase3 = 0.0;
@@ -243,6 +259,14 @@ private:
     void release_note(uint8_t note) {
         for (auto& v : voices_) {
             if (v.active && v.note == note && v.stage != Voice::EnvStage::Release) {
+                v.stage = Voice::EnvStage::Release;
+            }
+        }
+    }
+
+    void all_notes_off() {
+        for (auto& v : voices_) {
+            if (v.active && v.stage != Voice::EnvStage::Release) {
                 v.stage = Voice::EnvStage::Release;
             }
         }

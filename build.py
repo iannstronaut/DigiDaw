@@ -56,7 +56,7 @@ def main():
     test_exe = os.path.join(bin_dir, "run_tests.exe")
 
     print("[Build] Compiling Test Suite (run_tests.exe)...")
-    cmd_tests = [gpp] + common_flags + test_sources + ["-o", test_exe, "-lshell32"]
+    cmd_tests = [gpp] + common_flags + test_sources + ["-o", test_exe, "-lshell32", "-lwinmm"]
     t0 = time.time()
     res = subprocess.run(cmd_tests, cwd=root_dir)
     if res.returncode != 0:
@@ -94,7 +94,7 @@ def main():
     ]
     app_exe = os.path.join(bin_dir, "DigiDAW.exe")
     print("[Build] Compiling Application Shell (DigiDAW.exe)...")
-    cmd_app = [gpp] + common_flags + shell_sources + ["-o", app_exe, "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32"]
+    cmd_app = [gpp] + common_flags + shell_sources + ["-o", app_exe, "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm"]
     t0 = time.time()
     res = subprocess.run(cmd_app, cwd=root_dir)
     if res.returncode != 0:

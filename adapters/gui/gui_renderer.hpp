@@ -107,6 +107,92 @@ public:
 
         fill_rect(hdc, active_rc, meter_col);
     }
+
+    static void draw_slider_vertical(HDC hdc, const RECT& rc, float normalized_val, const std::string& label) {
+        const auto& t = get_theme();
+        // Track
+        int track_x = (rc.left + rc.right) / 2;
+        RECT track_rc{track_x - 3, rc.top + 6, track_x + 3, rc.bottom - 20};
+        fill_rect(hdc, track_rc, t.bg_input);
+        draw_border(hdc, track_rc, t.border_dark);
+
+        // Active fill from bottom to thumb
+        int track_h = (rc.bottom - 20) - (rc.top + 6);
+        float norm = std::clamp(normalized_val, 0.0f, 1.0f);
+        int fill_h = static_cast<int>(track_h * norm);
+        if (fill_h > 0) {
+            RECT fill_rc{track_x - 2, (rc.bottom - 20) - fill_h, track_x + 2, rc.bottom - 20};
+            fill_rect(hdc, fill_rc, t.accent_orange);
+        }
+
+        // Thumb handle
+        int thumb_y = (rc.bottom - 20) - fill_h;
+        RECT thumb_rc{rc.left + 6, thumb_y - 5, rc.right - 6, thumb_y + 5};
+        draw_rounded_box(hdc, thumb_rc, RGB(220, 220, 220), t.border_dark, 3);
+
+        // Center notch line on thumb
+        RECT notch_rc{rc.left + 10, thumb_y - 1, rc.right - 10, thumb_y + 1};
+        fill_rect(hdc, notch_rc, RGB(80, 80, 80));
+
+        // Readout label at bottom
+        RECT text_rc{rc.left - 4, rc.bottom - 18, rc.right + 4, rc.bottom};
+        draw_text(hdc, label, text_rc, t.text_secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    static void draw_slider_horizontal(HDC hdc, const RECT& rc, float normalized_val, const std::string& label) {
+        const auto& t = get_theme();
+        draw_rounded_box(hdc, rc, t.bg_input, t.border_dark, 4);
+
+        int w = rc.right - rc.left - 2;
+        float norm = std::clamp(normalized_val, 0.0f, 1.0f);
+        int fill_w = static_cast<int>(w * norm);
+        if (fill_w > 0) {
+            RECT fill_rc{rc.left + 1, rc.top + 1, rc.left + 1 + fill_w, rc.bottom - 1};
+            fill_rect(hdc, fill_rc, t.border_light);
+        }
+
+        draw_text(hdc, label, rc, t.text_primary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Downward-pointing triangle playhead marker with vertical line extending across the sequencer
+    static void draw_playhead(HDC hdc, int center_x, int top_y, int bottom_y, COLORREF color, const std::string& label = "") {
+        // 1. Downward-pointing triangle (apex pointing down!)
+        POINT pts[3];
+        pts[0] = {center_x - 10, top_y};
+        pts[1] = {center_x + 10, top_y};
+        pts[2] = {center_x,      top_y + 16}; // Apex pointing straight down into the sequencer
+
+        HBRUSH br = CreateSolidBrush(color);
+        HPEN border_pen = CreatePen(PS_SOLID, 1, RGB(15, 15, 15));
+        HGDIOBJ old_br = SelectObject(hdc, br);
+        HGDIOBJ old_pen = SelectObject(hdc, border_pen);
+
+        Polygon(hdc, pts, 3);
+
+        // 2. Vertical line extending all the way down through the sequencer
+        HPEN line_pen = CreatePen(PS_SOLID, 2, color);
+        SelectObject(hdc, line_pen);
+        MoveToEx(hdc, center_x, top_y + 16, NULL);
+        LineTo(hdc, center_x, bottom_y);
+
+        // Base foot cap
+        MoveToEx(hdc, center_x - 5, bottom_y, NULL);
+        LineTo(hdc, center_x + 6, bottom_y);
+
+        // 3. Optional badge/label above the triangle
+        if (!label.empty()) {
+            RECT lbl_rc{center_x - 35, top_y - 14, center_x + 35, top_y};
+            SetTextColor(hdc, color);
+            SetBkMode(hdc, TRANSPARENT);
+            DrawTextA(hdc, label.c_str(), -1, &lbl_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_br);
+        DeleteObject(line_pen);
+        DeleteObject(border_pen);
+        DeleteObject(br);
+    }
 };
 
 } // namespace digidaw::adapters::gui

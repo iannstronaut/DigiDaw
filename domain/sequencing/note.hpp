@@ -97,6 +97,41 @@ public:
         }
     }
 
+    void toggle_note(Tick start, Tick length, uint8_t pitch, uint8_t vel = 100) {
+        if (!remove_note(start, pitch)) {
+            add_note(Note{start, length, pitch, vel, 0, 0});
+        }
+    }
+
+    bool set_note_length(Tick start, uint8_t pitch, Tick new_length) {
+        auto it = std::find_if(notes_.begin(), notes_.end(), [start, pitch](const Note& n) {
+            return n.start == start && n.pitch == pitch;
+        });
+        if (it != notes_.end()) {
+            it->length = std::max<Tick>(1, new_length);
+            return true;
+        }
+        return false;
+    }
+
+    Note* find_note_spanning(Tick tick, uint8_t pitch) {
+        for (auto& n : notes_) {
+            if (n.pitch == pitch && tick >= n.start && tick < n.start + n.length) {
+                return &n;
+            }
+        }
+        return nullptr;
+    }
+
+    const Note* find_note_spanning(Tick tick, uint8_t pitch) const {
+        for (const auto& n : notes_) {
+            if (n.pitch == pitch && tick >= n.start && tick < n.start + n.length) {
+                return &n;
+            }
+        }
+        return nullptr;
+    }
+
 private:
     std::vector<Note> notes_;
 };

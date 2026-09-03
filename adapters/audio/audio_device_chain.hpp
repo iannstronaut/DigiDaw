@@ -7,6 +7,11 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <mmsystem.h>
+#endif
 
 namespace digidaw::adapters::audio {
 
@@ -86,7 +91,134 @@ private:
     std::thread thread_;
 };
 
-// Fallback chain: ASIO -> WASAPI -> DirectSound -> Null (DAW-FR-102, ERR-AUD-001)
+#ifdef _WIN32
+class WaveOutAudioDevice : public app::IAudioDevice {
+public:
+    WaveOutAudioDevice() = default;
+    ~WaveOutAudioDevice() override { stop(); close(); }
+
+    domain::Result<void> open(double sample_rate, size_t buffer_size, app::AudioProcessCallback callback) override {
+        sample_rate_ = sample_rate;
+        buffer_size_ = buffer_size;
+        callback_ = std::move(callback);
+
+        WAVEFORMATEX wfx{};
+        wfx.wFormatTag = WAVE_FORMAT_PCM;
+        wfx.nChannels = 2;
+        wfx.nSamplesPerSec = static_cast<DWORD>(sample_rate);
+        wfx.wBitsPerSample = 16;
+        wfx.nBlockAlign = wfx.nChannels * (wfx.wBitsPerSample / 8); // 4 bytes per frame
+        wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+        wfx.cbSize = 0;
+
+        MMRESULT res = waveOutOpen(&h_wave_out_, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+        if (res != MMSYSERR_NOERROR) {
+            h_wave_out_ = NULL;
+            return domain::Result<void>(domain::ErrorCode::DeviceOpenFailed);
+        }
+
+        const size_t num_buffers = 4;
+        buffer_bytes_ = buffer_size * wfx.nBlockAlign;
+        headers_.resize(num_buffers);
+        pcm_data_.resize(num_buffers * buffer_bytes_, 0);
+
+        for (size_t i = 0; i < num_buffers; ++i) {
+            ZeroMemory(&headers_[i], sizeof(WAVEHDR));
+            headers_[i].lpData = reinterpret_cast<LPSTR>(&pcm_data_[i * buffer_bytes_]);
+            headers_[i].dwBufferLength = static_cast<DWORD>(buffer_bytes_);
+            headers_[i].dwFlags = 0;
+            waveOutPrepareHeader(h_wave_out_, &headers_[i], sizeof(WAVEHDR));
+            headers_[i].dwFlags |= WHDR_DONE; // Mark done so it can be filled immediately
+        }
+
+        opened_ = true;
+        return domain::Result<void>::ok();
+    }
+
+    void close() override {
+        stop();
+        if (h_wave_out_) {
+            for (auto& hdr : headers_) {
+                waveOutUnprepareHeader(h_wave_out_, &hdr, sizeof(WAVEHDR));
+            }
+            waveOutClose(h_wave_out_);
+            h_wave_out_ = NULL;
+        }
+        opened_ = false;
+    }
+
+    domain::Result<void> start() override {
+        if (!opened_ || !h_wave_out_) return domain::Result<void>(domain::ErrorCode::DeviceOpenFailed);
+        if (running_) return domain::Result<void>::ok();
+
+        running_ = true;
+        thread_ = std::thread([this]() {
+            domain::OwningAudioBuffer float_buf(buffer_size_);
+            size_t buf_idx = 0;
+
+            while (running_) {
+                WAVEHDR& hdr = headers_[buf_idx];
+                if (!(hdr.dwFlags & WHDR_DONE)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+
+                auto view = float_buf.view();
+                view.clear();
+                if (callback_) {
+                    callback_(view);
+                }
+
+                int16_t* pcm_out = reinterpret_cast<int16_t*>(hdr.lpData);
+                for (size_t f = 0; f < buffer_size_; ++f) {
+                    float sl = std::clamp(view.left ? view.left[f] : 0.0f, -1.0f, 1.0f);
+                    float sr = std::clamp(view.right ? view.right[f] : 0.0f, -1.0f, 1.0f);
+                    pcm_out[f * 2 + 0] = static_cast<int16_t>(sl * 32767.0f);
+                    pcm_out[f * 2 + 1] = static_cast<int16_t>(sr * 32767.0f);
+                }
+
+                hdr.dwFlags &= ~WHDR_DONE;
+                waveOutWrite(h_wave_out_, &hdr, sizeof(WAVEHDR));
+
+                buf_idx = (buf_idx + 1) % headers_.size();
+            }
+        });
+
+        return domain::Result<void>::ok();
+    }
+
+    void stop() override {
+        if (running_) {
+            running_ = false;
+            if (thread_.joinable()) {
+                thread_.join();
+            }
+            if (h_wave_out_) {
+                waveOutReset(h_wave_out_);
+            }
+        }
+    }
+
+    [[nodiscard]] bool is_running() const noexcept override { return running_; }
+    [[nodiscard]] double sample_rate() const noexcept override { return sample_rate_; }
+    [[nodiscard]] size_t buffer_size() const noexcept override { return buffer_size_; }
+    [[nodiscard]] std::string device_name() const override { return "Windows Multimedia Audio (waveOut)"; }
+
+private:
+    double sample_rate_{44100.0};
+    size_t buffer_size_{512};
+    size_t buffer_bytes_{0};
+    app::AudioProcessCallback callback_;
+    std::atomic<bool> running_{false};
+    bool opened_{false};
+    std::thread thread_;
+    HWAVEOUT h_wave_out_{NULL};
+    std::vector<WAVEHDR> headers_;
+    std::vector<uint8_t> pcm_data_;
+};
+#endif
+
+// Fallback chain: WaveOut (Windows) / ASIO -> WASAPI -> DirectSound -> Null (DAW-FR-102, ERR-AUD-001)
 class AudioDeviceChain : public app::IAudioDevice {
 public:
     explicit AudioDeviceChain(bool force_dummy = false, bool simulate_asio_failure = false)
@@ -97,24 +229,19 @@ public:
         buffer_size_ = buffer_size;
         callback_ = std::move(callback);
 
-        if (force_dummy_) {
-            return fallback_to_null();
+        if (!force_dummy_) {
+#ifdef _WIN32
+            auto win_dev = std::make_unique<WaveOutAudioDevice>();
+            if (win_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
+                current_device_ = std::move(win_dev);
+                active_driver_ = AudioDriverType::DirectSound;
+                active_driver_name_ = "Windows Multimedia Output (Real Speakers/Headphones)";
+                return domain::Result<void>::ok();
+            }
+#endif
         }
 
-        // Try ASIO first (EV-045, EV-015)
-        if (!simulate_asio_failure_) {
-            // If real ASIO driver is not present on hardware or broken, fallback
-            // In headless/test environment, simulate driver check
-            has_asio_ = false; // Set to true if ASIO hardware exists
-        }
-
-        if (!has_asio_) {
-            // Fallback to WASAPI
-            active_driver_ = AudioDriverType::WASAPI;
-            active_driver_name_ = "WASAPI Audio Output (Exclusive/Shared)";
-        }
-
-        // Initialize active device
+        // Initialize fallback device
         return fallback_to_null();
     }
 

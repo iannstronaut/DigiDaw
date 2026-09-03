@@ -23,8 +23,11 @@ enum class PlaybackMode : uint8_t {
 
 class Transport {
 public:
+    Transport() = default;
     explicit Transport(domain::Project& project)
-        : project_(project), state_(TransportState::Stopped), mode_(PlaybackMode::Pattern) {}
+        : project_(&project), state_(TransportState::Stopped), mode_(PlaybackMode::Pattern) {}
+
+    void set_project(domain::Project* p) noexcept { project_ = p; }
 
     void play() noexcept {
         state_ = TransportState::Playing;
@@ -55,7 +58,7 @@ public:
 
     [[nodiscard]] domain::Tick current_tick() const noexcept { return current_tick_; }
     [[nodiscard]] double current_seconds() const noexcept {
-        return project_.time_map().tick_to_seconds(current_tick_);
+        return project_ ? project_->time_map().tick_to_seconds(current_tick_) : 0.0;
     }
 
     void set_loop(domain::Tick start, domain::Tick end, bool enabled = true) noexcept {
@@ -74,103 +77,160 @@ public:
 
     std::vector<ScheduledChannelEvents> advance_block(size_t frames, double sample_rate) {
         std::vector<ScheduledChannelEvents> result;
-        if (state_ != TransportState::Playing || frames == 0 || sample_rate <= 0.0) {
+        if (!project_ || state_ != TransportState::Playing || frames == 0 || sample_rate <= 0.0) {
             return result;
         }
 
-        const auto& time_map = project_.time_map();
+        const auto& time_map = project_->time_map();
         const double bpm = time_map.get_bpm_at(current_tick_);
         const double ticks_per_sec = (bpm * static_cast<double>(time_map.ppq())) / 60.0;
         const double block_duration_sec = static_cast<double>(frames) / sample_rate;
         const auto delta_ticks = static_cast<domain::Tick>(std::round(block_duration_sec * ticks_per_sec));
 
-        const domain::Tick start_tick = current_tick_;
-        domain::Tick end_tick = start_tick + delta_ticks;
+        // Determine loop boundaries
+        domain::Tick loop_start = 0;
+        domain::Tick loop_end = 0;
+        bool is_looping = false;
 
-        // Loop boundaries check
-        domain::Tick loop_len = 0;
         if (mode_ == PlaybackMode::Pattern) {
-            auto* pat = project_.get_pattern(project_.ui_state().selected_pattern_id);
+            auto* pat = project_->get_pattern(project_->ui_state().selected_pattern_id);
             if (pat) {
-                loop_len = pat->length_ticks(time_map.ppq());
+                loop_end = pat->length_ticks(time_map.ppq());
             } else {
-                loop_len = 4 * time_map.ppq();
+                loop_end = 4 * time_map.ppq();
             }
-        } else if (loop_enabled_ && loop_end_ > loop_start_) {
-            loop_len = loop_end_ - loop_start_;
-        }
-
-        // Collect events
-        if (mode_ == PlaybackMode::Pattern) {
-            auto* pat = project_.get_pattern(project_.ui_state().selected_pattern_id);
-            if (pat) {
-                for (const auto& [ch_id, note_set] : pat->all_notes()) {
-                    ScheduledChannelEvents ch_ev{ch_id, {}};
-                    for (const auto& note : note_set.notes()) {
-                        // Check Note On
-                        if (note.start >= start_tick && note.start < end_tick) {
-                            ch_ev.events.push_back(domain::MidiEvent::make_note_on(
-                                note.start, 0, note.pitch, note.velocity));
-                        }
-                        // Check Note Off
-                        const domain::Tick note_end = note.start + note.length;
-                        if (note_end >= start_tick && note_end < end_tick) {
-                            ch_ev.events.push_back(domain::MidiEvent::make_note_off(
-                                note_end, 0, note.pitch));
-                        }
-                    }
-                    if (!ch_ev.events.empty()) {
-                        result.push_back(std::move(ch_ev));
-                    }
+            loop_start = 0;
+            is_looping = (loop_end > 0);
+        } else {
+            // Song / Arranger mode
+            domain::Tick max_clip_end = 4 * time_map.ppq();
+            for (const auto& trk : project_->tracks()) {
+                for (const auto& clp : trk.clips()) {
+                    max_clip_end = std::max(max_clip_end, clp.end());
                 }
             }
+            loop_start = (loop_enabled_ && loop_end_ > loop_start_) ? loop_start_ : 0;
+            loop_end = (loop_enabled_ && loop_end_ > loop_start_) ? loop_end_ : max_clip_end;
+            is_looping = (loop_end > loop_start);
+        }
+
+        struct Interval {
+            domain::Tick start;
+            domain::Tick end;
+            bool is_end_of_loop;
+        };
+        std::vector<Interval> intervals;
+
+        if (is_looping && loop_end > loop_start) {
+            const domain::Tick loop_len = loop_end - loop_start;
+            if (current_tick_ < loop_start || current_tick_ >= loop_end) {
+                current_tick_ = loop_start + ((current_tick_ - loop_start) % loop_len);
+                if (current_tick_ < loop_start) current_tick_ += loop_len;
+            }
+
+            const domain::Tick next_tick = current_tick_ + delta_ticks;
+            if (next_tick < loop_end) {
+                intervals.push_back({current_tick_, next_tick, false});
+                current_tick_ = next_tick;
+            } else {
+                // Crosses loop boundary!
+                intervals.push_back({current_tick_, loop_end, true});
+                domain::Tick wrapped_ticks = (next_tick - loop_end) % loop_len;
+                intervals.push_back({loop_start, loop_start + wrapped_ticks, false});
+                current_tick_ = loop_start + wrapped_ticks;
+            }
         } else {
-            // Song mode: scan active clips on tracks
-            for (const auto& track : project_.tracks()) {
-                if (track.muted()) continue;
-                for (const auto& clip : track.clips()) {
-                    if (clip.muted) continue;
-                    auto* pat = project_.get_pattern(clip.pattern_id);
-                    if (!pat) continue;
+            intervals.push_back({current_tick_, current_tick_ + delta_ticks, false});
+            current_tick_ += delta_ticks;
+        }
 
-                    // Does this clip overlap with the current block?
-                    if (clip.end() <= start_tick || clip.start >= end_tick) continue;
+        std::unordered_map<domain::ChannelId, std::vector<domain::MidiEvent>> ch_map;
 
+        for (const auto& span : intervals) {
+            const domain::Tick s_start = span.start;
+            const domain::Tick s_end = span.end;
+
+            if (mode_ == PlaybackMode::Pattern) {
+                auto* pat = project_->get_pattern(project_->ui_state().selected_pattern_id);
+                if (pat) {
                     for (const auto& [ch_id, note_set] : pat->all_notes()) {
-                        ScheduledChannelEvents ch_ev{ch_id, {}};
+                        auto& ev_list = ch_map[ch_id];
                         for (const auto& note : note_set.notes()) {
-                            const domain::Tick abs_note_start = clip.start + note.start;
+                            // Note On
+                            if (note.start >= s_start && note.start < s_end) {
+                                ev_list.push_back(domain::MidiEvent::make_note_on(
+                                    note.start, 0, note.pitch, note.velocity));
+                            }
+                            // Note Off
+                            const domain::Tick note_end = note.start + note.length;
+                            if (note_end >= s_start && note_end < s_end) {
+                                ev_list.push_back(domain::MidiEvent::make_note_off(
+                                    note_end, 0, note.pitch));
+                            } else if (span.is_end_of_loop && note.start < loop_end && note_end >= loop_end) {
+                                // Cut off sustained notes reaching/exceeding loop end so they don't hang into next loop!
+                                ev_list.push_back(domain::MidiEvent::make_note_off(
+                                    loop_end, 0, note.pitch));
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Song / Arranger mode: scan tracks and active placement clips
+                for (size_t trk_idx = 0; trk_idx < project_->tracks().size(); ++trk_idx) {
+                    const auto& track = project_->tracks()[trk_idx];
+                    if (track.muted()) continue;
+
+                    domain::ChannelId target_ch_id = 0;
+                    if (trk_idx < project_->channels().size()) {
+                        target_ch_id = project_->channels()[trk_idx].id();
+                    } else {
+                        target_ch_id = track.id();
+                    }
+
+                    for (const auto& clip : track.clips()) {
+                        if (clip.muted) continue;
+                        auto* pat = project_->get_pattern(clip.pattern_id);
+                        if (!pat) continue;
+
+                        if (clip.end() <= s_start || clip.start >= s_end) continue;
+
+                        // Only play notes for this track's assigned channel
+                        auto* note_set = pat->get_channel_notes(target_ch_id);
+                        if (!note_set) continue;
+
+                        auto& ev_list = ch_map[target_ch_id];
+                        for (const auto& note : note_set->notes()) {
+                            const domain::Tick abs_note_start = clip.start + (note.start % clip.length);
                             const domain::Tick abs_note_end = abs_note_start + note.length;
 
-                            if (abs_note_start >= start_tick && abs_note_start < end_tick) {
-                                ch_ev.events.push_back(domain::MidiEvent::make_note_on(
+                            if (abs_note_start >= s_start && abs_note_start < s_end) {
+                                ev_list.push_back(domain::MidiEvent::make_note_on(
                                     abs_note_start, 0, note.pitch, note.velocity));
                             }
-                            if (abs_note_end >= start_tick && abs_note_end < end_tick) {
-                                ch_ev.events.push_back(domain::MidiEvent::make_note_off(
+                            if (abs_note_end >= s_start && abs_note_end < s_end) {
+                                ev_list.push_back(domain::MidiEvent::make_note_off(
                                     abs_note_end, 0, note.pitch));
+                            } else if (span.is_end_of_loop && abs_note_start < loop_end && abs_note_end >= loop_end) {
+                                ev_list.push_back(domain::MidiEvent::make_note_off(
+                                    loop_end, 0, note.pitch));
                             }
-                        }
-                        if (!ch_ev.events.empty()) {
-                            result.push_back(std::move(ch_ev));
                         }
                     }
                 }
             }
         }
 
-        // Advance playhead & handle looping
-        if (loop_len > 0) {
-            current_tick_ = (start_tick + delta_ticks) % loop_len;
-        } else {
-            current_tick_ = end_tick;
+        for (auto& [cid, evs] : ch_map) {
+            if (!evs.empty()) {
+                result.push_back(ScheduledChannelEvents{cid, std::move(evs)});
+            }
         }
 
         return result;
     }
 
 private:
-    domain::Project& project_;
+    domain::Project* project_{nullptr};
     TransportState state_{TransportState::Stopped};
     PlaybackMode mode_{PlaybackMode::Pattern};
     domain::Tick current_tick_{0};

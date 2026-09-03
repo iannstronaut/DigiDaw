@@ -316,7 +316,16 @@ int main(int argc, char* argv[]) {
         setup_default_template(engine);
     }
 
-    // 3. Launch UI (Native Win32 GUI by default, CLI if --cli passed)
+    // 3. Set Song mode for Arranger / Placement Blocks and Start Audio
+    engine.transport().set_mode(digidaw::app::PlaybackMode::Song);
+    auto audio_res = engine.start_audio();
+    if (audio_res.is_ok()) {
+        std::cout << "[Audio Engine] Real-time audio output started: " << engine.audio_device().device_name() << "\n";
+    } else {
+        std::cout << "[Audio Engine] Audio output started in fallback mode\n";
+    }
+
+    // 4. Launch UI (Native Win32 GUI by default, CLI if --cli passed)
     if (cli_mode) {
         run_interactive_repl(engine);
     } else {
@@ -330,5 +339,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    engine.stop_audio();
     return 0;
 }
