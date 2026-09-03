@@ -79,6 +79,13 @@ public:
             audition_frames_remaining_.clear();
             audition_pitch_.clear();
         }
+        for (auto& s : spectrum_bands_) {
+            s.store(0.0f, std::memory_order_relaxed);
+        }
+        for (auto& p : track_peaks_) {
+            p.store(0.0f, std::memory_order_relaxed);
+        }
+        master_waveform_.fill(0.0f);
     }
 
     domain::Result<void> start_audio() {
@@ -214,6 +221,51 @@ public:
             }
             track_peaks_[0].store(master_p);
 
+            // 5b. Compute 16 real-time analog spectrum frequency bands via Goertzel algorithm
+            static const std::array<float, 16> kGoertzelCoeffs = []() {
+                std::array<float, 16> c{};
+                constexpr float freqs[16] = {
+                    45.0f, 75.0f, 120.0f, 180.0f, 280.0f, 420.0f, 650.0f, 1000.0f,
+                    1500.0f, 2200.0f, 3300.0f, 4800.0f, 7000.0f, 9500.0f, 12500.0f, 16000.0f
+                };
+                for (size_t i = 0; i < 16; ++i) {
+                    float w = 2.0f * 3.141592653589793f * freqs[i] / 44100.0f;
+                    c[i] = 2.0f * std::cos(w);
+                }
+                return c;
+            }();
+
+            if (master_view.left && master_view.right && frames > 0) {
+                // Record master waveform ring buffer
+                size_t w_head = master_waveform_head_.load(std::memory_order_relaxed);
+                for (size_t f = 0; f < frames; ++f) {
+                    float mono = 0.5f * (master_view.left[f] + master_view.right[f]);
+                    master_waveform_[w_head] = mono;
+                    w_head = (w_head + 1) % WaveformHistorySize;
+                }
+                master_waveform_head_.store(w_head, std::memory_order_relaxed);
+
+                // Run 16-band Goertzel filters
+                for (size_t k = 0; k < 16; ++k) {
+                    float coeff = kGoertzelCoeffs[k];
+                    float s1 = 0.0f, s2 = 0.0f;
+                    for (size_t f = 0; f < frames; ++f) {
+                        float mono = 0.5f * (master_view.left[f] + master_view.right[f]);
+                        float s0 = mono + coeff * s1 - s2;
+                        s2 = s1;
+                        s1 = s0;
+                    }
+                    float p = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+                    float mag = (p > 0.0f) ? (std::sqrt(p) / static_cast<float>(frames)) : 0.0f;
+                    float weight = 2.4f + 0.38f * static_cast<float>(k);
+                    spectrum_bands_[k].store(std::min(1.5f, mag * weight), std::memory_order_relaxed);
+                }
+            } else {
+                for (size_t k = 0; k < 16; ++k) {
+                    spectrum_bands_[k].store(0.0f, std::memory_order_relaxed);
+                }
+            }
+
             for (auto& [tid, buf] : track_inputs) {
                 if (tid < track_peaks_.size()) {
                     auto view = buf.view();
@@ -247,6 +299,26 @@ public:
         return 0.0f;
     }
 
+    [[nodiscard]] float get_spectrum_band(size_t band) const noexcept {
+        if (band < spectrum_bands_.size()) {
+            return spectrum_bands_[band].load(std::memory_order_relaxed);
+        }
+        return 0.0f;
+    }
+
+    void get_spectrum(std::array<float, 16>& out) const noexcept {
+        for (size_t i = 0; i < 16; ++i) {
+            out[i] = spectrum_bands_[i].load(std::memory_order_relaxed);
+        }
+    }
+
+    void get_waveform(std::array<float, 256>& out) const noexcept {
+        size_t head = master_waveform_head_.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < 256; ++i) {
+            out[i] = master_waveform_[(head + i) % WaveformHistorySize];
+        }
+    }
+
 private:
     std::shared_ptr<IProjectRepository> repo_;
     std::unique_ptr<ProjectSession> session_;
@@ -263,6 +335,14 @@ private:
     std::unordered_map<domain::ChannelId, size_t> audition_frames_remaining_;
     std::unordered_map<domain::ChannelId, uint8_t> audition_pitch_;
     std::array<std::atomic<float>, 8> track_peaks_{};
+
+public:
+    static constexpr size_t NumSpectrumBands = 16;
+    static constexpr size_t WaveformHistorySize = 256;
+private:
+    std::array<std::atomic<float>, NumSpectrumBands> spectrum_bands_{};
+    std::array<float, WaveformHistorySize> master_waveform_{};
+    std::atomic<size_t> master_waveform_head_{0};
 };
 
 } // namespace digidaw::app

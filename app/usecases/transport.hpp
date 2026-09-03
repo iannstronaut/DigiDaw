@@ -199,20 +199,25 @@ public:
                         if (!note_set) continue;
 
                         auto& ev_list = ch_map[target_ch_id];
-                        for (const auto& note : note_set->notes()) {
-                            const domain::Tick abs_note_start = clip.start + (note.start % clip.length);
-                            const domain::Tick abs_note_end = abs_note_start + note.length;
+                        const domain::Tick pat_len = std::max(domain::Tick(time_map.ppq() * 4), pat->length_ticks(time_map.ppq()));
 
-                            if (abs_note_start >= s_start && abs_note_start < s_end) {
-                                ev_list.push_back(domain::MidiEvent::make_note_on(
-                                    abs_note_start, 0, note.pitch, note.velocity));
-                            }
-                            if (abs_note_end >= s_start && abs_note_end < s_end) {
-                                ev_list.push_back(domain::MidiEvent::make_note_off(
-                                    abs_note_end, 0, note.pitch));
-                            } else if (span.is_end_of_loop && abs_note_start < loop_end && abs_note_end >= loop_end) {
-                                ev_list.push_back(domain::MidiEvent::make_note_off(
-                                    loop_end, 0, note.pitch));
+                        for (domain::Tick rep = 0; rep < clip.length; rep += pat_len) {
+                            for (const auto& note : note_set->notes()) {
+                                if (rep + note.start >= clip.length) break;
+                                const domain::Tick abs_note_start = clip.start + rep + note.start;
+                                const domain::Tick abs_note_end = std::min(clip.end(), abs_note_start + note.length);
+
+                                if (abs_note_start >= s_start && abs_note_start < s_end) {
+                                    ev_list.push_back(domain::MidiEvent::make_note_on(
+                                        abs_note_start, 0, note.pitch, note.velocity));
+                                }
+                                if (abs_note_end >= s_start && abs_note_end < s_end) {
+                                    ev_list.push_back(domain::MidiEvent::make_note_off(
+                                        abs_note_end, 0, note.pitch));
+                                } else if (span.is_end_of_loop && abs_note_start < loop_end && abs_note_end >= loop_end) {
+                                    ev_list.push_back(domain::MidiEvent::make_note_off(
+                                        loop_end, 0, note.pitch));
+                                }
                             }
                         }
                     }

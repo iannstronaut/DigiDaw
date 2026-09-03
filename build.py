@@ -94,7 +94,11 @@ def main():
     ]
     app_exe = os.path.join(bin_dir, "DigiDAW.exe")
     print("[Build] Compiling Application Shell (DigiDAW.exe)...")
-    cmd_app = [gpp] + common_flags + shell_sources + ["-o", app_exe, "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm"]
+    cmd_app = [gpp] + common_flags + shell_sources + [
+        "-o", app_exe,
+        "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm",
+        "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32"
+    ]
     t0 = time.time()
     res = subprocess.run(cmd_app, cwd=root_dir)
     if res.returncode != 0:

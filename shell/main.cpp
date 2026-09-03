@@ -57,9 +57,9 @@ void setup_default_template(digidaw::app::Engine& engine) {
         notes.add_note({ppq * 3, ppq, 71, 100, 0, 0});     // B5
     }
 
-    // 4. Place clip in playlist track 1
+    // 4. Place clip in playlist track 1 (4 bars: Bar 1 to Bar 5, matching FL Studio arrangement)
     if (!proj.tracks().empty()) {
-        proj.tracks()[0].add_clip({1, 0, digidaw::domain::DefaultPPQ * 4, false});
+        proj.tracks()[0].add_clip({1, 0, digidaw::domain::DefaultPPQ * 16, false});
     }
 }
 
