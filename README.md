@@ -89,13 +89,15 @@
 ---
 
 ### 3. ⏱️ Transport & Real-Time Position Clock
-- **Tombol Header Bersih Berbasis Ikon Saja (Modern DAW Minimalist):**
-  - Seluruh teks pada tombol header telah dihilangkan dan digantikan dengan ikon modern yang ringkas, elegan, dan presisi:
+- **Header Bersih & Minimalis (Tanpa Polusi Badge Teknis):**
+  - Badge teknis `D3D11+D2D` telah dihilangkan sehingga header tampak bersih, luas, dan profesional.
+  - Setiap section mengusung nama yang sederhana dan intuitif: **"Playlist"**, **"Piano roll"**, dan **"Mixer"**.
+  - Seluruh tombol kontrol transport berbasis ikon ringkas dan elegan:
     - `▶` (Play): Memulai pemutaran instrumen/lagu secara instan dari posisi Playhead/SPM.
     - `❚❚` (Pause): Menghentikan sementara (*in-place pause*) di posisi berjalan tanpa memundurkan timeline, serta memutus suara instrumen (*all notes off*).
     - `■` (Stop): Menghentikan playback, membersihkan seluruh suara aktif, dan me-rewind posisi Playhead/SPM kembali ke awal (00:00.00 | Bar 1).
-    - `🎛` (Channel Rack): Berpindah ke tampilan Sequencer Channel Rack (F6).
-    - `🎹` (Piano Roll): Berpindah ke tampilan Piano Roll Melody Editor (F7).
+    - `🎛` (Playlist): Berpindah ke tampilan Playlist (F6).
+    - `🎹` (Piano roll): Berpindah ke tampilan Piano roll (F7).
     - `💾` (Save): Menyimpan project file `.odp`.
     - `💿` (Export): Merender project ke file master `.wav`.
   - Area klik (*hitbox*) tombol terkalibrasi 100% presisi dan selaras dengan engine grafis GPU Direct2D maupun GDI fallback.

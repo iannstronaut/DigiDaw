@@ -38,7 +38,7 @@ public:
         }
         return *transport_;
     }
-    [[nodiscard]] std::mutex& audio_mutex() noexcept { return audio_mutex_; }
+    [[nodiscard]] std::recursive_mutex& audio_mutex() noexcept { return audio_mutex_; }
 
     std::shared_ptr<domain::IDevice> get_or_create_channel_device(domain::ChannelId cid) {
         std::lock_guard<std::mutex> lock(device_mutex_);
@@ -82,7 +82,10 @@ public:
         for (auto& s : spectrum_bands_) {
             s.store(0.0f, std::memory_order_relaxed);
         }
-        for (auto& p : track_peaks_) {
+        for (auto& p : track_peaks_l_) {
+            p.store(0.0f, std::memory_order_relaxed);
+        }
+        for (auto& p : track_peaks_r_) {
             p.store(0.0f, std::memory_order_relaxed);
         }
         master_waveform_.fill(0.0f);
@@ -114,7 +117,7 @@ public:
         if (frames == 0) return;
 
         // Try lock to prevent data races with GUI thread modifications
-        std::unique_lock<std::mutex> lock(audio_mutex_, std::try_to_lock);
+        std::unique_lock<std::recursive_mutex> lock(audio_mutex_, std::try_to_lock);
         if (!lock.owns_lock()) {
             return;
         }
@@ -211,15 +214,16 @@ public:
             }
             mixer.process(trk_views, master_view);
 
-            // 5. Measure real-time peaks for Master and all mixer tracks
-            float master_p = 0.0f;
+            // 5. Measure real-time stereo peaks for Master and all mixer tracks
+            float master_pl = 0.0f, master_pr = 0.0f;
             if (master_view.left && master_view.right) {
                 for (size_t f = 0; f < frames; ++f) {
-                    master_p = std::max(master_p, std::abs(master_view.left[f]));
-                    master_p = std::max(master_p, std::abs(master_view.right[f]));
+                    master_pl = std::max(master_pl, std::abs(master_view.left[f]));
+                    master_pr = std::max(master_pr, std::abs(master_view.right[f]));
                 }
             }
-            track_peaks_[0].store(master_p);
+            track_peaks_l_[0].store(master_pl, std::memory_order_relaxed);
+            track_peaks_r_[0].store(master_pr, std::memory_order_relaxed);
 
             // 5b. Compute 16 real-time analog spectrum frequency bands via Goertzel algorithm
             static const std::array<float, 16> kGoertzelCoeffs = []() {
@@ -266,17 +270,23 @@ public:
                 }
             }
 
-            for (auto& [tid, buf] : track_inputs) {
-                if (tid < track_peaks_.size()) {
-                    auto view = buf.view();
-                    float tp = 0.0f;
-                    if (view.left && view.right) {
-                        for (size_t f = 0; f < frames; ++f) {
-                            tp = std::max(tp, std::abs(view.left[f]));
-                            tp = std::max(tp, std::abs(view.right[f]));
+            // Measure post-fader stereo peaks for all mixer insert tracks
+            for (const auto& [tid, track] : mixer.tracks()) {
+                if (tid == domain::MasterTrackId) continue;
+                if (tid < track_peaks_l_.size()) {
+                    const auto* buf = mixer.get_track_buffer(tid);
+                    float tpl = 0.0f, tpr = 0.0f;
+                    if (buf) {
+                        auto view = buf->view();
+                        if (view.left && view.right) {
+                            for (size_t f = 0; f < frames; ++f) {
+                                tpl = std::max(tpl, std::abs(view.left[f]));
+                                tpr = std::max(tpr, std::abs(view.right[f]));
+                            }
                         }
                     }
-                    track_peaks_[tid].store(tp);
+                    track_peaks_l_[tid].store(tpl, std::memory_order_relaxed);
+                    track_peaks_r_[tid].store(tpr, std::memory_order_relaxed);
                 }
             }
 
@@ -293,10 +303,19 @@ public:
     }
 
     [[nodiscard]] float get_track_peak(size_t track_idx) const noexcept {
-        if (track_idx < track_peaks_.size()) {
-            return track_peaks_[track_idx].load();
+        if (track_idx < track_peaks_l_.size()) {
+            return std::max(track_peaks_l_[track_idx].load(std::memory_order_relaxed),
+                            track_peaks_r_[track_idx].load(std::memory_order_relaxed));
         }
         return 0.0f;
+    }
+
+    [[nodiscard]] std::pair<float, float> get_track_peaks_stereo(size_t track_idx) const noexcept {
+        if (track_idx < track_peaks_l_.size()) {
+            return { track_peaks_l_[track_idx].load(std::memory_order_relaxed),
+                     track_peaks_r_[track_idx].load(std::memory_order_relaxed) };
+        }
+        return { 0.0f, 0.0f };
     }
 
     [[nodiscard]] float get_spectrum_band(size_t band) const noexcept {
@@ -326,7 +345,7 @@ private:
     std::unique_ptr<adapters::audio::AudioDeviceChain> audio_device_;
     std::unique_ptr<Transport> transport_;
 
-    std::mutex audio_mutex_;
+    std::recursive_mutex audio_mutex_;
     std::mutex device_mutex_;
     std::unordered_map<domain::ChannelId, std::shared_ptr<domain::IDevice>> channel_devices_;
 
@@ -334,7 +353,9 @@ private:
     std::vector<std::pair<domain::ChannelId, domain::MidiEvent>> audition_queue_;
     std::unordered_map<domain::ChannelId, size_t> audition_frames_remaining_;
     std::unordered_map<domain::ChannelId, uint8_t> audition_pitch_;
-    std::array<std::atomic<float>, 8> track_peaks_{};
+    static constexpr size_t MaxTrackPeaks = 64;
+    std::array<std::atomic<float>, MaxTrackPeaks> track_peaks_l_{};
+    std::array<std::atomic<float>, MaxTrackPeaks> track_peaks_r_{};
 
 public:
     static constexpr size_t NumSpectrumBands = 16;

@@ -53,6 +53,14 @@ public:
         return tracks_;
     }
 
+    [[nodiscard]] const OwningAudioBuffer* get_track_buffer(MixerTrackId id) const noexcept {
+        auto it = track_buffers_.find(id);
+        if (it != track_buffers_.end()) {
+            return it->second.get();
+        }
+        return nullptr;
+    }
+
     Result<void> connect_send(MixerTrackId from, MixerTrackId to, float amount = 1.0f, bool post_fader = true) {
         if (from == to) {
             return Result<void>(ErrorCode::GraphCycleDetected);
@@ -88,6 +96,7 @@ public:
         for (const auto& [id, track] : tracks_) {
             track_buffers_[id] = std::make_unique<OwningAudioBuffer>(max_block_size);
         }
+        dry_scratch_ = std::make_unique<OwningAudioBuffer>(max_block_size);
 
         // Prepare devices in all tracks
         for (auto& [id, track] : tracks_) {
@@ -156,12 +165,42 @@ public:
             // Process inserts
             for (auto& slot : track.inserts()) {
                 if (slot.enabled && slot.device && !slot.bypassed_due_to_error) {
-                    try {
-                        std::span<const MidiEvent> empty_midi{};
-                        slot.device->process(track_view, empty_midi);
-                    } catch (...) {
-                        // Crash isolation: bypass problematic insert
-                        slot.bypassed_due_to_error = true;
+                    if (slot.wet_mix <= 0.001f) {
+                        continue;
+                    }
+                    if (slot.wet_mix >= 0.999f) {
+                        try {
+                            std::span<const MidiEvent> empty_midi{};
+                            slot.device->process(track_view, empty_midi);
+                        } catch (...) {
+                            // Crash isolation: bypass problematic insert
+                            slot.bypassed_due_to_error = true;
+                        }
+                    } else {
+                        // Blend dry and wet signals based on slot.wet_mix
+                        if (!dry_scratch_) {
+                            dry_scratch_ = std::make_unique<OwningAudioBuffer>(std::max(frames, max_block_size_));
+                        }
+                        dry_scratch_->resize_frames(frames);
+                        auto dry_view = dry_scratch_->view();
+                        for (size_t f = 0; f < frames; ++f) {
+                            if (dry_view.left && track_view.left) dry_view.left[f] = track_view.left[f];
+                            if (dry_view.right && track_view.right) dry_view.right[f] = track_view.right[f];
+                        }
+                        try {
+                            std::span<const MidiEvent> empty_midi{};
+                            slot.device->process(track_view, empty_midi);
+                            const float wet = slot.wet_mix;
+                            const float dry = 1.0f - wet;
+                            for (size_t f = 0; f < frames; ++f) {
+                                if (track_view.left && dry_view.left)
+                                    track_view.left[f] = dry_view.left[f] * dry + track_view.left[f] * wet;
+                                if (track_view.right && dry_view.right)
+                                    track_view.right[f] = dry_view.right[f] * dry + track_view.right[f] * wet;
+                            }
+                        } catch (...) {
+                            slot.bypassed_due_to_error = true;
+                        }
                     }
                 }
             }
@@ -281,6 +320,7 @@ private:
     std::unordered_map<MixerTrackId, MixerTrack> tracks_;
     std::vector<MixerTrackId> topo_order_;
     std::unordered_map<MixerTrackId, std::unique_ptr<OwningAudioBuffer>> track_buffers_;
+    std::unique_ptr<OwningAudioBuffer> dry_scratch_{nullptr};
 };
 
 } // namespace digidaw::domain
