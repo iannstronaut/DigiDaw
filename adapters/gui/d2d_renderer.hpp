@@ -411,6 +411,29 @@ public:
             rt->DrawLine(P(20.5f, 3.5f), P(20.5f, 8.0f), br, 1.5f * s);
             break;
         }
+        case SvgIconType::Folder: {
+            if (factory) {
+                ID2D1PathGeometry* path = nullptr;
+                if (SUCCEEDED(factory->CreatePathGeometry(&path))) {
+                    ID2D1GeometrySink* sink = nullptr;
+                    if (SUCCEEDED(path->Open(&sink))) {
+                        sink->BeginFigure(P(3.0f, 6.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddLine(P(9.0f, 6.0f));
+                        sink->AddLine(P(11.5f, 8.5f));
+                        sink->AddLine(P(21.0f, 8.5f));
+                        sink->AddLine(P(21.0f, 19.0f));
+                        sink->AddLine(P(3.0f, 19.0f));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        sink->Close();
+                        sink->Release();
+                        rt->DrawGeometry(path, br, 1.4f * s);
+                    }
+                    path->Release();
+                }
+            }
+            rt->DrawLine(P(3.0f, 11.5f), P(21.0f, 11.5f), br, 1.0f * s);
+            break;
+        }
         }
 
         if (factory) factory->Release();

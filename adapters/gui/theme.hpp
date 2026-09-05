@@ -16,7 +16,8 @@ enum class SvgIconType {
     Mixer,
     Magnet,
     Save,
-    Export
+    Export,
+    Folder
 };
 
 struct Theme {

@@ -54,6 +54,8 @@ def main():
         os.path.join(root_dir, "tests", "unit", "test_reverb.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_sampler.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_drum_sampler.cpp"),
+        os.path.join(root_dir, "tests", "unit", "test_audioclip.cpp"),
+        os.path.join(root_dir, "tests", "unit", "test_audio_library.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_plugin_compat.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_file_association.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_crash_handler.cpp"),
@@ -148,7 +150,7 @@ def main():
     print("[Build] Compiling Application Shell (DigiDAW.exe)...")
     cmd_app = [gpp, f"-specs={spec_path}"] + common_flags + shell_sources + [
         "-o", app_exe,
-        "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm",
+        "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lcomdlg32", "-lshell32", "-lwinmm",
         "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32",
         "-ldwmapi"
     ]

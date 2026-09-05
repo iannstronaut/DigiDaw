@@ -64,6 +64,24 @@ public:
         audition_pitch_[cid] = pitch;
     }
 
+    void preview_sample_data(std::vector<float> left, std::vector<float> right) {
+        std::lock_guard<std::mutex> lock(preview_mutex_);
+        preview_l_ = std::move(left);
+        preview_r_ = std::move(right);
+        preview_pos_ = 0;
+        preview_active_ = true;
+    }
+
+    void stop_sample_preview() {
+        std::lock_guard<std::mutex> lock(preview_mutex_);
+        preview_active_ = false;
+        preview_pos_ = 0;
+    }
+
+    [[nodiscard]] bool is_sample_preview_active() const noexcept {
+        return preview_active_;
+    }
+
     void all_notes_off() {
         {
             std::lock_guard<std::mutex> lock(device_mutex_);
@@ -78,6 +96,13 @@ public:
             audition_queue_.clear();
             audition_frames_remaining_.clear();
             audition_pitch_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> plock(preview_mutex_);
+            preview_active_ = false;
+            preview_pos_ = 0;
+            preview_l_.clear();
+            preview_r_.clear();
         }
         for (auto& s : spectrum_bands_) {
             s.store(0.0f, std::memory_order_relaxed);
@@ -246,6 +271,25 @@ public:
                 return c;
             }();
 
+            // 4b. Mix Audition / Preview Sample Audio
+            {
+                std::lock_guard<std::mutex> plock(preview_mutex_);
+                if (preview_active_ && !preview_l_.empty()) {
+                    const size_t total_smp = preview_l_.size();
+                    for (size_t f = 0; f < frames; ++f) {
+                        if (preview_pos_ >= total_smp) {
+                            preview_active_ = false;
+                            break;
+                        }
+                        float pl = preview_l_[preview_pos_];
+                        float pr = preview_r_.empty() ? pl : preview_r_[preview_pos_];
+                        if (master_view.left) master_view.left[f] += pl;
+                        if (master_view.right) master_view.right[f] += pr;
+                        preview_pos_++;
+                    }
+                }
+            }
+
             if (master_view.left && master_view.right && frames > 0) {
                 // Record master waveform ring buffer
                 size_t w_head = master_waveform_head_.load(std::memory_order_relaxed);
@@ -371,6 +415,12 @@ private:
     std::array<std::atomic<float>, NumSpectrumBands> spectrum_bands_{};
     std::array<float, WaveformHistorySize> master_waveform_{};
     std::atomic<size_t> master_waveform_head_{0};
+
+    std::mutex preview_mutex_;
+    std::vector<float> preview_l_;
+    std::vector<float> preview_r_;
+    size_t preview_pos_{0};
+    bool preview_active_{false};
 };
 
 } // namespace digidaw::app

@@ -7,8 +7,13 @@
 #include "d2d_renderer.hpp"
 #include "d3d_shader_visualizer.hpp"
 #include "dpi_awareness.hpp"
+#include "audioclip_editor.hpp"
+#include "../plugins/audioclip_device.hpp"
+#include "../../app/usecases/sample_library.hpp"
+#include "../../app/ports/config_store.hpp"
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <commctrl.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -59,7 +64,8 @@ enum class WindowId : uint8_t {
     Playlist = 1,
     PianoRoll = 2,
     Mixer = 3,
-    Inspector = 4
+    Inspector = 4,
+    AudioLibrary = 5
 };
 
 enum class ResizeEdge : uint8_t {
@@ -191,9 +197,26 @@ class DigiDawWindow {
 public:
     static DigiDawWindow* instance;
 
-    explicit DigiDawWindow(app::Engine& engine)
-        : engine_(engine) {
+    explicit DigiDawWindow(app::Engine& engine, app::IConfigStore* config = nullptr, app::SampleLibrary init_lib = {})
+        : engine_(engine), config_(config), sample_library_(std::move(init_lib)) {
         instance = this;
+        if (sample_library_.empty() && config_) {
+            std::string saved = config_->get_string("SampleLibrary", "RootDirectory");
+            if (!saved.empty() && std::filesystem::exists(saved)) {
+                sample_library_.scan(saved);
+            }
+        }
+    }
+
+    void set_sample_library(app::SampleLibrary lib) {
+        sample_library_ = std::move(lib);
+        audio_lib_scroll_idx_ = 0;
+        selected_sample_idx_ = -1;
+        hover_sample_idx_ = -1;
+    }
+
+    void set_config(app::IConfigStore* cfg) {
+        config_ = cfg;
     }
 
     ~DigiDawWindow() {
@@ -396,14 +419,33 @@ public:
         return semi == 1 || semi == 3 || semi == 6 || semi == 8 || semi == 10;
     }
 
+    app::Engine& engine_;
+    app::IConfigStore* config_{nullptr};
+
     DawWindow win_channel_rack_{WindowId::ChannelRack, "CHANNEL RACK", SvgIconType::ChannelRack, 8.0f, 52.0f, 1856.0f, 400.0f, 380.0f, 220.0f, true};
     DawWindow win_playlist_{WindowId::Playlist, "PLAYLIST", SvgIconType::Playlist, 556.0f, 52.0f, 480.0f, 400.0f, 360.0f, 220.0f, true};
     DawWindow win_pianoroll_{WindowId::PianoRoll, "PIANO ROLL", SvgIconType::PianoRoll, 24.0f, 64.0f, 780.0f, 420.0f, 460.0f, 240.0f, false};
     DawWindow win_mixer_{WindowId::Mixer, "MIXER", SvgIconType::Mixer, 8.0f, 460.0f, 800.0f, 260.0f, 360.0f, 200.0f, true};
     DawWindow win_inspector_{WindowId::Inspector, "TRACK FX / INSPECTOR", SvgIconType::TrackFx, 816.0f, 52.0f, 260.0f, 688.0f, 240.0f, 260.0f, true};
+    DawWindow win_audio_library_{WindowId::AudioLibrary, "AUDIO LIBRARY", SvgIconType::Folder, 1084.0f, 52.0f, 320.0f, 540.0f, 260.0f, 200.0f, true};
 
-    std::vector<WindowId> z_order_{WindowId::Mixer, WindowId::Playlist, WindowId::ChannelRack, WindowId::Inspector, WindowId::PianoRoll};
+    std::vector<WindowId> z_order_{WindowId::AudioLibrary, WindowId::Mixer, WindowId::Playlist, WindowId::ChannelRack, WindowId::Inspector, WindowId::PianoRoll};
     WindowId active_window_{WindowId::ChannelRack};
+
+    // Audio Library Browser State & Drag-and-Drop
+    app::SampleLibrary sample_library_;
+    int audio_lib_scroll_idx_{0};
+    int hover_sample_idx_{-1};
+    int selected_sample_idx_{-1};
+    bool is_potential_sample_drag_{false};
+    bool is_dragging_sample_{false};
+    std::string dragged_sample_path_;
+    std::string dragged_sample_name_;
+    int sample_down_idx_{-1};
+    int sample_down_x_{0};
+    int sample_down_y_{0};
+    int current_mouse_x_{0};
+    int current_mouse_y_{0};
 
     bool magnet_enabled_{true};
     bool is_dragging_window_{false};
@@ -426,6 +468,7 @@ public:
             case WindowId::PianoRoll: return &win_pianoroll_;
             case WindowId::Mixer: return &win_mixer_;
             case WindowId::Inspector: return &win_inspector_;
+            case WindowId::AudioLibrary: return &win_audio_library_;
         }
         return nullptr;
     }
@@ -437,16 +480,17 @@ public:
             case WindowId::PianoRoll: return &win_pianoroll_;
             case WindowId::Mixer: return &win_mixer_;
             case WindowId::Inspector: return &win_inspector_;
+            case WindowId::AudioLibrary: return &win_audio_library_;
         }
         return nullptr;
     }
 
-    std::array<DawWindow*, 5> get_all_windows() {
-        return {&win_channel_rack_, &win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_};
+    std::array<DawWindow*, 6> get_all_windows() {
+        return {&win_channel_rack_, &win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_, &win_audio_library_};
     }
 
-    std::array<const DawWindow*, 5> get_all_windows() const {
-        return {&win_channel_rack_, &win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_};
+    std::array<const DawWindow*, 6> get_all_windows() const {
+        return {&win_channel_rack_, &win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_, &win_audio_library_};
     }
 
     void bring_to_front(WindowId id) {
@@ -803,6 +847,14 @@ public:
         win_pianoroll_.h = std::max(240.0f, ws_h - 32.0f);
         win_pianoroll_.visible = false;
 
+        // 6. Audio Library: Dockable Sample Browser Window
+        float lib_w = 280.0f;
+        win_audio_library_.x = std::max(8.0f, win_inspector_.x - lib_w - gap);
+        win_audio_library_.y = top_bound + 20.0f;
+        win_audio_library_.w = lib_w;
+        win_audio_library_.h = std::max(220.0f, ws_h - 40.0f);
+        win_audio_library_.visible = true;
+
         active_window_ = WindowId::ChannelRack;
         layout_initialized_ = true;
     }
@@ -1124,6 +1176,15 @@ private:
             case WM_MOUSEMOVE: {
                 int mouse_x = LOWORD(lp);
                 int mouse_y = HIWORD(lp);
+                current_mouse_x_ = mouse_x;
+                current_mouse_y_ = mouse_y;
+                if (is_potential_sample_drag_) {
+                    int dx = mouse_x - sample_down_x_;
+                    int dy = mouse_y - sample_down_y_;
+                    if (dx * dx + dy * dy > 25) {
+                        is_dragging_sample_ = true;
+                    }
+                }
                 if (is_mouse_down_) {
                     on_mouse_move(mouse_x, mouse_y);
                     InvalidateRect(hwnd, NULL, FALSE);
@@ -1134,6 +1195,10 @@ private:
             }
 
             case WM_SETCURSOR: {
+                if (is_dragging_sample_) {
+                    SetCursor(LoadCursor(NULL, IDC_CROSS));
+                    return TRUE;
+                }
                 if (is_dragging_window_) {
                     if (window_drag_mode_ == WindowDragMode::Move) {
                         SetCursor(LoadCursor(NULL, IDC_SIZEALL));
@@ -1227,12 +1292,25 @@ private:
                 dragging_channel_pan_idx_ = -1;
                 dragging_channel_vol_idx_ = -1;
                 dragging_channel_target_track_idx_ = -1;
+                dragging_clipper_knob_ = ClipperKnobId::None;
                 note_drag_mode_ = NoteDragMode::None;
                 if (clip_drag_mode_ != ClipDragMode::None) {
                     if (drag_clip_track_idx_ < engine_.session().project().tracks().size()) {
                         engine_.session().project().tracks()[drag_clip_track_idx_].sort_clips();
                     }
                     clip_drag_mode_ = ClipDragMode::None;
+                }
+                if (is_dragging_sample_) {
+                    is_dragging_sample_ = false;
+                    is_potential_sample_drag_ = false;
+                    int drop_x = LOWORD(lp);
+                    int drop_y = HIWORD(lp);
+                    handle_sample_drop(dragged_sample_path_, dragged_sample_name_, drop_x, drop_y);
+                } else if (is_potential_sample_drag_) {
+                    is_potential_sample_drag_ = false;
+                    if (sample_down_idx_ >= 0 && sample_down_idx_ < static_cast<int>(sample_library_.size())) {
+                        audition_sample(sample_library_.samples()[sample_down_idx_].path);
+                    }
                 }
                 ReleaseCapture();
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -1405,6 +1483,13 @@ private:
                                 sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_ - steps, 0, max_track_scroll);
                             }
                         }
+                    } else if (*it == WindowId::AudioLibrary) {
+                        float list_h = (win->h - DawWindow::kTitleBarHeight) - 76.0f;
+                        int vis_rows = std::max(1, static_cast<int>(list_h / 36.0f));
+                        int max_scroll = std::max(0, static_cast<int>(sample_library_.size()) - vis_rows);
+                        if (max_scroll > 0) {
+                            audio_lib_scroll_idx_ = std::clamp(audio_lib_scroll_idx_ - steps, 0, max_scroll);
+                        }
                     }
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
@@ -1478,6 +1563,11 @@ private:
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
+                if (wp == VK_F4) {
+                    toggle_or_focus_window(WindowId::AudioLibrary);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
                 if (wp == VK_F5) {
                     toggle_or_focus_window(WindowId::Playlist);
                     InvalidateRect(hwnd, NULL, FALSE);
@@ -1531,6 +1621,11 @@ private:
                     }
                     if (wp == 'I') {
                         toggle_or_focus_window(WindowId::Inspector);
+                        InvalidateRect(hwnd, NULL, FALSE);
+                        return 0;
+                    }
+                    if (wp == 'B') {
+                        toggle_or_focus_window(WindowId::AudioLibrary);
                         InvalidateRect(hwnd, NULL, FALSE);
                         return 0;
                     }
@@ -1830,6 +1925,9 @@ private:
                 case WindowId::Inspector:
                     render_inspector_d2d(*win);
                     break;
+                case WindowId::AudioLibrary:
+                    render_audio_library_d2d(*win);
+                    break;
             }
             d2d_target_->PopAxisAlignedClip();
         }
@@ -1838,6 +1936,17 @@ private:
 
         if (active_editor_channel_ != 0) {
             render_plugin_editor_d2d();
+        }
+
+        if (is_dragging_sample_) {
+            const auto& t = D2DRenderer::theme();
+            float bx = static_cast<float>(current_mouse_x_ + 14);
+            float by = static_cast<float>(current_mouse_y_ + 14);
+            D2D1_RECT_F badge_rc = D2D1::RectF(bx, by, bx + 200.0f, by + 28.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, badge_rc, D2D1::ColorF(0.08f, 0.12f, 0.16f, 0.94f), t.accent, 4.0f, 1.5f);
+            std::string badge_txt = "🎵 " + dragged_sample_name_;
+            D2DRenderer::draw_text(d2d_target_, dwrite_small_, badge_txt, badge_rc, t.accent_bright,
+                                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
 
         HRESULT hr = d2d_target_->EndDraw();
@@ -1986,12 +2095,17 @@ private:
         D2DRenderer::draw_icon_button(d2d_target_, insp_btn_rc, SvgIconType::TrackFx,
                                       insp_top, t.accent, win_inspector_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
 
-        D2D1_RECT_F mag_btn_rc = D2D1::RectF(1054.0f, 8.0f, 1090.0f, 40.0f);
+        D2D1_RECT_F lib_btn_rc = D2D1::RectF(1054.0f, 8.0f, 1090.0f, 40.0f);
+        bool lib_top = (active_window_ == WindowId::AudioLibrary && win_audio_library_.visible);
+        D2DRenderer::draw_icon_button(d2d_target_, lib_btn_rc, SvgIconType::Folder,
+                                      lib_top, t.accent, win_audio_library_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
+
+        D2D1_RECT_F mag_btn_rc = D2D1::RectF(1094.0f, 8.0f, 1130.0f, 40.0f);
         D2DRenderer::draw_icon_button(d2d_target_, mag_btn_rc, SvgIconType::Magnet,
                                       magnet_enabled_, t.accent, t.bg_control, 3.5f, 16.0f);
 
         // 7. Real-Time Audio Signal Oscilloscope Section (Electric violet phosphor filament)
-        float spec_x = 1098.0f;
+        float spec_x = 1138.0f;
         float spec_max_right = static_cast<float>(client_w_ - 88);
         if (spec_max_right > spec_x + 50.0f) {
             float spec_w = std::min(240.0f, spec_max_right - spec_x);
@@ -2517,31 +2631,126 @@ private:
                 std::string clip_title = clip_pat ? ("≡ " + clip_pat->name()) : ("≡ Pat " + std::to_string(clip.pattern_id));
                 D2DRenderer::draw_text(d2d_target_, dwrite_small_, clip_title, header_rc, t.text_primary);
 
-                // Note previews inside clip body with boundary clamping (non-looping: triggers once at defined offset)
+                // Previews inside clip body: Waveform signal for AudioClipDevice or Note blocks for synths
                 if (clip_pat) {
                     float body_top = t_y + 2.0f + hdr_h;
                     float body_h = step_h - 4.0f - hdr_h;
 
-                    for (const auto& [cid, nset] : clip_pat->channel_notes()) {
-                        for (const auto& n : nset.notes()) {
-                            if (n.start >= clip.length) continue;
-                            domain::Tick abs_n_start = clip.start + n.start;
-                            domain::Tick abs_n_end = abs_n_start + n.length;
+                    bool is_audio_clip = false;
+                    plugins::AudioClipDevice* clipper_dev = nullptr;
+                    if (!clip_pat->channel_notes().empty()) {
+                        bool all_audio_clips = true;
+                        for (const auto& [cid, nset] : clip_pat->channel_notes()) {
+                            if (nset.notes().empty()) continue;
+                            auto* ch = proj.get_channel(cid);
+                            if (!ch || ch->device_uid() != "core.generator.audioclip") {
+                                all_audio_clips = false;
+                                break;
+                            }
+                            if (!clipper_dev) {
+                                auto dev = engine_.get_or_create_channel_device(cid);
+                                clipper_dev = dynamic_cast<plugins::AudioClipDevice*>(dev.get());
+                            }
+                        }
+                        if (all_audio_clips && clipper_dev && !clipper_dev->sample_l().empty()) {
+                            is_audio_clip = true;
+                        }
+                    }
 
-                            if (abs_n_end > draw_start && abs_n_start < draw_end) {
-                                double n_rel_start = double(abs_n_start - draw_start) / double(draw_end - draw_start);
-                                double n_rel_len = double(n.length) / double(draw_end - draw_start);
+                    if (is_audio_clip && clipper_dev) {
+                        // Render Waveform Signal Peak Display
+                        const auto& smp_l = clipper_dev->sample_l();
+                        const size_t num_smp = smp_l.size();
+                        float mid_y = body_top + body_h * 0.5f;
+                        float amp_h = (body_h * 0.5f) - 1.0f;
 
-                                float raw_nx = cx + static_cast<float>(n_rel_start * cw);
-                                float raw_nw = std::max(3.0f, static_cast<float>(n_rel_len * cw));
-                                float nx = std::clamp(raw_nx, cx + 1.0f, cx + cw - 2.0f);
-                                float max_r = cx + cw - 1.0f;
-                                float nw = std::max(2.0f, std::min(raw_nw, max_r - nx));
-                                float norm_p = float(n.pitch % 24) / 24.0f;
-                                float ny = body_top + (1.0f - norm_p) * (body_h - 5.0f) + 1.0f;
+                        // Center zero-crossing baseline
+                        ID2D1SolidColorBrush* br_wave_base = nullptr;
+                        d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.18f, 0.45f, 0.55f, 0.40f), &br_wave_base);
+                        if (br_wave_base) {
+                            d2d_target_->DrawLine(D2D1::Point2F(cx + 2.0f, mid_y), D2D1::Point2F(cx + cw - 2.0f, mid_y), br_wave_base, 1.0f);
+                            br_wave_base->Release();
+                        }
 
-                                D2D1_RECT_F note_rc = D2D1::RectF(nx, ny, nx + nw, ny + 2.5f);
-                                D2DRenderer::draw_rounded_box(d2d_target_, note_rc, t.note_silver, t.note_border, 1.0f);
+                        ID2D1SolidColorBrush* br_wave = nullptr;
+                        d2d_target_->CreateSolidColorBrush(D2D1::ColorF(0.20f, 0.92f, 0.88f, 0.85f), &br_wave);
+                        if (br_wave && num_smp > 0) {
+                            int x_start = static_cast<int>(cx + 2.0f);
+                            int x_end = static_cast<int>(cx + cw - 2.0f);
+
+                            double sr = clipper_dev->file_sample_rate() > 0 ? static_cast<double>(clipper_dev->file_sample_rate()) : 44100.0;
+                            double bpm = proj.time_map().get_bpm_at(clip.start);
+                            double ppq = static_cast<double>(proj.time_map().ppq());
+                            double sample_dur_sec = static_cast<double>(num_smp) / sr;
+                            double sample_total_ticks = sample_dur_sec * (bpm / 60.0) * ppq;
+                            if (sample_total_ticks < 1.0) sample_total_ticks = 1.0;
+
+                            double draw_tick_span = double(draw_end - draw_start);
+                            bool looping = clipper_dev->use_loop_points() || clipper_dev->ping_pong_loop();
+
+                            for (int px_col = x_start; px_col < x_end; ++px_col) {
+                                double rel_draw = (cw > 0.0f) ? (double(px_col - cx) / double(cw)) : 0.0;
+                                domain::Tick tick_at_px = draw_start + static_cast<domain::Tick>(rel_draw * draw_tick_span);
+                                domain::Tick tick_in_clip = tick_at_px - clip.start;
+                                if (tick_in_clip < 0) continue;
+
+                                double sample_prog = double(tick_in_clip) / sample_total_ticks;
+                                if (looping) {
+                                    sample_prog = std::fmod(sample_prog, 1.0);
+                                    if (sample_prog < 0.0) sample_prog += 1.0;
+                                } else if (sample_prog >= 1.0) {
+                                    continue;
+                                }
+
+                                size_t idx_s = static_cast<size_t>(sample_prog * double(num_smp));
+                                double ticks_per_col = (cw > 0.0f) ? (draw_tick_span / double(cw)) : 1.0;
+                                double frames_per_tick = sr / ((bpm / 60.0) * ppq);
+                                size_t span_frames = std::max(size_t(1), static_cast<size_t>(ticks_per_col * frames_per_tick));
+                                size_t idx_e = std::min(num_smp, idx_s + span_frames);
+
+                                float min_v = smp_l[idx_s];
+                                float max_v = smp_l[idx_s];
+                                size_t step = std::max(size_t(1), (idx_e - idx_s) / 16);
+                                for (size_t si = idx_s; si < idx_e; si += step) {
+                                    float val = smp_l[si];
+                                    if (val < min_v) min_v = val;
+                                    if (val > max_v) max_v = val;
+                                }
+
+                                float y_top = mid_y - std::clamp(max_v, -1.0f, 1.0f) * amp_h;
+                                float y_bot = mid_y - std::clamp(min_v, -1.0f, 1.0f) * amp_h;
+                                if (y_top > y_bot) std::swap(y_top, y_bot);
+                                if ((y_bot - y_top) < 1.0f) {
+                                    y_top = mid_y - 0.5f;
+                                    y_bot = mid_y + 0.5f;
+                                }
+                                d2d_target_->DrawLine(D2D1::Point2F(float(px_col), y_top), D2D1::Point2F(float(px_col), y_bot), br_wave, 1.0f);
+                            }
+                            br_wave->Release();
+                        }
+                    } else {
+                        // Standard note blocks preview
+                        for (const auto& [cid, nset] : clip_pat->channel_notes()) {
+                            for (const auto& n : nset.notes()) {
+                                if (n.start >= clip.length) continue;
+                                domain::Tick abs_n_start = clip.start + n.start;
+                                domain::Tick abs_n_end = abs_n_start + n.length;
+
+                                if (abs_n_end > draw_start && abs_n_start < draw_end) {
+                                    double n_rel_start = double(abs_n_start - draw_start) / double(draw_end - draw_start);
+                                    double n_rel_len = double(n.length) / double(draw_end - draw_start);
+
+                                    float raw_nx = cx + static_cast<float>(n_rel_start * cw);
+                                    float raw_nw = std::max(3.0f, static_cast<float>(n_rel_len * cw));
+                                    float nx = std::clamp(raw_nx, cx + 1.0f, cx + cw - 2.0f);
+                                    float max_r = cx + cw - 1.0f;
+                                    float nw = std::max(2.0f, std::min(raw_nw, max_r - nx));
+                                    float norm_p = float(n.pitch % 24) / 24.0f;
+                                    float ny = body_top + (1.0f - norm_p) * (body_h - 5.0f) + 1.0f;
+
+                                    D2D1_RECT_F note_rc = D2D1::RectF(nx, ny, nx + nw, ny + 2.5f);
+                                    D2DRenderer::draw_rounded_box(d2d_target_, note_rc, t.note_silver, t.note_border, 1.0f);
+                                }
                             }
                         }
                     }
@@ -3012,6 +3221,140 @@ private:
         render_inspector_d2d(win_inspector_);
     }
 
+    void render_audio_library_d2d(const DawWindow& win) {
+        const auto& t = D2DRenderer::theme();
+        D2D1_RECT_F content_rc = win.get_content_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, content_rc, t.bg_surface, t.border_subtle, 0.0f);
+
+        float px = win.x;
+        float py = win.y + DawWindow::kTitleBarHeight;
+        float pw = win.w;
+        float ph = win.h - DawWindow::kTitleBarHeight;
+
+        // 1. Top Action Toolbar
+        // [📂 Browse...]
+        D2D1_RECT_F browse_rc = D2D1::RectF(px + 8.0f, py + 6.0f, px + 96.0f, py + 30.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, browse_rc, "📂 Browse...", false, t.accent, t.bg_control, 3.0f);
+
+        // [🔄 Rescan]
+        D2D1_RECT_F rescan_rc = D2D1::RectF(px + 102.0f, py + 6.0f, px + 174.0f, py + 30.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, rescan_rc, "🔄 Rescan", false, t.bg_control, t.bg_control, 3.0f);
+
+        // [⚡ Quick Samples]
+        D2D1_RECT_F quick_rc = D2D1::RectF(px + 180.0f, py + 6.0f, px + pw - 8.0f, py + 30.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, quick_rc, "⚡ Quick Load", false, t.accent_bright, t.bg_control, 3.0f);
+
+        // 2. Directory Path & Summary Bar
+        float dir_y = py + 34.0f;
+        D2D1_RECT_F dir_rc = D2D1::RectF(px + 8.0f, dir_y, px + pw - 8.0f, dir_y + 24.0f);
+        D2DRenderer::draw_rounded_box(d2d_target_, dir_rc, t.bg_surface_2, t.border_subtle, 3.0f);
+
+        std::string cur_dir = sample_library_.current_directory();
+        std::string dir_display = cur_dir.empty() ? "Folder: (No folder selected - Click Browse)" : ("📁 " + cur_dir);
+        if (dir_display.length() > 36) {
+            dir_display = dir_display.substr(0, 16) + "..." + dir_display.substr(dir_display.length() - 17);
+        }
+        D2D1_RECT_F dir_txt_rc = D2D1::RectF(px + 14.0f, dir_y + 2.0f, px + pw - 80.0f, dir_y + 22.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, dir_display, dir_txt_rc, t.text_secondary,
+                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        std::string count_txt = std::to_string(sample_library_.size()) + " files";
+        D2D1_RECT_F count_rc = D2D1::RectF(px + pw - 78.0f, dir_y + 2.0f, px + pw - 12.0f, dir_y + 22.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, count_txt, count_rc, t.accent_bright,
+                              DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        // Divider
+        ID2D1SolidColorBrush* br_div = nullptr;
+        d2d_target_->CreateSolidColorBrush(t.border_subtle, &br_div);
+        if (br_div) {
+            d2d_target_->DrawLine(D2D1::Point2F(px + 8.0f, py + 62.0f), D2D1::Point2F(px + pw - 8.0f, py + 62.0f), br_div, 1.0f);
+            br_div->Release();
+        }
+
+        // 3. Sample List Content Area
+        float list_top = py + 66.0f;
+        float list_bot = py + ph - 8.0f;
+        float list_h = list_bot - list_top;
+        float row_h = 36.0f;
+        int vis_rows = std::max(1, static_cast<int>(list_h / row_h));
+
+        if (sample_library_.empty()) {
+            D2D1_RECT_F empty_rc1 = D2D1::RectF(px + 16.0f, list_top + 40.0f, px + pw - 16.0f, list_top + 70.0f);
+            D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "📁 Sample Library Empty", empty_rc1, t.text_secondary,
+                                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            D2D1_RECT_F empty_rc2 = D2D1::RectF(px + 16.0f, list_top + 75.0f, px + pw - 16.0f, list_top + 140.0f);
+            std::string hint = "Click [Browse...] above to choose a folder of samples,\nor click [Quick Load] to load project sounds.\n\nDrag any audio file to Channel Rack or Playlist!";
+            D2DRenderer::draw_text(d2d_target_, dwrite_small_, hint, empty_rc2, t.text_muted,
+                                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            return;
+        }
+
+        int max_scroll = std::max(0, static_cast<int>(sample_library_.size()) - vis_rows);
+        audio_lib_scroll_idx_ = std::clamp(audio_lib_scroll_idx_, 0, max_scroll);
+
+        // List clip rect
+        D2D1_RECT_F list_clip_rc = D2D1::RectF(px + 4.0f, list_top, px + pw - 4.0f, list_bot);
+        d2d_target_->PushAxisAlignedClip(list_clip_rc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        for (int r = 0; r < vis_rows; ++r) {
+            size_t s_idx = static_cast<size_t>(audio_lib_scroll_idx_ + r);
+            if (s_idx >= sample_library_.size()) break;
+            const auto& smp = sample_library_.samples()[s_idx];
+            float ry = list_top + float(r) * row_h;
+
+            bool is_sel = (selected_sample_idx_ == static_cast<int>(s_idx));
+            bool is_hov = (hover_sample_idx_ == static_cast<int>(s_idx));
+
+            D2D1_RECT_F row_rc = D2D1::RectF(px + 8.0f, ry, px + pw - 22.0f, ry + row_h - 2.0f);
+            D2D1_COLOR_F bg_col = is_sel ? D2D1::ColorF(0.12f, 0.28f, 0.38f, 0.90f)
+                                        : (is_hov ? t.bg_surface_2
+                                                  : (r % 2 == 0 ? t.bg_surface : t.bg_app));
+            D2D1_COLOR_F bdr_col = is_sel ? t.accent_bright : (is_hov ? t.border_default : t.border_subtle);
+            D2DRenderer::draw_rounded_box(d2d_target_, row_rc, bg_col, bdr_col, 3.0f, is_sel ? 1.5f : 1.0f);
+
+            // Preview Play button [▶]
+            D2D1_RECT_F play_btn_rc = D2D1::RectF(px + 12.0f, ry + 5.0f, px + 36.0f, ry + row_h - 7.0f);
+            D2DRenderer::draw_button(d2d_target_, dwrite_small_, play_btn_rc, "▶", false, t.accent_bright, t.bg_control, 3.0f);
+
+            // Format Badge (e.g. WAV, MP3, etc.)
+            std::string ext_badge = smp.extension;
+            if (!ext_badge.empty() && ext_badge[0] == '.') ext_badge = ext_badge.substr(1);
+            std::transform(ext_badge.begin(), ext_badge.end(), ext_badge.begin(), ::toupper);
+            D2D1_RECT_F badge_rc = D2D1::RectF(px + 40.0f, ry + 7.0f, px + 76.0f, ry + row_h - 9.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, badge_rc, t.bg_control, t.border_subtle, 2.0f);
+            D2DRenderer::draw_text(d2d_target_, dwrite_small_, ext_badge, badge_rc, t.accent,
+                                  DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            // Sample Name
+            D2D1_RECT_F name_rc = D2D1::RectF(px + 82.0f, ry + 2.0f, px + pw - 28.0f, ry + 19.0f);
+            D2DRenderer::draw_text(d2d_target_, dwrite_bold_, smp.name, name_rc, t.text_primary,
+                                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            // Secondary Details (Duration, Channels, Size)
+            std::string details = smp.formatted_duration() + " • " + smp.formatted_channels() + " • " + smp.formatted_size();
+            D2D1_RECT_F detail_rc = D2D1::RectF(px + 82.0f, ry + 18.0f, px + pw - 28.0f, ry + row_h - 4.0f);
+            D2DRenderer::draw_text(d2d_target_, dwrite_small_, details, detail_rc, t.text_secondary,
+                                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+
+        d2d_target_->PopAxisAlignedClip();
+
+        // Vertical Scrollbar if needed
+        if (max_scroll > 0) {
+            float sb_x = px + pw - 18.0f;
+            float sb_w = 8.0f;
+            D2D1_RECT_F track_rc = D2D1::RectF(sb_x, list_top, sb_x + sb_w, list_bot);
+            D2DRenderer::draw_rounded_box(d2d_target_, track_rc, t.bg_control, t.border_subtle, 2.0f);
+
+            float thumb_h = std::max(20.0f, (float(vis_rows) / float(sample_library_.size())) * list_h);
+            float scroll_ratio = float(audio_lib_scroll_idx_) / float(max_scroll);
+            float thumb_y = list_top + scroll_ratio * (list_h - thumb_h);
+            D2D1_RECT_F thumb_rc = D2D1::RectF(sb_x, thumb_y, sb_x + sb_w, thumb_y + thumb_h);
+            D2DRenderer::draw_rounded_box(d2d_target_, thumb_rc, t.accent_bright, t.accent_bright, 2.0f);
+        }
+    }
+
     void render_mixer_panel_d2d(const DawWindow& win) {
         const auto& t = D2DRenderer::theme();
         D2D1_RECT_F mixer_rc = win.get_content_rect();
@@ -3142,6 +3485,25 @@ private:
     void render_plugin_editor_d2d() {
         if (active_editor_channel_ == 0) return;
         auto* dev = get_active_channel_synth();
+        if (!dev) return;
+
+        auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev);
+        if (clipper) {
+            float mw = 760.0f;
+            float mh = 540.0f;
+            float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+            float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+            editor_bounds_ = {static_cast<LONG>(mx), static_cast<LONG>(my), static_cast<LONG>(mx + mw), static_cast<LONG>(my + mh)};
+
+            uint8_t m_track = 0;
+            auto* ch = engine_.session().project().get_channel(active_editor_channel_);
+            if (ch) m_track = ch->settings().mixer_track;
+
+            AudioClipEditor::render_d2d(d2d_target_, dwrite_bold_, dwrite_small_, clipper, editor_bounds_,
+                                       clipper_active_tab_, clipper_env_subtab_, m_track);
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -3353,6 +3715,9 @@ private:
                 case WindowId::Inspector:
                     render_inspector_gdi(*win);
                     break;
+                case WindowId::AudioLibrary:
+                    render_audio_library(*win);
+                    break;
             }
 
             SelectClipRgn(mem_dc_, NULL);
@@ -3365,6 +3730,15 @@ private:
         // 5. Render Floating Plugin Editor Modal if open
         if (active_editor_channel_ != 0) {
             render_plugin_editor();
+        }
+
+        if (is_dragging_sample_) {
+            int bx = current_mouse_x_ + 14;
+            int by = current_mouse_y_ + 14;
+            RECT badge_rc{bx, by, bx + 200, by + 28};
+            GuiRenderer::draw_rounded_box(mem_dc_, badge_rc, RGB(20, 30, 40), t.accent, 4);
+            std::string badge_txt = "🎵 " + dragged_sample_name_;
+            GuiRenderer::draw_text(mem_dc_, badge_txt, badge_rc, t.accent_bright, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
         BitBlt(target_hdc, 0, 0, client_w_, client_h_, mem_dc_, 0, 0, SRCCOPY);
@@ -3500,12 +3874,17 @@ private:
         GuiRenderer::draw_icon_button(mem_dc_, insp_btn_rc, SvgIconType::TrackFx,
                                       insp_top, t.accent, win_inspector_.visible ? t.bg_surface_2 : t.bg_control);
 
-        RECT mag_btn_rc{1054, 8, 1090, 40};
+        RECT lib_btn_rc{1054, 8, 1090, 40};
+        bool lib_top = (active_window_ == WindowId::AudioLibrary && win_audio_library_.visible);
+        GuiRenderer::draw_icon_button(mem_dc_, lib_btn_rc, SvgIconType::Folder,
+                                      lib_top, t.accent, win_audio_library_.visible ? t.bg_surface_2 : t.bg_control);
+
+        RECT mag_btn_rc{1094, 8, 1130, 40};
         GuiRenderer::draw_icon_button(mem_dc_, mag_btn_rc, SvgIconType::Magnet,
                                       magnet_enabled_, t.accent, t.bg_control);
 
         // Analog Real-Time Audio Signal Oscilloscope Section (Electric violet phosphor filament)
-        int spec_x = 1098;
+        int spec_x = 1138;
         int spec_max_right = client_w_ - 88;
         if (spec_max_right > spec_x + 50) {
             int spec_w = std::min(240, spec_max_right - spec_x);
@@ -3927,24 +4306,118 @@ private:
                     int body_top = t_y + 2 + hdr_h;
                     int body_h = step_h - 4 - hdr_h;
 
-                    for (const auto& [cid, nset] : clip_pat->channel_notes()) {
-                        for (const auto& n : nset.notes()) {
-                            if (n.start >= clip.length) continue;
-                            domain::Tick abs_n_start = clip.start + n.start;
-                            domain::Tick abs_n_end = abs_n_start + n.length;
+                    bool is_audio_clip = false;
+                    plugins::AudioClipDevice* clipper_dev = nullptr;
+                    if (!clip_pat->channel_notes().empty()) {
+                        bool all_audio_clips = true;
+                        for (const auto& [cid, nset] : clip_pat->channel_notes()) {
+                            if (nset.notes().empty()) continue;
+                            auto* ch = proj.get_channel(cid);
+                            if (!ch || ch->device_uid() != "core.generator.audioclip") {
+                                all_audio_clips = false;
+                                break;
+                            }
+                            if (!clipper_dev) {
+                                auto dev = engine_.get_or_create_channel_device(cid);
+                                clipper_dev = dynamic_cast<plugins::AudioClipDevice*>(dev.get());
+                            }
+                        }
+                        if (all_audio_clips && clipper_dev && !clipper_dev->sample_l().empty()) {
+                            is_audio_clip = true;
+                        }
+                    }
 
-                            if (abs_n_end > draw_start && abs_n_start < draw_end) {
-                                double n_rel_start = double(abs_n_start - draw_start) / double(draw_end - draw_start);
-                                double n_rel_len = double(n.length) / double(draw_end - draw_start);
-                                int raw_nx = cx + static_cast<int>(n_rel_start * float(cw));
-                                int raw_nw = std::max(3, static_cast<int>(n_rel_len * float(cw)));
-                                int nx = std::clamp(raw_nx, cx + 1, cx + cw - 2);
-                                int max_r = cx + cw - 1;
-                                int nw = std::max(2, std::min(raw_nw, max_r - nx));
-                                float norm_p = float(n.pitch % 24) / 24.0f;
-                                int ny = body_top + static_cast<int>((1.0f - norm_p) * float(body_h - 5)) + 1;
-                                RECT n_rc{nx, ny, nx + nw, ny + 2};
-                                GuiRenderer::draw_rounded_box(mem_dc_, n_rc, t.note_silver, t.border_subtle, 1);
+                    if (is_audio_clip && clipper_dev) {
+                        const auto& smp_l = clipper_dev->sample_l();
+                        const size_t num_smp = smp_l.size();
+                        int mid_y = body_top + body_h / 2;
+                        float amp_h = float(body_h / 2) - 1.0f;
+
+                        // Center zero-crossing baseline
+                        HPEN base_pen = CreatePen(PS_SOLID, 1, RGB(35, 65, 80));
+                        HGDIOBJ old_base = SelectObject(mem_dc_, base_pen);
+                        MoveToEx(mem_dc_, cx + 2, mid_y, NULL);
+                        LineTo(mem_dc_, cx + cw - 2, mid_y);
+                        SelectObject(mem_dc_, old_base);
+                        DeleteObject(base_pen);
+
+                        HPEN wave_pen = CreatePen(PS_SOLID, 1, RGB(50, 220, 205));
+                        HGDIOBJ old_pen = SelectObject(mem_dc_, wave_pen);
+
+                        if (num_smp > 0) {
+                            int x_start = cx + 2;
+                            int x_end = cx + cw - 2;
+
+                            double sr = clipper_dev->file_sample_rate() > 0 ? static_cast<double>(clipper_dev->file_sample_rate()) : 44100.0;
+                            double bpm = proj.time_map().get_bpm_at(clip.start);
+                            double ppq = static_cast<double>(proj.time_map().ppq());
+                            double sample_dur_sec = static_cast<double>(num_smp) / sr;
+                            double sample_total_ticks = sample_dur_sec * (bpm / 60.0) * ppq;
+                            if (sample_total_ticks < 1.0) sample_total_ticks = 1.0;
+
+                            double draw_tick_span = double(draw_end - draw_start);
+                            bool looping = clipper_dev->use_loop_points() || clipper_dev->ping_pong_loop();
+
+                            for (int px_col = x_start; px_col < x_end; ++px_col) {
+                                double rel_draw = (cw > 0) ? (double(px_col - cx) / double(cw)) : 0.0;
+                                domain::Tick tick_at_px = draw_start + static_cast<domain::Tick>(rel_draw * draw_tick_span);
+                                domain::Tick tick_in_clip = tick_at_px - clip.start;
+                                if (tick_in_clip < 0) continue;
+
+                                double sample_prog = double(tick_in_clip) / sample_total_ticks;
+                                if (looping) {
+                                    sample_prog = std::fmod(sample_prog, 1.0);
+                                    if (sample_prog < 0.0) sample_prog += 1.0;
+                                } else if (sample_prog >= 1.0) {
+                                    continue;
+                                }
+
+                                size_t idx_s = static_cast<size_t>(sample_prog * double(num_smp));
+                                double ticks_per_col = (cw > 0) ? (draw_tick_span / double(cw)) : 1.0;
+                                double frames_per_tick = sr / ((bpm / 60.0) * ppq);
+                                size_t span_frames = std::max(size_t(1), static_cast<size_t>(ticks_per_col * frames_per_tick));
+                                size_t idx_e = std::min(num_smp, idx_s + span_frames);
+
+                                float min_v = smp_l[idx_s];
+                                float max_v = smp_l[idx_s];
+                                size_t step = std::max(size_t(1), (idx_e - idx_s) / 16);
+                                for (size_t si = idx_s; si < idx_e; si += step) {
+                                    float val = smp_l[si];
+                                    if (val < min_v) min_v = val;
+                                    if (val > max_v) max_v = val;
+                                }
+
+                                int y_top = mid_y - static_cast<int>(std::round(std::clamp(max_v, -1.0f, 1.0f) * amp_h));
+                                int y_bot = mid_y - static_cast<int>(std::round(std::clamp(min_v, -1.0f, 1.0f) * amp_h));
+                                if (y_top > y_bot) std::swap(y_top, y_bot);
+                                if (y_top == y_bot) { y_top = mid_y - 1; y_bot = mid_y + 1; }
+                                MoveToEx(mem_dc_, px_col, y_top, NULL);
+                                LineTo(mem_dc_, px_col, y_bot);
+                            }
+                        }
+                        SelectObject(mem_dc_, old_pen);
+                        DeleteObject(wave_pen);
+                    } else {
+                        // Standard note blocks
+                        for (const auto& [cid, nset] : clip_pat->channel_notes()) {
+                            for (const auto& n : nset.notes()) {
+                                if (n.start >= clip.length) continue;
+                                domain::Tick abs_n_start = clip.start + n.start;
+                                domain::Tick abs_n_end = abs_n_start + n.length;
+
+                                if (abs_n_end > draw_start && abs_n_start < draw_end) {
+                                    double n_rel_start = double(abs_n_start - draw_start) / double(draw_end - draw_start);
+                                    double n_rel_len = double(n.length) / double(draw_end - draw_start);
+                                    int raw_nx = cx + static_cast<int>(n_rel_start * float(cw));
+                                    int raw_nw = std::max(3, static_cast<int>(n_rel_len * float(cw)));
+                                    int nx = std::clamp(raw_nx, cx + 1, cx + cw - 2);
+                                    int max_r = cx + cw - 1;
+                                    int nw = std::max(2, std::min(raw_nw, max_r - nx));
+                                    float norm_p = float(n.pitch % 24) / 24.0f;
+                                    int ny = body_top + static_cast<int>((1.0f - norm_p) * float(body_h - 5)) + 1;
+                                    RECT n_rc{nx, ny, nx + nw, ny + 2};
+                                    GuiRenderer::draw_rounded_box(mem_dc_, n_rc, t.note_silver, t.border_subtle, 1);
+                                }
                             }
                         }
                     }
@@ -4349,6 +4822,130 @@ private:
         render_inspector_gdi(win_inspector_);
     }
 
+    void render_audio_library(const DawWindow& win) {
+        const auto& t = get_theme();
+        int px = static_cast<int>(win.x);
+        int py = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int pw = static_cast<int>(win.w);
+        int ph = static_cast<int>(win.h - DawWindow::kTitleBarHeight);
+
+        RECT content_rc{px, py, px + pw, py + ph};
+        GuiRenderer::draw_rounded_box(mem_dc_, content_rc, t.bg_surface, t.border_subtle, 0);
+
+        // 1. Top Action Toolbar
+        RECT browse_rc{px + 8, py + 6, px + 96, py + 30};
+        GuiRenderer::draw_button(mem_dc_, browse_rc, "📂 Browse...", false, t.accent, t.bg_control);
+
+        RECT rescan_rc{px + 102, py + 6, px + 174, py + 30};
+        GuiRenderer::draw_button(mem_dc_, rescan_rc, "🔄 Rescan", false, t.bg_control, t.bg_control);
+
+        RECT quick_rc{px + 180, py + 6, px + pw - 8, py + 30};
+        GuiRenderer::draw_button(mem_dc_, quick_rc, "⚡ Quick Load", false, t.accent_bright, t.bg_control);
+
+        // 2. Directory Path Bar
+        int dir_y = py + 34;
+        RECT dir_rc{px + 8, dir_y, px + pw - 8, dir_y + 24};
+        GuiRenderer::draw_rounded_box(mem_dc_, dir_rc, t.bg_surface_2, t.border_subtle, 3);
+
+        std::string cur_dir = sample_library_.current_directory();
+        std::string dir_display = cur_dir.empty() ? "Folder: (No folder selected - Click Browse)" : ("📁 " + cur_dir);
+        if (dir_display.length() > 36) {
+            dir_display = dir_display.substr(0, 16) + "..." + dir_display.substr(dir_display.length() - 17);
+        }
+        RECT dir_txt_rc{px + 14, dir_y + 2, px + pw - 80, dir_y + 22};
+        GuiRenderer::draw_text(mem_dc_, dir_display, dir_txt_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        std::string count_txt = std::to_string(sample_library_.size()) + " files";
+        RECT count_rc{px + pw - 78, dir_y + 2, px + pw - 12, dir_y + 22};
+        GuiRenderer::draw_text(mem_dc_, count_txt, count_rc, t.accent_bright, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        // Divider
+        HPEN div_pen = CreatePen(PS_SOLID, 1, t.border_subtle);
+        HGDIOBJ old_div = SelectObject(mem_dc_, div_pen);
+        MoveToEx(mem_dc_, px + 8, py + 62, NULL);
+        LineTo(mem_dc_, px + pw - 8, py + 62);
+        SelectObject(mem_dc_, old_div);
+        DeleteObject(div_pen);
+
+        // 3. Sample List Content Area
+        int list_top = py + 66;
+        int list_bot = py + ph - 8;
+        int list_h = list_bot - list_top;
+        int row_h = 36;
+        int vis_rows = std::max(1, list_h / row_h);
+
+        if (sample_library_.empty()) {
+            RECT empty_rc1{px + 16, list_top + 40, px + pw - 16, list_top + 70};
+            GuiRenderer::draw_text(mem_dc_, "📁 Sample Library Empty", empty_rc1, t.text_secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            RECT empty_rc2{px + 16, list_top + 75, px + pw - 16, list_top + 140};
+            std::string hint = "Click [Browse...] above to choose a folder of samples,\nor click [Quick Load] to load project sounds.\n\nDrag any audio file to Channel Rack or Playlist!";
+            GuiRenderer::draw_text(mem_dc_, hint, empty_rc2, t.text_muted, DT_CENTER | DT_WORDBREAK);
+            return;
+        }
+
+        int max_scroll = std::max(0, static_cast<int>(sample_library_.size()) - vis_rows);
+        audio_lib_scroll_idx_ = std::clamp(audio_lib_scroll_idx_, 0, max_scroll);
+
+        HRGN list_clip = CreateRectRgn(px + 4, list_top, px + pw - 4, list_bot);
+        SelectClipRgn(mem_dc_, list_clip);
+
+        for (int r = 0; r < vis_rows; ++r) {
+            size_t s_idx = static_cast<size_t>(audio_lib_scroll_idx_ + r);
+            if (s_idx >= sample_library_.size()) break;
+            const auto& smp = sample_library_.samples()[s_idx];
+            int ry = list_top + r * row_h;
+
+            bool is_sel = (selected_sample_idx_ == static_cast<int>(s_idx));
+            bool is_hov = (hover_sample_idx_ == static_cast<int>(s_idx));
+
+            RECT row_rc{px + 8, ry, px + pw - 22, ry + row_h - 2};
+            COLORREF bg_col = is_sel ? RGB(28, 55, 75)
+                                     : (is_hov ? t.bg_surface_2
+                                               : (r % 2 == 0 ? t.bg_surface : t.bg_app));
+            COLORREF bdr_col = is_sel ? t.accent_bright : (is_hov ? t.border_default : t.border_subtle);
+            GuiRenderer::draw_rounded_box(mem_dc_, row_rc, bg_col, bdr_col, 3);
+
+            // Preview Play button [▶]
+            RECT play_btn_rc{px + 12, ry + 5, px + 36, ry + row_h - 7};
+            GuiRenderer::draw_button(mem_dc_, play_btn_rc, "▶", false, t.accent_bright, t.bg_control);
+
+            // Format Badge
+            std::string ext_badge = smp.extension;
+            if (!ext_badge.empty() && ext_badge[0] == '.') ext_badge = ext_badge.substr(1);
+            std::transform(ext_badge.begin(), ext_badge.end(), ext_badge.begin(), ::toupper);
+            RECT badge_rc{px + 40, ry + 7, px + 76, ry + row_h - 9};
+            GuiRenderer::draw_rounded_box(mem_dc_, badge_rc, t.bg_control, t.border_subtle, 2);
+            GuiRenderer::draw_text(mem_dc_, ext_badge, badge_rc, t.accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            // Sample Name
+            RECT name_rc{px + 82, ry + 2, px + pw - 28, ry + 19};
+            GuiRenderer::draw_text(mem_dc_, smp.name, name_rc, t.text_primary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            // Secondary Details
+            std::string details = smp.formatted_duration() + " • " + smp.formatted_channels() + " • " + smp.formatted_size();
+            RECT detail_rc{px + 82, ry + 18, px + pw - 28, ry + row_h - 4};
+            GuiRenderer::draw_text(mem_dc_, details, detail_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        SelectClipRgn(mem_dc_, NULL);
+        DeleteObject(list_clip);
+
+        // Vertical Scrollbar if needed
+        if (max_scroll > 0) {
+            int sb_x = px + pw - 18;
+            int sb_w = 8;
+            RECT track_rc{sb_x, list_top, sb_x + sb_w, list_bot};
+            GuiRenderer::draw_rounded_box(mem_dc_, track_rc, t.bg_control, t.border_subtle, 2);
+
+            float thumb_h = std::max(20.0f, (float(vis_rows) / float(sample_library_.size())) * float(list_h));
+            float scroll_ratio = float(audio_lib_scroll_idx_) / float(max_scroll);
+            int thumb_y = list_top + static_cast<int>(scroll_ratio * (float(list_h) - thumb_h));
+            RECT thumb_rc{sb_x, thumb_y, sb_x + sb_w, static_cast<int>(thumb_y + thumb_h)};
+            GuiRenderer::draw_rounded_box(mem_dc_, thumb_rc, t.accent_bright, t.accent_bright, 2);
+        }
+    }
+
     void render_mixer_panel(const DawWindow& win) {
         const auto& t = get_theme();
         int mx = static_cast<int>(win.x);
@@ -4482,6 +5079,27 @@ private:
 
     // --- Interactive Plugin GUI Editor (Modal Window) ---
     void render_plugin_editor() {
+        if (active_editor_channel_ == 0) return;
+        auto* dev = get_active_channel_synth();
+        if (!dev) return;
+
+        auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev);
+        if (clipper) {
+            int mw = 760;
+            int mh = 540;
+            int mx = (client_w_ - mw) / 2;
+            int my = (client_h_ - mh) / 2;
+            editor_bounds_ = RECT{mx, my, mx + mw, my + mh};
+
+            uint8_t m_track = 0;
+            auto* ch = engine_.session().project().get_channel(active_editor_channel_);
+            if (ch) m_track = ch->settings().mixer_track;
+
+            AudioClipEditor::render_gdi(mem_dc_, clipper, editor_bounds_,
+                                       clipper_active_tab_, clipper_env_subtab_, m_track);
+            return;
+        }
+
         const auto& t = get_theme();
 
         int mw = 680;
@@ -4504,7 +5122,6 @@ private:
         RECT close_rc{mx + mw - 38, my + 6, mx + mw - 8, my + 32};
         GuiRenderer::draw_button(mem_dc_, close_rc, "✕", false, t.danger, t.bg_control);
 
-        auto* dev = get_active_channel_synth();
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
 
         SelectObject(mem_dc_, font_bold_);
@@ -4682,6 +5299,10 @@ private:
             return;
         }
         if (x >= 1054 && x <= 1090 && y >= 8 && y <= 40) {
+            toggle_or_focus_window(WindowId::AudioLibrary);
+            return;
+        }
+        if (x >= 1094 && x <= 1130 && y >= 8 && y <= 40) {
             magnet_enabled_ = !magnet_enabled_;
             status_message_ = magnet_enabled_ ? "Magnetic Snapping Enabled (Ctrl+M)" : "Magnetic Snapping Disabled (Ctrl+M)";
             return;
@@ -4764,6 +5385,9 @@ private:
                     return;
                 case WindowId::Inspector:
                     handle_inspector_click(*win, x, y);
+                    return;
+                case WindowId::AudioLibrary:
+                    handle_audio_library_click(*win, x, y);
                     return;
             }
             return;
@@ -5203,7 +5827,19 @@ private:
             }
             // [+ Add Instrument] button
             if (x >= px + 348 && x <= px + 460) {
-                add_channel();
+                POINT pt;
+                GetCursorPos(&pt);
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuA(hMenu, MF_STRING, 2001, "1. Clipper (AudioClip)");
+                AppendMenuA(hMenu, MF_STRING, 2002, "2. 3xOsc Synthesizer");
+                AppendMenuA(hMenu, MF_STRING, 2003, "3. DirectWave Sampler");
+                AppendMenuA(hMenu, MF_STRING, 2004, "4. FPC Drum Machine");
+                int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, nullptr);
+                DestroyMenu(hMenu);
+                if (cmd == 2001) add_channel_with_uid("core.generator.audioclip", "Clipper");
+                else if (cmd == 2002) add_channel_with_uid("core.generator.3xosc", "3xOsc Synth");
+                else if (cmd == 2003) add_channel_with_uid("core.generator.sampler", "DirectWave Sampler");
+                else if (cmd == 2004) add_channel_with_uid("core.generator.drum_sampler", "FPC Drum Machine");
                 return;
             }
             return;
@@ -5757,6 +6393,366 @@ private:
         handle_piano_roll_click(win_pianoroll_, x, y);
     }
 
+    void handle_audio_library_click(const DawWindow& win, int x, int y) {
+        float px = win.x;
+        float py = win.y + DawWindow::kTitleBarHeight;
+        float pw = win.w;
+        float ph = win.h - DawWindow::kTitleBarHeight;
+
+        // 1. Toolbar button clicks:
+        // [📂 Browse...]
+        if (x >= px + 8.0f && x <= px + 96.0f && y >= py + 6.0f && y <= py + 30.0f) {
+            browse_for_sample_folder();
+            return;
+        }
+        // [🔄 Rescan]
+        if (x >= px + 102.0f && x <= px + 174.0f && y >= py + 6.0f && y <= py + 30.0f) {
+            if (!sample_library_.current_directory().empty()) {
+                load_sample_directory(sample_library_.current_directory());
+            } else {
+                browse_for_sample_folder();
+            }
+            return;
+        }
+        // [⚡ Quick Load]
+        if (x >= px + 180.0f && x <= px + pw - 8.0f && y >= py + 6.0f && y <= py + 30.0f) {
+            quick_load_samples();
+            return;
+        }
+
+        // 2. Sample items list
+        float list_top = py + 66.0f;
+        float list_bot = py + ph - 8.0f;
+        float row_h = 36.0f;
+
+        if (y >= list_top && y <= list_bot) {
+            int rel_row = static_cast<int>((float(y) - list_top) / row_h);
+            size_t s_idx = static_cast<size_t>(audio_lib_scroll_idx_ + rel_row);
+            if (s_idx < sample_library_.size()) {
+                float ry = list_top + float(rel_row) * row_h;
+                // Check if clicked [▶] Play button:
+                if (x >= px + 12.0f && x <= px + 36.0f && y >= ry + 5.0f && y <= ry + row_h - 7.0f) {
+                    selected_sample_idx_ = static_cast<int>(s_idx);
+                    audition_sample(sample_library_.samples()[s_idx].path);
+                    return;
+                }
+
+                // Clicked row body -> start potential drag or selection
+                selected_sample_idx_ = static_cast<int>(s_idx);
+                sample_down_idx_ = static_cast<int>(s_idx);
+                sample_down_x_ = x;
+                sample_down_y_ = y;
+                dragged_sample_path_ = sample_library_.samples()[s_idx].path;
+                dragged_sample_name_ = sample_library_.samples()[s_idx].name;
+                is_potential_sample_drag_ = true;
+                is_dragging_sample_ = false;
+                SetCapture(hwnd_);
+                status_message_ = "Selected: " + sample_library_.samples()[s_idx].name + " (Release to audition, Drag to Channel Rack/Playlist)";
+                return;
+            }
+        }
+    }
+
+    void browse_for_sample_folder() {
+        BROWSEINFOA bi{};
+        bi.hwndOwner = hwnd_;
+        bi.lpszTitle = "Select Sample Library Folder";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+        if (pidl != nullptr) {
+            char path[MAX_PATH];
+            if (SHGetPathFromIDListA(pidl, path)) {
+                load_sample_directory(path);
+            }
+            CoTaskMemFree(pidl);
+        }
+    }
+
+    void load_sample_directory(const std::string& path) {
+        if (path.empty()) return;
+        sample_library_.scan(path);
+        if (config_) {
+            config_->set_string("SampleLibrary", "RootDirectory", path);
+            config_->flush();
+        }
+        audio_lib_scroll_idx_ = 0;
+        selected_sample_idx_ = -1;
+        hover_sample_idx_ = -1;
+        status_message_ = "Scanned Sample Library: " + std::to_string(sample_library_.size()) + " audio files in " + path;
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
+    void quick_load_samples() {
+        std::string sample_dir = "samples";
+        std::filesystem::create_directories(sample_dir);
+
+        auto make_wav = [](const std::string& path, int type) {
+            std::ofstream f(path, std::ios::binary);
+            if (!f.is_open()) return;
+            uint32_t sample_rate = 44100;
+            uint16_t num_channels = 2;
+            uint16_t bits_per_sample = 16;
+            size_t num_samples = (type == 1) ? 22050 : ((type == 2) ? 14000 : 35000);
+            uint32_t data_bytes = static_cast<uint32_t>(num_samples * num_channels * (bits_per_sample / 8));
+            uint32_t chunk_size = 36 + data_bytes;
+
+            f.write("RIFF", 4);
+            f.write(reinterpret_cast<const char*>(&chunk_size), 4);
+            f.write("WAVE", 4);
+            f.write("fmt ", 4);
+            uint32_t sub1_sz = 16;
+            f.write(reinterpret_cast<const char*>(&sub1_sz), 4);
+            uint16_t format = 1; // PCM
+            f.write(reinterpret_cast<const char*>(&format), 2);
+            f.write(reinterpret_cast<const char*>(&num_channels), 2);
+            f.write(reinterpret_cast<const char*>(&sample_rate), 4);
+            uint32_t byte_rate = sample_rate * num_channels * (bits_per_sample / 8);
+            f.write(reinterpret_cast<const char*>(&byte_rate), 4);
+            uint16_t block_align = num_channels * (bits_per_sample / 8);
+            f.write(reinterpret_cast<const char*>(&block_align), 2);
+            f.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
+            f.write("data", 4);
+            f.write(reinterpret_cast<const char*>(&data_bytes), 4);
+
+            for (size_t i = 0; i < num_samples; ++i) {
+                float t_sec = float(i) / float(sample_rate);
+                float val = 0.0f;
+                if (type == 0) {
+                    float f_inst = 45.0f + 110.0f * std::exp(-t_sec * 28.0f);
+                    float env = std::exp(-t_sec * 6.5f);
+                    val = std::sin(2.0f * 3.14159265f * f_inst * t_sec) * env;
+                } else if (type == 1) {
+                    float env = std::exp(-t_sec * 20.0f);
+                    float tone = std::sin(2.0f * 3.14159265f * 185.0f * t_sec) * 0.4f;
+                    float noise = (float(std::rand()) / float(RAND_MAX) * 2.0f - 1.0f) * 0.6f;
+                    val = (tone + noise) * env;
+                } else if (type == 2) {
+                    float env = std::exp(-t_sec * 50.0f);
+                    float noise = (float(std::rand()) / float(RAND_MAX) * 2.0f - 1.0f);
+                    val = noise * env * 0.7f;
+                } else {
+                    float env = std::exp(-t_sec * 2.2f);
+                    val = std::sin(2.0f * 3.14159265f * 55.0f * t_sec) * env;
+                }
+                int16_t s_pcm = static_cast<int16_t>(std::clamp(val, -1.0f, 1.0f) * 30000.0f);
+                f.write(reinterpret_cast<const char*>(&s_pcm), 2);
+                f.write(reinterpret_cast<const char*>(&s_pcm), 2);
+            }
+        };
+
+        make_wav("samples/808_Kick_Punch.wav", 0);
+        make_wav("samples/Analog_Snare_01.wav", 1);
+        make_wav("samples/Crisp_HiHat_Closed.wav", 2);
+        make_wav("samples/Sub_Bass_C.wav", 3);
+
+        load_sample_directory("samples");
+        status_message_ = "Loaded Quick Demo Samples into Audio Library!";
+    }
+
+    void audition_sample(const std::string& filepath) {
+        std::vector<float> left, right;
+        uint32_t sr = 44100;
+        uint16_t ch = 2;
+        if (app::SampleLibrary::decode_wav_samples(filepath, left, right, sr, ch)) {
+            engine_.preview_sample_data(std::move(left), std::move(right));
+            status_message_ = "Auditioning: " + filepath;
+        } else {
+            size_t num_s = 44100 / 2; // 0.5s preview chime
+            left.resize(num_s);
+            right.resize(num_s);
+            for (size_t i = 0; i < num_s; ++i) {
+                float t_sec = float(i) / 44100.0f;
+                float env = std::exp(-t_sec * 6.0f);
+                float s = std::sin(2.0f * 3.14159265f * 440.0f * t_sec) * 0.4f * env;
+                left[i] = s;
+                right[i] = s;
+            }
+            engine_.preview_sample_data(std::move(left), std::move(right));
+            status_message_ = "Previewing: " + filepath;
+        }
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
+    void handle_sample_drop(const std::string& path, const std::string& filename, int x, int y) {
+        DawWindow* target_win = nullptr;
+        for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+            auto* win = get_window(*it);
+            if (win && win->visible && win->contains(static_cast<float>(x), static_cast<float>(y))) {
+                target_win = win;
+                break;
+            }
+        }
+
+        if (!target_win) {
+            status_message_ = "Sample drop cancelled (dropped outside active windows)";
+            return;
+        }
+
+        if (target_win->id == WindowId::ChannelRack) {
+            drop_sample_to_channel_rack(path, filename);
+        } else if (target_win->id == WindowId::Playlist) {
+            drop_sample_to_playlist(path, filename, x, y);
+        } else {
+            status_message_ = "Sample can only be dropped onto Channel Rack or Playlist";
+        }
+    }
+
+    void drop_sample_to_channel_rack(const std::string& filepath, const std::string& filename) {
+        std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+        auto& proj = engine_.session().project();
+        const auto ppq = proj.time_map().ppq();
+
+        domain::ChannelSettings s;
+        size_t next_idx = proj.channels().size() + 1;
+        s.name = "Clipper: " + filename;
+        s.volume = domain::kDefaultChannelVolume;
+        s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
+        auto new_cid = proj.add_channel("core.generator.audioclip", s);
+
+        while (proj.tracks().size() < 4) {
+            domain::TrackId tid = static_cast<domain::TrackId>(proj.tracks().size() + 1);
+            proj.add_track("Track " + std::to_string(tid));
+        }
+
+        auto dev = engine_.get_or_create_channel_device(new_cid);
+        auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev.get());
+        if (clipper) {
+            clipper->set_root_key(60); // C5 default root
+            bool loaded = clipper->load_wav_file(filepath);
+            if (!loaded) {
+                std::vector<float> l, r;
+                uint32_t sr = 44100;
+                uint16_t ch = 2;
+                if (app::SampleLibrary::decode_wav_samples(filepath, l, r, sr, ch)) {
+                    clipper->load_sample_data(std::move(l), std::move(r), filename, 60);
+                } else {
+                    app::SampleFileInfo temp_info;
+                    temp_info.filename = filename;
+                    temp_info.duration_sec = 2.0;
+                    app::SampleLibrary::generate_preview_waveform(temp_info, l, r, sr);
+                    clipper->load_sample_data(std::move(l), std::move(r), filename, 60);
+                }
+            }
+        }
+
+        // Arm step 0 in active pattern
+        auto* pat = get_active_pattern();
+        if (!pat) {
+            uint32_t new_pat_id = proj.add_pattern();
+            select_pattern(new_pat_id);
+            pat = get_active_pattern();
+        }
+        if (pat) {
+            pat->get_or_create_channel_notes(new_cid).toggle_step(0, ppq, 60, 100);
+        }
+
+        selected_mixer_track_ = s.mixer_track;
+        bring_to_front(WindowId::ChannelRack);
+        status_message_ = "Loaded Clipper: " + filename + " into Channel Rack (Pattern Step 1 armed)";
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
+    void drop_sample_to_playlist(const std::string& filepath, const std::string& filename, int drop_x, int drop_y) {
+        std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+        auto& proj = engine_.session().project();
+        const auto ppq = proj.time_map().ppq();
+        const auto bar_ticks = 4 * ppq;
+
+        // Calculate target track index
+        float px = win_playlist_.x;
+        float py = win_playlist_.y + DawWindow::kTitleBarHeight;
+        float pw = win_playlist_.w;
+
+        int start_x = static_cast<int>(px + 110.0f);
+        int total_seq_w = std::max(60, static_cast<int>((px + pw - 12.0f) - start_x));
+        int start_y = static_cast<int>(py + 62.0f);
+        int row_h = 48;
+
+        int track_rel_idx = std::max(0, (drop_y - start_y) / row_h);
+        size_t target_t = static_cast<size_t>(sequencer_scroll_track_ + track_rel_idx);
+
+        while (proj.tracks().size() <= target_t) {
+            domain::TrackId tid = static_cast<domain::TrackId>(proj.tracks().size() + 1);
+            proj.add_track("Track " + std::to_string(tid));
+        }
+
+        // Calculate dropped tick and snap to beat
+        int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
+        domain::Tick view_start_tick = static_cast<domain::Tick>(sequencer_scroll_bar_) * bar_ticks;
+        domain::Tick view_duration = static_cast<domain::Tick>(bars_per_view) * bar_ticks;
+
+        float rel_x = std::clamp(static_cast<float>(drop_x - start_x), 0.0f, static_cast<float>(total_seq_w));
+        double norm_x = double(rel_x) / double(total_seq_w);
+        domain::Tick raw_tick = view_start_tick + static_cast<domain::Tick>(norm_x * view_duration);
+        domain::Tick snap_ticks = ppq; // 1 beat snap
+        domain::Tick start_tick = (raw_tick / snap_ticks) * snap_ticks;
+
+        // Find or create Clipper channel for this sample
+        domain::ChannelId clipper_cid = 0;
+        for (const auto& ch : proj.channels()) {
+            if (ch.device_uid() == "core.generator.audioclip" && ch.settings().name == "Clipper: " + filename) {
+                clipper_cid = ch.id();
+                break;
+            }
+        }
+
+        if (clipper_cid == 0) {
+            domain::ChannelSettings s;
+            size_t next_idx = proj.channels().size() + 1;
+            s.name = "Clipper: " + filename;
+            s.volume = domain::kDefaultChannelVolume;
+            s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
+            clipper_cid = proj.add_channel("core.generator.audioclip", s);
+        }
+
+        auto dev = engine_.get_or_create_channel_device(clipper_cid);
+        auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev.get());
+        if (clipper) {
+            clipper->set_root_key(60); // C5 default root
+            bool loaded = clipper->load_wav_file(filepath);
+            if (!loaded) {
+                std::vector<float> l, r;
+                uint32_t sr = 44100;
+                uint16_t ch = 2;
+                if (app::SampleLibrary::decode_wav_samples(filepath, l, r, sr, ch)) {
+                    clipper->load_sample_data(std::move(l), std::move(r), filename, 60);
+                } else {
+                    app::SampleFileInfo temp_info;
+                    temp_info.filename = filename;
+                    temp_info.duration_sec = 2.0;
+                    app::SampleLibrary::generate_preview_waveform(temp_info, l, r, sr);
+                    clipper->load_sample_data(std::move(l), std::move(r), filename, 60);
+                }
+            }
+        }
+
+        // Calculate duration in ticks based on sample length
+        domain::Tick clip_len_ticks = bar_ticks; // default 1 bar
+        if (clipper && !clipper->sample_l().empty()) {
+            double frames = static_cast<double>(clipper->sample_l().size());
+            double sr = clipper->file_sample_rate() > 0 ? clipper->file_sample_rate() : 44100.0;
+            double dur_sec = frames / sr;
+            double bpm = proj.time_map().bpm();
+            clip_len_ticks = std::max(ppq, static_cast<domain::Tick>(dur_sec * (bpm / 60.0) * ppq));
+        }
+
+        // Create dedicated pattern for this audio clip
+        uint32_t new_pat_id = proj.add_pattern();
+        auto* pat = proj.get_pattern(new_pat_id);
+        if (pat) {
+            pat->set_name(filename);
+            pat->add_note(clipper_cid, domain::Note{0, clip_len_ticks, 60, 100, 0, 0});
+        }
+
+        // Place Clip on the target track
+        proj.tracks()[target_t].add_clip(domain::Clip{new_pat_id, start_tick, clip_len_ticks, 0});
+
+        bring_to_front(WindowId::Playlist);
+        status_message_ = "Placed audio clip '" + filename + "' onto Track " + std::to_string(target_t + 1) +
+                          " at Bar " + std::to_string(start_tick / bar_ticks + 1) + " (Showing waveform signal)";
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
     void handle_channel_rack_right_click(const DawWindow& win, int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         int px = static_cast<int>(win.x);
@@ -5976,7 +6972,12 @@ private:
                 status_message_ = "Toggle / Focus Inspector / Track FX Window (F8 / Ctrl+I)";
                 return;
             }
-            if (x >= 956 && x <= 992) {
+            if (x >= 1054 && x <= 1090) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                status_message_ = "Toggle / Focus Audio Library Window (F4 / Ctrl+B)";
+                return;
+            }
+            if (x >= 1094 && x <= 1130) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = magnet_enabled_ ? "Disable Magnetic Snapping (Ctrl+M)" : "Enable Magnetic Snapping (Ctrl+M)";
                 return;
@@ -6133,6 +7134,51 @@ private:
                             }
                         }
                     }
+                }
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return;
+            }
+
+            if (win->id == WindowId::AudioLibrary) {
+                float px = win->x;
+                float py = win->y + DawWindow::kTitleBarHeight;
+                float pw = win->w;
+                float ph = win->h - DawWindow::kTitleBarHeight;
+
+                if (x >= px + 8.0f && x <= px + 96.0f && y >= py + 6.0f && y <= py + 30.0f) {
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    status_message_ = "Browse for audio samples directory";
+                    return;
+                }
+                if (x >= px + 102.0f && x <= px + 174.0f && y >= py + 6.0f && y <= py + 30.0f) {
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    status_message_ = "Rescan current sample folder";
+                    return;
+                }
+                if (x >= px + 180.0f && x <= px + pw - 8.0f && y >= py + 6.0f && y <= py + 30.0f) {
+                    SetCursor(LoadCursor(NULL, IDC_HAND));
+                    status_message_ = "Quick Load demo sample pack";
+                    return;
+                }
+
+                float list_top = py + 66.0f;
+                float list_bot = py + ph - 8.0f;
+                float row_h = 36.0f;
+                if (y >= list_top && y <= list_bot) {
+                    int rel_row = static_cast<int>((float(y) - list_top) / row_h);
+                    size_t s_idx = static_cast<size_t>(audio_lib_scroll_idx_ + rel_row);
+                    if (s_idx < sample_library_.size()) {
+                        hover_sample_idx_ = static_cast<int>(s_idx);
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        const auto& smp = sample_library_.samples()[s_idx];
+                        status_message_ = smp.name + " (" + smp.formatted_duration() + ", " + smp.formatted_size() + ") — Click [▶] to preview, Drag to Channel Rack/Playlist";
+                        InvalidateRect(hwnd_, NULL, FALSE);
+                        return;
+                    }
+                }
+                if (hover_sample_idx_ != -1) {
+                    hover_sample_idx_ = -1;
+                    InvalidateRect(hwnd_, NULL, FALSE);
                 }
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return;
@@ -6424,12 +7470,24 @@ private:
                 case WindowId::Inspector:
                     handle_inspector_right_click(*win, x, y);
                     return;
+                case WindowId::AudioLibrary:
+                    engine_.stop_sample_preview();
+                    status_message_ = "Stopped sample preview";
+                    return;
             }
             return;
         }
     }
 
     void on_mouse_move(int x, int y) {
+        if (is_potential_sample_drag_) {
+            int dx = x - sample_down_x_;
+            int dy = y - sample_down_y_;
+            if (dx * dx + dy * dy > 25) {
+                is_dragging_sample_ = true;
+            }
+        }
+
         if (is_dragging_window_) {
             auto* win = get_window(dragging_window_id_);
             if (!win) return;
@@ -6449,6 +7507,16 @@ private:
                 apply_resize_dragging(*win, dx, dy);
             }
             return;
+        }
+
+        if (active_editor_channel_ != 0 && dragging_clipper_knob_ != ClipperKnobId::None) {
+            auto* dev = get_active_channel_synth();
+            auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev);
+            if (clipper) {
+                AudioClipEditor::handle_drag(clipper, dragging_clipper_knob_,
+                                            drag_clipper_start_y_, drag_clipper_orig_val_, y, status_message_);
+                return;
+            }
         }
 
         if (dragging_inspector_vol_) {
@@ -6900,6 +7968,33 @@ private:
         }
 
         auto* dev = get_active_channel_synth();
+        if (!dev) return;
+
+        auto* clipper = dynamic_cast<plugins::AudioClipDevice*>(dev);
+        if (clipper) {
+            uint8_t m_track = 0;
+            auto* ch = engine_.session().project().get_channel(active_editor_channel_);
+            if (ch) m_track = ch->settings().mixer_track;
+
+            bool should_close = AudioClipEditor::handle_click(
+                hwnd_, clipper, editor_bounds_, x, y,
+                clipper_active_tab_, clipper_env_subtab_, m_track,
+                dragging_clipper_knob_, drag_clipper_start_y_, drag_clipper_orig_val_,
+                status_message_, [this](uint8_t pitch) { audition_note(pitch); });
+
+            if (ch && m_track != ch->settings().mixer_track) {
+                ch->settings().mixer_track = m_track;
+                selected_mixer_track_ = m_track;
+            }
+
+            if (should_close) {
+                active_editor_channel_ = 0;
+                dragging_clipper_knob_ = ClipperKnobId::None;
+                status_message_ = "Closed Instrument Editor";
+            }
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -7055,15 +8150,15 @@ private:
         }
     }
 
-    void add_channel() {
+    void add_channel_with_uid(const std::string& uid = "core.generator.audioclip", const std::string& name_prefix = "Clipper") {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         auto& proj = engine_.session().project();
         domain::ChannelSettings s;
         size_t next_idx = proj.channels().size() + 1;
-        s.name = "3xOsc Synth #" + std::to_string(next_idx);
+        s.name = name_prefix + " #" + std::to_string(next_idx);
         s.volume = domain::kDefaultChannelVolume;
         s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
-        auto new_cid = proj.add_channel("core.generator.3xosc", s);
+        auto new_cid = proj.add_channel(uid, s);
 
         while (proj.tracks().size() < 4) {
             domain::TrackId tid = static_cast<domain::TrackId>(proj.tracks().size() + 1);
@@ -7084,7 +8179,14 @@ private:
 
         selected_mixer_track_ = s.mixer_track;
 
+        // Automatically open editor for newly added instrument!
+        active_editor_channel_ = new_cid;
+
         status_message_ = "Added channel: " + s.name + " (Mapped to Track " + std::to_string(s.mixer_track) + ")";
+    }
+
+    void add_channel() {
+        add_channel_with_uid("core.generator.audioclip", "Clipper");
     }
 
     void do_undo() {
@@ -7148,7 +8250,6 @@ private:
         }
     }
 
-    app::Engine& engine_;
     HINSTANCE hinst_{NULL};
     HWND hwnd_{NULL};
     HDC mem_dc_{NULL};
@@ -7169,6 +8270,11 @@ private:
     domain::ChannelId active_editor_channel_{0}; // Channel currently being edited in VST GUI
     std::shared_ptr<domain::IDevice> active_synth_instance_{nullptr};
     RECT editor_bounds_{0, 0, 0, 0};
+    int clipper_active_tab_{0}; // 0 = Sample, 1 = Env/Inst, 2 = Misc
+    int clipper_env_subtab_{1}; // 0=Pan, 1=Vol (Default!), 2=ModX, 3=ModY, 4=Pitch
+    ClipperKnobId dragging_clipper_knob_{ClipperKnobId::None};
+    int drag_clipper_start_y_{0};
+    float drag_clipper_orig_val_{0.0f};
     bool is_mouse_down_{false};
     bool dragging_spm_{false};
     int dragging_mixer_track_{-1};

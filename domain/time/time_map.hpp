@@ -32,6 +32,7 @@ public:
     }
 
     [[nodiscard]] Tick ppq() const noexcept { return ppq_; }
+    [[nodiscard]] double bpm() const noexcept { return get_bpm_at(0); }
 
     void set_tempo(double bpm) {
         tempo_events_.clear();

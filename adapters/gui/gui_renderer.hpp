@@ -304,6 +304,20 @@ public:
             LineTo(hdc, P(20.5f, 8.0f).x, P(20.5f, 8.0f).y);
             break;
         }
+        case SvgIconType::Folder: {
+            POINT pts[6] = {
+                P(3.0f, 6.0f),
+                P(9.0f, 6.0f),
+                P(11.5f, 8.5f),
+                P(21.0f, 8.5f),
+                P(21.0f, 19.0f),
+                P(3.0f, 19.0f)
+            };
+            Polygon(hdc, pts, 6);
+            MoveToEx(hdc, P(3.0f, 11.5f).x, P(3.0f, 11.5f).y, NULL);
+            LineTo(hdc, P(21.0f, 11.5f).x, P(21.0f, 11.5f).y);
+            break;
+        }
         }
 
         SelectObject(hdc, old_br);

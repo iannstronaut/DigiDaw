@@ -5,6 +5,7 @@
 #include "../adapters/desktop/file_association.hpp"
 #include "../adapters/desktop/crash_handler.hpp"
 #include "../adapters/gui/dpi_awareness.hpp"
+#include "../adapters/gui/splash_screen.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -70,7 +71,14 @@ void setup_default_template(digidaw::app::Engine& engine) {
     s5.mixer_track = 5;
     auto ch5_id = proj.add_channel("core.generator.3xosc", s5);
 
-    // 2. Setup Mixer routing for tracks 1..5
+    digidaw::domain::ChannelSettings s6;
+    s6.name = "Clipper";
+    s6.volume = digidaw::domain::kDefaultChannelVolume;
+    s6.pan = 0.0f;
+    s6.mixer_track = 6;
+    auto ch6_id = proj.add_channel("core.generator.audioclip", s6);
+
+    // 2. Setup Mixer routing for tracks 1..6
     auto* master = proj.mixer_graph().get_track(digidaw::domain::MasterTrackId);
     if (master) {
         master->add_insert(std::make_shared<digidaw::adapters::plugins::LimiterDevice>());
@@ -80,8 +88,9 @@ void setup_default_template(digidaw::app::Engine& engine) {
     proj.mixer_graph().add_track(3, "808 HiHat");
     proj.mixer_graph().add_track(4, "808 Snare");
     proj.mixer_graph().add_track(5, "FLEX Bass");
+    proj.mixer_graph().add_track(6, "Clipper");
 
-    // 3. Pattern 1: Melody on Osc (mini piano roll) + Beat steps on drums & bass
+    // 3. Pattern 1: Melody on Osc (mini piano roll) + Beat steps on drums & bass & Clipper
     auto* pat1 = proj.get_pattern(1);
     if (pat1) {
         pat1->set_name("Pattern 1");
@@ -116,6 +125,11 @@ void setup_default_template(digidaw::app::Engine& engine) {
         auto& bass_notes = pat1->get_or_create_channel_notes(ch5_id);
         bass_notes.toggle_step(0, ppq, 60, 100);
         bass_notes.toggle_step(8, ppq, 60, 100);
+
+        // Clipper 808 sub notes at default root note C5 (MIDI note 60)
+        auto& clip_notes = pat1->get_or_create_channel_notes(ch6_id);
+        clip_notes.toggle_step(0, ppq, 60, 100);
+        clip_notes.toggle_step(8, ppq, 60, 100);
     }
 
     // 4. Pattern 2: Secondary variation pattern
@@ -412,10 +426,37 @@ int main(int argc, char* argv[]) {
         run_interactive_repl(engine);
     } else {
         std::cout << "[GUI] Launching DigiDAW 2026 Native Desktop Window...\n";
-        digidaw::adapters::gui::DigiDawWindow window(engine);
+        digidaw::adapters::gui::SplashScreen splash;
+        splash.show(GetModuleHandle(NULL), 560, 300);
+        splash.update("Initializing High-Performance Audio Engine...", 0.20f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+
+        splash.update("Scanning Core Plugin Catalog & Devices...", 0.45f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(180));
+
+        // Real sample library loading during startup splash screen
+        digidaw::app::SampleLibrary startup_lib;
+        std::string sample_dir = config.get_string("SampleLibrary", "RootDirectory");
+        std::error_code ec;
+        if (!sample_dir.empty() && std::filesystem::exists(sample_dir, ec)) {
+            splash.update("Scanning Sample Library: " + sample_dir + "...", 0.65f);
+            startup_lib.scan(sample_dir);
+            splash.update("Loaded " + std::to_string(startup_lib.size()) + " Audio Samples from Library...", 0.85f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        } else {
+            splash.update("Sample Library Ready (No folder configured)", 0.75f);
+            std::this_thread::sleep_for(std::chrono::milliseconds(180));
+        }
+
+        splash.update("Starting Direct2D / Direct3D 11 User Interface...", 1.0f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+        digidaw::adapters::gui::DigiDawWindow window(engine, &config, std::move(startup_lib));
         if (window.create_and_show(GetModuleHandle(NULL))) {
+            splash.close();
             window.run_message_loop();
         } else {
+            splash.close();
             std::cerr << "[GUI Error] Failed to create Win32 window, falling back to CLI session.\n";
             run_interactive_repl(engine);
         }

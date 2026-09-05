@@ -21,6 +21,10 @@ public:
         return channel_notes_[ch];
     }
 
+    void add_note(ChannelId ch, Note note) {
+        get_or_create_channel_notes(ch).add_note(std::move(note));
+    }
+
     [[nodiscard]] const NoteSet* get_channel_notes(ChannelId ch) const noexcept {
         auto it = channel_notes_.find(ch);
         if (it != channel_notes_.end()) {

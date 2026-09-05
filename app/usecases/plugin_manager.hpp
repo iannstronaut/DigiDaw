@@ -8,6 +8,7 @@
 #include "../../adapters/plugins/parametric_eq.hpp"
 #include "../../adapters/plugins/compressor_device.hpp"
 #include "../../adapters/plugins/delay_device.hpp"
+#include "../../adapters/plugins/audioclip_device.hpp"
 #include "../../adapters/plugins/reverb_device.hpp"
 #include "../../adapters/plugins/limiter_device.hpp"
 #include <unordered_map>
@@ -85,6 +86,10 @@ private:
         register_factory(
             "core.generator.drum_sampler", "FPC Drum Machine", domain::DeviceCategory::Generator,
             []() { return std::make_shared<adapters::plugins::DrumSamplerDevice>(); });
+
+        register_factory(
+            "core.generator.audioclip", "Clipper", domain::DeviceCategory::Generator,
+            []() { return std::make_shared<adapters::plugins::AudioClipDevice>(); });
 
         register_factory(
             "core.fx.parametric_eq", "Parametric EQ", domain::DeviceCategory::Effect,
