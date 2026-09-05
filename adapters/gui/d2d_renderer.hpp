@@ -243,6 +243,21 @@ public:
             rt->FillRoundedRectangle(sq, br);
             break;
         }
+        case SvgIconType::ChannelRack: {
+            D2D1_ROUNDED_RECT r1 = D2D1::RoundedRect(R(3.0f, 4.0f, 5.0f, 4.0f), 1.0f * s, 1.0f * s);
+            D2D1_ROUNDED_RECT r2 = D2D1::RoundedRect(R(10.0f, 4.0f, 11.0f, 4.0f), 1.0f * s, 1.0f * s);
+            D2D1_ROUNDED_RECT r3 = D2D1::RoundedRect(R(3.0f, 10.0f, 5.0f, 4.0f), 1.0f * s, 1.0f * s);
+            D2D1_ROUNDED_RECT r4 = D2D1::RoundedRect(R(10.0f, 10.0f, 11.0f, 4.0f), 1.0f * s, 1.0f * s);
+            D2D1_ROUNDED_RECT r5 = D2D1::RoundedRect(R(3.0f, 16.0f, 5.0f, 4.0f), 1.0f * s, 1.0f * s);
+            D2D1_ROUNDED_RECT r6 = D2D1::RoundedRect(R(10.0f, 16.0f, 11.0f, 4.0f), 1.0f * s, 1.0f * s);
+            rt->FillRoundedRectangle(r1, br);
+            rt->FillRoundedRectangle(r2, br);
+            rt->FillRoundedRectangle(r3, br);
+            rt->FillRoundedRectangle(r4, br);
+            rt->FillRoundedRectangle(r5, br);
+            rt->FillRoundedRectangle(r6, br);
+            break;
+        }
         case SvgIconType::Playlist: {
             ID2D1SolidColorBrush* br_dim = nullptr;
             D2D1_COLOR_F dim_col = color;
@@ -681,6 +696,50 @@ public:
         if (!label.empty() && font) {
             D2D1_RECT_F lbl_rc = D2D1::RectF(snap_cx - 30.0f, top_y - 14.0f, snap_cx + 30.0f, top_y);
             draw_text(rt, font, label, lbl_rc, color, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    }
+
+    static void draw_knob(ID2D1RenderTarget* rt, IDWriteTextFormat* font,
+                          const D2D1_RECT_F& rc, float normalized_val, const std::string& label,
+                          D2D1_COLOR_F knob_col = {0.6588f, 0.3333f, 0.9686f, 1.0f}) {
+        if (!rt) return;
+        const auto& t = theme();
+        float cx = (rc.left + rc.right) * 0.5f;
+        float cy = (rc.top + rc.bottom) * 0.5f;
+        float r = std::min(rc.right - rc.left, rc.bottom - rc.top) * 0.5f - 2.0f;
+        if (r < 5.0f) r = 5.0f;
+
+        D2D1_ELLIPSE el = D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r);
+
+        ID2D1SolidColorBrush* br_bg = nullptr;
+        ID2D1SolidColorBrush* br_border = nullptr;
+        ID2D1SolidColorBrush* br_ind = nullptr;
+
+        rt->CreateSolidColorBrush(t.bg_control, &br_bg);
+        rt->CreateSolidColorBrush(t.border_default, &br_border);
+        rt->CreateSolidColorBrush(knob_col, &br_ind);
+
+        if (br_bg) rt->FillEllipse(el, br_bg);
+        if (br_border) rt->DrawEllipse(el, br_border, 1.0f);
+
+        // Indicator line
+        float norm = std::clamp(normalized_val, 0.0f, 1.0f);
+        float angle_deg = -135.0f + norm * 270.0f;
+        float angle_rad = angle_deg * 3.14159265f / 180.0f;
+        float ix = cx + std::sin(angle_rad) * (r - 2.5f);
+        float iy = cy - std::cos(angle_rad) * (r - 2.5f);
+
+        if (br_ind) {
+            rt->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(ix, iy), br_ind, 2.0f);
+        }
+
+        if (br_bg) br_bg->Release();
+        if (br_border) br_border->Release();
+        if (br_ind) br_ind->Release();
+
+        if (!label.empty() && font) {
+            D2D1_RECT_F lbl_rc = D2D1::RectF(rc.left - 10.0f, cy + r, rc.right + 10.0f, rc.bottom + 8.0f);
+            draw_text(rt, font, label, lbl_rc, t.text_muted, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
     }
 };

@@ -8,6 +8,7 @@ enum class SvgIconType {
     Play,
     Pause,
     Stop,
+    ChannelRack,
     Playlist,
     PianoRoll,
     Inspector,

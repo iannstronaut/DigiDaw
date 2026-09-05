@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <concepts>
 
 namespace digidaw::domain {
 
@@ -21,8 +23,8 @@ public:
         // 1 Default Pattern
         patterns_.emplace_back(1, "Pattern 1");
 
-        // 4 Default Playlist Tracks
-        for (TrackId i = 1; i <= 4; ++i) {
+        // 20 Default Playlist Tracks
+        for (TrackId i = 1; i <= 20; ++i) {
             tracks_.emplace_back(i, "Track " + std::to_string(i));
         }
 
@@ -79,11 +81,41 @@ public:
     }
 
     // Pattern helpers
-    PatternId add_pattern(std::string name) {
-        PatternId id = static_cast<PatternId>(patterns_.size() + 1);
+    PatternId add_pattern(std::string name = "") {
+        PatternId max_id = 0;
+        for (const auto& pat : patterns_) {
+            max_id = std::max(max_id, pat.id());
+        }
+        PatternId id = max_id + 1;
+        if (name.empty()) {
+            name = "Pattern " + std::to_string(id);
+        }
         patterns_.emplace_back(id, std::move(name));
         dirty_ = true;
         return id;
+    }
+
+    bool remove_pattern(PatternId id) {
+        if (patterns_.size() <= 1) return false;
+        auto it = std::find_if(patterns_.begin(), patterns_.end(), [id](const Pattern& p) {
+            return p.id() == id;
+        });
+        if (it != patterns_.end()) {
+            patterns_.erase(it);
+            if (ui_state_.selected_pattern_id == id) {
+                ui_state_.selected_pattern_id = patterns_.front().id();
+            }
+            // Cascade remove clips referencing this deleted pattern from all arrangement tracks
+            for (auto& trk : tracks_) {
+                auto& clps = trk.clips_mut();
+                clps.erase(std::remove_if(clps.begin(), clps.end(), [id](const Clip& c) {
+                    return c.pattern_id == id;
+                }), clps.end());
+            }
+            dirty_ = true;
+            return true;
+        }
+        return false;
     }
 
     [[nodiscard]] Pattern* get_pattern(PatternId id) noexcept {
@@ -96,6 +128,59 @@ public:
     [[nodiscard]] const Pattern* get_pattern(PatternId id) const noexcept {
         for (const auto& pat : patterns_) {
             if (pat.id() == id) return &pat;
+        }
+        return nullptr;
+    }
+
+    // Playlist Track helpers
+    TrackId add_track(std::string name = "") {
+        TrackId max_id = 0;
+        for (const auto& trk : tracks_) {
+            max_id = std::max(max_id, trk.id());
+        }
+        TrackId id = max_id + 1;
+        if (name.empty()) {
+            name = "Track " + std::to_string(id);
+        }
+        tracks_.emplace_back(id, std::move(name));
+        dirty_ = true;
+        return id;
+    }
+
+    bool remove_track(size_t index) {
+        if (tracks_.size() <= 1 || index >= tracks_.size()) return false;
+        tracks_.erase(tracks_.begin() + index);
+        dirty_ = true;
+        return true;
+    }
+
+    bool remove_track_at(size_t index) {
+        return remove_track(index);
+    }
+
+    bool remove_track_by_id(TrackId id) {
+        if (tracks_.size() <= 1) return false;
+        auto it = std::find_if(tracks_.begin(), tracks_.end(), [id](const Track& t) {
+            return t.id() == id;
+        });
+        if (it != tracks_.end()) {
+            tracks_.erase(it);
+            dirty_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] Track* get_track(TrackId id) noexcept {
+        for (auto& trk : tracks_) {
+            if (trk.id() == id) return &trk;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] const Track* get_track(TrackId id) const noexcept {
+        for (const auto& trk : tracks_) {
+            if (trk.id() == id) return &trk;
         }
         return nullptr;
     }

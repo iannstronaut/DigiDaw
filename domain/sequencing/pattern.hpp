@@ -33,15 +33,24 @@ public:
         return channel_notes_;
     }
 
+    [[nodiscard]] const std::unordered_map<ChannelId, NoteSet>& channel_notes() const noexcept {
+        return channel_notes_;
+    }
+
+    [[nodiscard]] std::unordered_map<ChannelId, NoteSet>& channel_notes() noexcept {
+        return channel_notes_;
+    }
+
     [[nodiscard]] Tick length_ticks(Tick ppq = DefaultPPQ) const noexcept {
-        Tick max_tick = 4 * ppq; // Minimum 1 bar
+        const Tick safe_ppq = std::max<Tick>(1, ppq);
+        const Tick bar_ticks = 4 * safe_ppq;
+        Tick max_tick = bar_ticks; // Minimum 1 bar
         for (const auto& [ch, note_set] : channel_notes_) {
             for (const auto& n : note_set.notes()) {
                 max_tick = std::max(max_tick, n.start + n.length);
             }
         }
         // Round up to nearest bar
-        const Tick bar_ticks = 4 * ppq;
         return ((max_tick + bar_ticks - 1) / bar_ticks) * bar_ticks;
     }
 

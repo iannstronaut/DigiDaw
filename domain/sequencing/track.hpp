@@ -34,6 +34,7 @@ public:
     void set_name(std::string name) { name_ = std::move(name); }
 
     [[nodiscard]] bool muted() const noexcept { return muted_; }
+    [[nodiscard]] bool is_muted() const noexcept { return muted_; }
     void set_muted(bool m) noexcept { muted_ = m; }
 
     [[nodiscard]] bool solo() const noexcept { return solo_; }

@@ -102,16 +102,14 @@ public:
             loop_start = 0;
             is_looping = (loop_end > 0);
         } else {
-            // Song / Arranger mode
-            domain::Tick max_clip_end = 4 * time_map.ppq();
-            for (const auto& trk : project_->tracks()) {
-                for (const auto& clp : trk.clips()) {
-                    max_clip_end = std::max(max_clip_end, clp.end());
-                }
+            // Song / Arranger mode: loop only when loop_enabled_ is explicitly activated
+            if (loop_enabled_ && loop_end_ > loop_start_) {
+                loop_start = loop_start_;
+                loop_end = loop_end_;
+                is_looping = true;
+            } else {
+                is_looping = false;
             }
-            loop_start = (loop_enabled_ && loop_end_ > loop_start_) ? loop_start_ : 0;
-            loop_end = (loop_enabled_ && loop_end_ > loop_start_) ? loop_end_ : max_clip_end;
-            is_looping = (loop_end > loop_start);
         }
 
         struct Interval {
@@ -175,36 +173,43 @@ public:
                     }
                 }
             } else {
-                // Song / Arranger mode: scan tracks and active placement clips
-                for (size_t trk_idx = 0; trk_idx < project_->tracks().size(); ++trk_idx) {
-                    const auto& track = project_->tracks()[trk_idx];
-                    if (track.muted()) continue;
+                // Song / Arranger mode: scan all tracks and active placement clips
+                bool any_solo = false;
+                for (const auto& trk : project_->tracks()) {
+                    if (trk.solo()) { any_solo = true; break; }
+                }
 
-                    domain::ChannelId target_ch_id = 0;
-                    if (trk_idx < project_->channels().size()) {
-                        target_ch_id = project_->channels()[trk_idx].id();
-                    } else {
-                        target_ch_id = track.id();
+                for (const auto& track : project_->tracks()) {
+                    // Resource optimization: early-skip empty arrangement tracks
+                    if (track.clips().empty()) continue;
+                    if (any_solo ? !track.solo() : track.is_muted()) continue;
+
+                    // Resource optimization: early-skip arrangement tracks with no unmuted clips in current block
+                    bool has_clip_in_block = false;
+                    for (const auto& clip : track.clips()) {
+                        if (!clip.muted && clip.end() >= s_start && clip.start < s_end) {
+                            has_clip_in_block = true;
+                            break;
+                        }
                     }
+                    if (!has_clip_in_block) continue;
 
                     for (const auto& clip : track.clips()) {
                         if (clip.muted) continue;
                         auto* pat = project_->get_pattern(clip.pattern_id);
                         if (!pat) continue;
 
-                        if (clip.end() <= s_start || clip.start >= s_end) continue;
+                        if (clip.end() < s_start || clip.start >= s_end) continue;
 
-                        // Only play notes for this track's assigned channel
-                        auto* note_set = pat->get_channel_notes(target_ch_id);
-                        if (!note_set) continue;
+                        // Non-looping pattern clip extension:
+                        // Pattern notes trigger only once at defined offset (n.start < clip.length).
+                        // The extended portion beyond pattern notes remains completely silent.
+                        for (const auto& [ch_id, note_set] : pat->all_notes()) {
+                            auto& ev_list = ch_map[ch_id];
 
-                        auto& ev_list = ch_map[target_ch_id];
-                        const domain::Tick pat_len = std::max(domain::Tick(time_map.ppq() * 4), pat->length_ticks(time_map.ppq()));
-
-                        for (domain::Tick rep = 0; rep < clip.length; rep += pat_len) {
-                            for (const auto& note : note_set->notes()) {
-                                if (rep + note.start >= clip.length) break;
-                                const domain::Tick abs_note_start = clip.start + rep + note.start;
+                            for (const auto& note : note_set.notes()) {
+                                if (note.start >= clip.length) continue;
+                                const domain::Tick abs_note_start = clip.start + note.start;
                                 const domain::Tick abs_note_end = std::min(clip.end(), abs_note_start + note.length);
 
                                 if (abs_note_start >= s_start && abs_note_start < s_end) {

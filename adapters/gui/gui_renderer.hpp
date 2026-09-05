@@ -131,6 +131,21 @@ public:
             RoundRect(hdc, sq.left, sq.top, sq.right, sq.bottom, 4, 4);
             break;
         }
+        case SvgIconType::ChannelRack: {
+            RECT r1 = R(3.0f, 4.0f, 5.0f, 4.0f);
+            RECT r2 = R(10.0f, 4.0f, 11.0f, 4.0f);
+            RECT r3 = R(3.0f, 10.0f, 5.0f, 4.0f);
+            RECT r4 = R(10.0f, 10.0f, 11.0f, 4.0f);
+            RECT r5 = R(3.0f, 16.0f, 5.0f, 4.0f);
+            RECT r6 = R(10.0f, 16.0f, 11.0f, 4.0f);
+            RoundRect(hdc, r1.left, r1.top, r1.right, r1.bottom, 2, 2);
+            RoundRect(hdc, r2.left, r2.top, r2.right, r2.bottom, 2, 2);
+            RoundRect(hdc, r3.left, r3.top, r3.right, r3.bottom, 2, 2);
+            RoundRect(hdc, r4.left, r4.top, r4.right, r4.bottom, 2, 2);
+            RoundRect(hdc, r5.left, r5.top, r5.right, r5.bottom, 2, 2);
+            RoundRect(hdc, r6.left, r6.top, r6.right, r6.bottom, 2, 2);
+            break;
+        }
         case SvgIconType::Playlist: {
             MoveToEx(hdc, P(3.0f, 5.5f).x, P(3.0f, 5.5f).y, NULL);
             LineTo(hdc, P(21.0f, 5.5f).x, P(21.0f, 5.5f).y);
@@ -507,6 +522,46 @@ public:
         DeleteObject(line_pen);
         DeleteObject(border_pen);
         DeleteObject(br);
+    }
+
+    static void draw_knob(HDC hdc, const RECT& rc, float normalized_val, const std::string& label,
+                          COLORREF indicator_col = RGB(168, 85, 247)) {
+        int cx = (rc.left + rc.right) / 2;
+        int cy = (rc.top + rc.bottom) / 2;
+        int r = std::min((rc.right - rc.left), (rc.bottom - rc.top)) / 2 - 2;
+        if (r < 5) r = 5;
+
+        const auto& t = get_theme();
+        HBRUSH br_knob = CreateSolidBrush(t.bg_control);
+        HPEN pen_border = CreatePen(PS_SOLID, 1, t.border_default);
+        HGDIOBJ old_br = SelectObject(hdc, br_knob);
+        HGDIOBJ old_pen = SelectObject(hdc, pen_border);
+
+        Ellipse(hdc, cx - r, cy - r, cx + r, cy + r);
+
+        // Indicator line
+        float norm = std::clamp(normalized_val, 0.0f, 1.0f);
+        float angle_deg = -135.0f + norm * 270.0f;
+        float angle_rad = angle_deg * 3.14159265f / 180.0f;
+        int ix = cx + static_cast<int>(std::round(std::sin(angle_rad) * (r - 2)));
+        int iy = cy - static_cast<int>(std::round(std::cos(angle_rad) * (r - 2)));
+
+        HPEN pen_ind = CreatePen(PS_SOLID, 2, indicator_col);
+        SelectObject(hdc, pen_ind);
+        MoveToEx(hdc, cx, cy, NULL);
+        LineTo(hdc, ix, iy);
+
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_br);
+        DeleteObject(pen_ind);
+        DeleteObject(pen_border);
+        DeleteObject(br_knob);
+
+        if (!label.empty()) {
+            RECT lbl_rc = rc;
+            lbl_rc.top = cy + r;
+            draw_text(hdc, label, lbl_rc, t.text_muted, DT_CENTER | DT_SINGLELINE);
+        }
     }
 };
 

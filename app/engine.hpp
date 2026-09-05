@@ -197,13 +197,20 @@ public:
                     // Prevent single plugin crash from crashing host
                 }
                 ch_view.apply_gain(ch.settings().volume);
+                ch_view.apply_pan(ch.settings().pan);
 
-                // Accumulate into targeted mixer track input
+                // Accumulate into targeted mixer track input (with fallback to Master)
                 const domain::MixerTrackId target_track = ch.settings().mixer_track;
                 auto trk_it = track_inputs.find(target_track);
                 if (trk_it != track_inputs.end()) {
                     auto trk_view = trk_it->second.view();
                     trk_view.add_from(ch_view);
+                } else {
+                    auto master_it = track_inputs.find(domain::MasterTrackId);
+                    if (master_it != track_inputs.end()) {
+                        auto m_view = master_it->second.view();
+                        m_view.add_from(ch_view);
+                    }
                 }
             }
 
