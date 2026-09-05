@@ -129,6 +129,16 @@ def main():
         shutil.copyfile(manifest_src, manifest_dst)
         print("[Build] Deployed Per-Monitor V2 High-DPI Manifest (DigiDAW.exe.manifest)")
 
+    # Deploy Assets folder to bin/assets
+    assets_src = os.path.join(root_dir, "assets")
+    assets_dst = os.path.join(bin_dir, "assets")
+    if os.path.exists(assets_src):
+        import shutil
+        if os.path.exists(assets_dst):
+            shutil.rmtree(assets_dst)
+        shutil.copytree(assets_src, assets_dst)
+        print("[Build] Deployed Application Assets (bin/assets/)")
+
     # Override MinGW default-manifest.o to cleanly embed our custom Per-Monitor V2 manifest without conflict
     spec_path = os.path.join(bin_dir, "no-default-manifest.spec")
     with open(spec_path, "w") as sf:
@@ -139,7 +149,8 @@ def main():
     cmd_app = [gpp, f"-specs={spec_path}"] + common_flags + shell_sources + [
         "-o", app_exe,
         "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lshell32", "-lwinmm",
-        "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32"
+        "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32",
+        "-ldwmapi"
     ]
     t0 = time.time()
     res = subprocess.run(cmd_app, cwd=root_dir)

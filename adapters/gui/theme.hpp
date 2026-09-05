@@ -4,6 +4,20 @@
 
 namespace digidaw::adapters::gui {
 
+enum class SvgIconType {
+    Play,
+    Pause,
+    Stop,
+    Playlist,
+    PianoRoll,
+    Inspector,
+    TrackFx,
+    Mixer,
+    Magnet,
+    Save,
+    Export
+};
+
 struct Theme {
     // 0. DESIGN.md Color Tokens
     // Backgrounds (Near-black layered surfaces)
@@ -54,6 +68,7 @@ struct Theme {
     COLORREF step_off_dark    = RGB(25, 28, 32);    // Other steps
     COLORREF step_on          = RGB(168, 85, 247);  // Active step note (violet)
     COLORREF step_playhead    = RGB(183, 102, 255); // Step current playhead cursor
+    COLORREF note_silver      = RGB(220, 225, 235); // Miniature notes in channel rack
 
     // Typography
     COLORREF text_primary     = RGB(232, 232, 234); // #e8e8ea

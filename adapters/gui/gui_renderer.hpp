@@ -89,6 +89,226 @@ public:
         draw_text(hdc, text, rc, txt_col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
+    static void draw_svg_icon(HDC hdc, SvgIconType icon, const RECT& rc, COLORREF color, int size = 16) {
+        int cx = (rc.left + rc.right) / 2;
+        int cy = (rc.top + rc.bottom) / 2;
+        float s = static_cast<float>(size) / 24.0f;
+        float ox = static_cast<float>(cx) - 12.0f * s;
+        float oy = static_cast<float>(cy) - 12.0f * s;
+
+        auto P = [&](float x, float y) -> POINT {
+            return POINT{static_cast<int>(std::round(ox + x * s)), static_cast<int>(std::round(oy + y * s))};
+        };
+        auto R = [&](float x, float y, float w, float h) -> RECT {
+            return RECT{
+                static_cast<int>(std::round(ox + x * s)),
+                static_cast<int>(std::round(oy + y * s)),
+                static_cast<int>(std::round(ox + (x + w) * s)),
+                static_cast<int>(std::round(oy + (y + h) * s))
+            };
+        };
+
+        HBRUSH br = CreateSolidBrush(color);
+        HPEN pen = CreatePen(PS_SOLID, std::max(1, static_cast<int>(std::round(1.5f * s))), color);
+        HGDIOBJ old_br = SelectObject(hdc, br);
+        HGDIOBJ old_pen = SelectObject(hdc, pen);
+
+        switch (icon) {
+        case SvgIconType::Play: {
+            POINT pts[3] = { P(7.0f, 4.5f), P(19.5f, 12.0f), P(7.0f, 19.5f) };
+            Polygon(hdc, pts, 3);
+            break;
+        }
+        case SvgIconType::Pause: {
+            RECT b1 = R(6.0f, 4.0f, 4.0f, 16.0f);
+            RECT b2 = R(14.0f, 4.0f, 4.0f, 16.0f);
+            RoundRect(hdc, b1.left, b1.top, b1.right, b1.bottom, 3, 3);
+            RoundRect(hdc, b2.left, b2.top, b2.right, b2.bottom, 3, 3);
+            break;
+        }
+        case SvgIconType::Stop: {
+            RECT sq = R(4.5f, 4.5f, 15.0f, 15.0f);
+            RoundRect(hdc, sq.left, sq.top, sq.right, sq.bottom, 4, 4);
+            break;
+        }
+        case SvgIconType::Playlist: {
+            MoveToEx(hdc, P(3.0f, 5.5f).x, P(3.0f, 5.5f).y, NULL);
+            LineTo(hdc, P(21.0f, 5.5f).x, P(21.0f, 5.5f).y);
+            MoveToEx(hdc, P(3.0f, 12.0f).x, P(3.0f, 12.0f).y, NULL);
+            LineTo(hdc, P(21.0f, 12.0f).x, P(21.0f, 12.0f).y);
+            MoveToEx(hdc, P(3.0f, 18.5f).x, P(3.0f, 18.5f).y, NULL);
+            LineTo(hdc, P(21.0f, 18.5f).x, P(21.0f, 18.5f).y);
+
+            RECT r1 = R(4.0f, 3.5f, 8.0f, 4.0f);
+            RECT r2 = R(9.0f, 10.0f, 11.0f, 4.0f);
+            RECT r3 = R(4.0f, 16.5f, 9.0f, 4.0f);
+            RoundRect(hdc, r1.left, r1.top, r1.right, r1.bottom, 2, 2);
+            RoundRect(hdc, r2.left, r2.top, r2.right, r2.bottom, 2, 2);
+            RoundRect(hdc, r3.left, r3.top, r3.right, r3.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::PianoRoll: {
+            RECT out_r = R(3.0f, 3.0f, 18.0f, 18.0f);
+            HGDIOBJ null_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, null_br);
+            RoundRect(hdc, out_r.left, out_r.top, out_r.right, out_r.bottom, 4, 4);
+            SelectObject(hdc, br);
+
+            MoveToEx(hdc, P(8.5f, 3.0f).x, P(8.5f, 3.0f).y, NULL);
+            LineTo(hdc, P(8.5f, 21.0f).x, P(8.5f, 21.0f).y);
+            MoveToEx(hdc, P(3.0f, 9.0f).x, P(3.0f, 9.0f).y, NULL);
+            LineTo(hdc, P(8.5f, 9.0f).x, P(8.5f, 9.0f).y);
+            MoveToEx(hdc, P(3.0f, 15.0f).x, P(3.0f, 15.0f).y, NULL);
+            LineTo(hdc, P(8.5f, 15.0f).x, P(8.5f, 15.0f).y);
+
+            RECT bk1 = R(5.5f, 5.5f, 3.0f, 2.5f);
+            RECT bk2 = R(5.5f, 12.0f, 3.0f, 2.5f);
+            RoundRect(hdc, bk1.left, bk1.top, bk1.right, bk1.bottom, 2, 2);
+            RoundRect(hdc, bk2.left, bk2.top, bk2.right, bk2.bottom, 2, 2);
+
+            RECT n1 = R(11.0f, 5.5f, 5.5f, 2.5f);
+            RECT n2 = R(14.0f, 9.5f, 5.0f, 2.5f);
+            RECT n3 = R(11.5f, 13.5f, 6.0f, 2.5f);
+            RECT n4 = R(13.0f, 17.0f, 4.5f, 2.5f);
+            RoundRect(hdc, n1.left, n1.top, n1.right, n1.bottom, 2, 2);
+            RoundRect(hdc, n2.left, n2.top, n2.right, n2.bottom, 2, 2);
+            RoundRect(hdc, n3.left, n3.top, n3.right, n3.bottom, 2, 2);
+            RoundRect(hdc, n4.left, n4.top, n4.right, n4.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::Inspector: {
+            RECT out_r = R(3.0f, 3.0f, 18.0f, 18.0f);
+            HGDIOBJ null_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, null_br);
+            RoundRect(hdc, out_r.left, out_r.top, out_r.right, out_r.bottom, 4, 4);
+            SelectObject(hdc, br);
+
+            // Right inspector divider
+            MoveToEx(hdc, P(14.0f, 3.0f).x, P(14.0f, 3.0f).y, NULL);
+            LineTo(hdc, P(14.0f, 21.0f).x, P(14.0f, 21.0f).y);
+
+            // Left track lines
+            MoveToEx(hdc, P(5.5f, 7.5f).x, P(5.5f, 7.5f).y, NULL);
+            LineTo(hdc, P(11.5f, 7.5f).x, P(11.5f, 7.5f).y);
+            MoveToEx(hdc, P(5.5f, 12.0f).x, P(5.5f, 12.0f).y, NULL);
+            LineTo(hdc, P(11.5f, 12.0f).x, P(11.5f, 12.0f).y);
+            MoveToEx(hdc, P(5.5f, 16.5f).x, P(5.5f, 16.5f).y, NULL);
+            LineTo(hdc, P(11.5f, 16.5f).x, P(11.5f, 16.5f).y);
+
+            // Right fader & thumb
+            MoveToEx(hdc, P(17.5f, 6.0f).x, P(17.5f, 6.0f).y, NULL);
+            LineTo(hdc, P(17.5f, 18.0f).x, P(17.5f, 18.0f).y);
+            RECT th = R(15.5f, 9.5f, 4.0f, 3.0f);
+            RoundRect(hdc, th.left, th.top, th.right, th.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::TrackFx: {
+            // Channel 1 Fader
+            MoveToEx(hdc, P(6.0f, 4.0f).x, P(6.0f, 4.0f).y, NULL);
+            LineTo(hdc, P(6.0f, 20.0f).x, P(6.0f, 20.0f).y);
+            RECT t1 = R(4.0f, 7.0f, 4.0f, 3.0f);
+            RoundRect(hdc, t1.left, t1.top, t1.right, t1.bottom, 2, 2);
+
+            // Channel 2 Fader
+            MoveToEx(hdc, P(12.0f, 4.0f).x, P(12.0f, 4.0f).y, NULL);
+            LineTo(hdc, P(12.0f, 20.0f).x, P(12.0f, 20.0f).y);
+            RECT t2 = R(10.0f, 14.0f, 4.0f, 3.0f);
+            RoundRect(hdc, t2.left, t2.top, t2.right, t2.bottom, 2, 2);
+
+            // Channel 3 Fader
+            MoveToEx(hdc, P(18.0f, 4.0f).x, P(18.0f, 4.0f).y, NULL);
+            LineTo(hdc, P(18.0f, 20.0f).x, P(18.0f, 20.0f).y);
+            RECT t3 = R(16.0f, 9.0f, 4.0f, 3.0f);
+            RoundRect(hdc, t3.left, t3.top, t3.right, t3.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::Mixer: {
+            // Track 1
+            MoveToEx(hdc, P(5.0f, 3.0f).x, P(5.0f, 3.0f).y, NULL);
+            LineTo(hdc, P(5.0f, 21.0f).x, P(5.0f, 21.0f).y);
+            RECT m1 = R(3.0f, 11.0f, 4.0f, 5.0f);
+            RoundRect(hdc, m1.left, m1.top, m1.right, m1.bottom, 2, 2);
+
+            // Track 2
+            MoveToEx(hdc, P(12.0f, 3.0f).x, P(12.0f, 3.0f).y, NULL);
+            LineTo(hdc, P(12.0f, 21.0f).x, P(12.0f, 21.0f).y);
+            RECT m2 = R(10.0f, 6.0f, 4.0f, 5.0f);
+            RoundRect(hdc, m2.left, m2.top, m2.right, m2.bottom, 2, 2);
+
+            // Track 3
+            MoveToEx(hdc, P(19.0f, 3.0f).x, P(19.0f, 3.0f).y, NULL);
+            LineTo(hdc, P(19.0f, 21.0f).x, P(19.0f, 21.0f).y);
+            RECT m3 = R(17.0f, 14.0f, 4.0f, 5.0f);
+            RoundRect(hdc, m3.left, m3.top, m3.right, m3.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::Magnet: {
+            POINT mag_pts[8] = {
+                P(4.0f, 5.0f), P(8.0f, 5.0f), P(8.0f, 11.0f),
+                P(16.0f, 11.0f), P(16.0f, 5.0f), P(20.0f, 5.0f),
+                P(20.0f, 14.0f), P(4.0f, 14.0f)
+            };
+            HGDIOBJ null_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, null_br);
+            Polygon(hdc, mag_pts, 8);
+            SelectObject(hdc, br);
+
+            MoveToEx(hdc, P(4.0f, 8.0f).x, P(4.0f, 8.0f).y, NULL);
+            LineTo(hdc, P(8.0f, 8.0f).x, P(8.0f, 8.0f).y);
+            MoveToEx(hdc, P(16.0f, 8.0f).x, P(16.0f, 8.0f).y, NULL);
+            LineTo(hdc, P(20.0f, 8.0f).x, P(20.0f, 8.0f).y);
+            break;
+        }
+        case SvgIconType::Save: {
+            POINT disk[5] = { P(5.0f, 20.0f), P(5.0f, 4.0f), P(16.0f, 4.0f), P(20.0f, 8.0f), P(20.0f, 20.0f) };
+            HGDIOBJ null_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, null_br);
+            Polygon(hdc, disk, 5);
+            SelectObject(hdc, br);
+
+            RECT sh = R(7.5f, 4.0f, 8.0f, 5.0f);
+            RECT lb = R(7.5f, 12.0f, 9.0f, 8.0f);
+            RoundRect(hdc, sh.left, sh.top, sh.right, sh.bottom, 2, 2);
+            RoundRect(hdc, lb.left, lb.top, lb.right, lb.bottom, 2, 2);
+            break;
+        }
+        case SvgIconType::Export: {
+            HGDIOBJ null_br = GetStockObject(NULL_BRUSH);
+            SelectObject(hdc, null_br);
+            int rx = static_cast<int>(std::round(7.5f * s));
+            POINT center = P(11.0f, 13.0f);
+            Ellipse(hdc, center.x - rx, center.y - rx, center.x + rx, center.y + rx);
+            int hrx = static_cast<int>(std::round(2.2f * s));
+            Ellipse(hdc, center.x - hrx, center.y - hrx, center.x + hrx, center.y + hrx);
+            SelectObject(hdc, br);
+
+            MoveToEx(hdc, P(13.0f, 11.0f).x, P(13.0f, 11.0f).y, NULL);
+            LineTo(hdc, P(20.5f, 3.5f).x, P(20.5f, 3.5f).y);
+            LineTo(hdc, P(16.0f, 3.5f).x, P(16.0f, 3.5f).y);
+            MoveToEx(hdc, P(20.5f, 3.5f).x, P(20.5f, 3.5f).y, NULL);
+            LineTo(hdc, P(20.5f, 8.0f).x, P(20.5f, 8.0f).y);
+            break;
+        }
+        }
+
+        SelectObject(hdc, old_br);
+        SelectObject(hdc, old_pen);
+        DeleteObject(br);
+        DeleteObject(pen);
+    }
+
+    static void draw_icon_button(HDC hdc, const RECT& rc, SvgIconType icon, bool active,
+                                 COLORREF active_color, COLORREF normal_bg,
+                                 int radius = 4, int icon_size = 16) {
+        const auto& t = get_theme();
+        COLORREF bg = active ? active_color : normal_bg;
+        COLORREF border = active ? t.accent_bright : t.border_dark;
+        COLORREF icon_col = active ? RGB(255, 255, 255) : t.text_primary;
+
+        draw_rounded_box(hdc, rc, bg, border, radius);
+        draw_svg_icon(hdc, icon, rc, icon_col, icon_size);
+    }
+
     static void draw_meter_vertical(HDC hdc, const RECT& rc, float peak_level) {
         const auto& t = get_theme();
         fill_rect(hdc, rc, t.meter_bg);

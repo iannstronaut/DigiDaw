@@ -14,6 +14,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <dwmapi.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -21,11 +22,96 @@
 #include <cmath>
 #include <chrono>
 
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1
+#define DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 19
+#endif
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
+
 namespace digidaw::adapters::gui {
 
 enum class ViewMode : uint8_t {
     ChannelRack,
     PianoRoll
+};
+
+enum class WindowId : uint8_t {
+    Playlist = 0,
+    PianoRoll = 1,
+    Mixer = 2,
+    Inspector = 3
+};
+
+enum class ResizeEdge : uint8_t {
+    None = 0,
+    Left, Right, Top, Bottom,
+    TopLeft, TopRight, BottomLeft, BottomRight
+};
+
+enum class WindowDragMode : uint8_t {
+    None = 0,
+    Move,
+    Resize
+};
+
+struct DawWindow {
+    WindowId id{WindowId::Playlist};
+    std::string title{"Window"};
+    SvgIconType icon{SvgIconType::Playlist};
+    float x{10.0f};
+    float y{52.0f};
+    float w{800.0f};
+    float h{420.0f};
+    float min_w{340.0f};
+    float min_h{200.0f};
+    bool visible{true};
+
+    static constexpr float kTitleBarHeight = 28.0f;
+    static constexpr float kBorderMargin = 6.0f;
+
+    D2D1_RECT_F get_rect() const {
+        return D2D1::RectF(x, y, x + w, y + h);
+    }
+    D2D1_RECT_F get_title_bar_rect() const {
+        return D2D1::RectF(x, y, x + w, y + kTitleBarHeight);
+    }
+    D2D1_RECT_F get_content_rect() const {
+        return D2D1::RectF(x, y + kTitleBarHeight, x + w, y + h);
+    }
+    D2D1_RECT_F get_close_btn_rect() const {
+        return D2D1::RectF(x + w - 24.0f, y + 4.0f, x + w - 4.0f, y + kTitleBarHeight - 4.0f);
+    }
+
+    bool contains(float px, float py) const {
+        return (px >= x && px <= x + w && py >= y && py <= y + h);
+    }
+
+    bool is_in_title_bar(float px, float py) const {
+        return (px >= x && px <= x + w && py >= y && py <= y + kTitleBarHeight);
+    }
+
+    bool is_in_close_btn(float px, float py) const {
+        auto rc = get_close_btn_rect();
+        return (px >= rc.left && px <= rc.right && py >= rc.top && py <= rc.bottom);
+    }
 };
 
 class InsertEffectCommand : public app::ICommand {
@@ -140,6 +226,11 @@ public:
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_title, L"en-us", &dwrite_title_);
         dwrite_factory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, sz_small, L"en-us", &dwrite_small_);
+
+        if (dwrite_main_) dwrite_main_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (dwrite_bold_) dwrite_bold_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (dwrite_title_) dwrite_title_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (dwrite_small_) dwrite_small_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     }
 
     void update_gdi_fonts(float scale) {
@@ -166,6 +257,45 @@ public:
         font_small_ = CreateFontW(h_small, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, VARIABLE_PITCH, L"Segoe UI");
+    }
+
+    static void apply_system_window_theme(HWND hwnd) {
+        if (!hwnd) return;
+
+        // 1. Enable Immersive Dark Mode for Windows 10 (1809+) & Windows 11
+        // Attribute 20 (Win10 20H1+ & Win11), Attribute 19 (Win10 1809-1909)
+        BOOL dark_mode = TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_mode, sizeof(dark_mode));
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, &dark_mode, sizeof(dark_mode));
+
+        // 2. Custom Title Bar Background Color (Windows 11 build 22000+)
+        // Matches theme bg_header / bg_surface_2 (#111316 -> RGB(17, 19, 22))
+        COLORREF caption_color = RGB(17, 19, 22);
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption_color, sizeof(caption_color));
+
+        // 3. Custom Title Bar Text Color (Windows 11 build 22000+)
+        // Matches theme text_primary (#e8e8ea -> RGB(232, 232, 234))
+        COLORREF text_color = RGB(232, 232, 234);
+        DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text_color, sizeof(text_color));
+
+        // 4. Custom Window Frame Border Color (Windows 11 build 22000+)
+        // Matches theme border_subtle (#202328 -> RGB(32, 35, 40))
+        COLORREF border_color = RGB(32, 35, 40);
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color, sizeof(border_color));
+
+        // 5. Modern Rounded Window Corners (Windows 11 build 22000+)
+        // DWMWCP_ROUND = 2
+        DWORD corner_preference = 2;
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner_preference, sizeof(corner_preference));
+    }
+
+    void update_window_title() {
+        if (!hwnd_) return;
+        std::string name = engine_.session().project().name();
+        if (name.empty()) name = "Untitled Project";
+        std::wstring wname(name.begin(), name.end());
+        std::wstring title = L"DigiDAW 2026                                                                    —   [ " + wname + L" ]";
+        SetWindowTextW(hwnd_, title.c_str());
     }
 
     bool create_and_show(HINSTANCE hinst, int width = 1150, int height = 780) {
@@ -204,6 +334,10 @@ public:
 
         if (!hwnd_) return false;
 
+        // Apply theme-matching colors to Windows OS Title Bar / Header (DWM)
+        apply_system_window_theme(hwnd_);
+        update_window_title();
+
         float scale = DpiAwareness::get_scale_factor(hwnd_);
         update_gdi_fonts(scale);
 
@@ -223,6 +357,7 @@ public:
             client_h_ = cur_h;
             width = cur_w;
             height = cur_h;
+            init_default_window_layout();
         }
 
         // Initialize Direct3D 11 & Direct2D GPU Pipeline at full maximized screen resolution
@@ -257,6 +392,325 @@ public:
     static bool is_midi_black_key(uint8_t pitch) {
         int semi = pitch % 12;
         return semi == 1 || semi == 3 || semi == 6 || semi == 8 || semi == 10;
+    }
+
+    DawWindow win_playlist_{WindowId::Playlist, "PLAYLIST", SvgIconType::Playlist, 8.0f, 52.0f, 800.0f, 420.0f, 420.0f, 220.0f, true};
+    DawWindow win_pianoroll_{WindowId::PianoRoll, "PIANO ROLL", SvgIconType::PianoRoll, 24.0f, 64.0f, 780.0f, 420.0f, 460.0f, 240.0f, false};
+    DawWindow win_mixer_{WindowId::Mixer, "MIXER", SvgIconType::Mixer, 8.0f, 480.0f, 800.0f, 260.0f, 360.0f, 200.0f, true};
+    DawWindow win_inspector_{WindowId::Inspector, "TRACK FX / INSPECTOR", SvgIconType::TrackFx, 816.0f, 52.0f, 260.0f, 688.0f, 240.0f, 260.0f, true};
+
+    std::vector<WindowId> z_order_{WindowId::Mixer, WindowId::Playlist, WindowId::Inspector, WindowId::PianoRoll};
+    WindowId active_window_{WindowId::Playlist};
+
+    bool magnet_enabled_{true};
+    bool is_dragging_window_{false};
+    WindowId dragging_window_id_{WindowId::Playlist};
+    WindowDragMode window_drag_mode_{WindowDragMode::None};
+    ResizeEdge resize_edge_{ResizeEdge::None};
+    int drag_win_start_mouse_x_{0};
+    int drag_win_start_mouse_y_{0};
+    float drag_win_orig_x_{0.0f};
+    float drag_win_orig_y_{0.0f};
+    float drag_win_orig_w_{0.0f};
+    float drag_win_orig_h_{0.0f};
+    bool layout_initialized_{false};
+    int hover_close_win_id_{-1};
+
+    DawWindow* get_window(WindowId id) {
+        switch (id) {
+            case WindowId::Playlist: return &win_playlist_;
+            case WindowId::PianoRoll: return &win_pianoroll_;
+            case WindowId::Mixer: return &win_mixer_;
+            case WindowId::Inspector: return &win_inspector_;
+        }
+        return nullptr;
+    }
+
+    const DawWindow* get_window(WindowId id) const {
+        switch (id) {
+            case WindowId::Playlist: return &win_playlist_;
+            case WindowId::PianoRoll: return &win_pianoroll_;
+            case WindowId::Mixer: return &win_mixer_;
+            case WindowId::Inspector: return &win_inspector_;
+        }
+        return nullptr;
+    }
+
+    std::array<DawWindow*, 4> get_all_windows() {
+        return {&win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_};
+    }
+
+    std::array<const DawWindow*, 4> get_all_windows() const {
+        return {&win_playlist_, &win_pianoroll_, &win_mixer_, &win_inspector_};
+    }
+
+    void bring_to_front(WindowId id) {
+        auto it = std::find(z_order_.begin(), z_order_.end(), id);
+        if (it != z_order_.end()) {
+            z_order_.erase(it);
+        }
+        z_order_.push_back(id);
+        active_window_ = id;
+        auto* w = get_window(id);
+        if (w) w->visible = true;
+        if (id == WindowId::Inspector) inspector_open_ = true;
+    }
+
+    void update_top_active_window() {
+        for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+            auto* w = get_window(*it);
+            if (w && w->visible) {
+                active_window_ = *it;
+                return;
+            }
+        }
+    }
+
+    void toggle_or_focus_window(WindowId id) {
+        auto* win = get_window(id);
+        if (!win) return;
+
+        if (!win->visible) {
+            win->visible = true;
+            bring_to_front(id);
+            status_message_ = "Opened and focused " + win->title;
+        } else {
+            if (active_window_ == id) {
+                win->visible = false;
+                if (id == WindowId::Inspector) inspector_open_ = false;
+                update_top_active_window();
+                status_message_ = "Closed " + win->title;
+            } else {
+                bring_to_front(id);
+                status_message_ = "Focused " + win->title + " (Brought to front)";
+            }
+        }
+    }
+
+    ResizeEdge get_resize_edge(const DawWindow& win, float px, float py) const {
+        if (!win.contains(px, py)) return ResizeEdge::None;
+        const float m = DawWindow::kBorderMargin;
+
+        bool on_l = (px >= win.x && px <= win.x + m);
+        bool on_r = (px >= win.x + win.w - m && px <= win.x + win.w);
+        bool on_t = (py >= win.y && py <= win.y + m);
+        bool on_b = (py >= win.y + win.h - m && py <= win.y + win.h);
+
+        if (on_t && on_l) return ResizeEdge::TopLeft;
+        if (on_t && on_r) return ResizeEdge::TopRight;
+        if (on_b && on_l) return ResizeEdge::BottomLeft;
+        if (on_b && on_r) return ResizeEdge::BottomRight;
+        if (on_l) return ResizeEdge::Left;
+        if (on_r) return ResizeEdge::Right;
+        if (on_t) return ResizeEdge::Top;
+        if (on_b) return ResizeEdge::Bottom;
+
+        return ResizeEdge::None;
+    }
+
+    void apply_magnet_snapping(float& new_x, float& new_y, float w, float h, WindowId current_id) {
+        if (!magnet_enabled_) return;
+        const float kSnapDist = 14.0f;
+
+        float ws_l = 8.0f;
+        float ws_t = 52.0f;
+        float ws_r = static_cast<float>(client_w_ - 8);
+        float ws_b = static_cast<float>(client_h_ - 30);
+
+        // X-axis snapping
+        // 1. Workspace edges
+        if (std::abs(new_x - ws_l) < kSnapDist) {
+            new_x = ws_l;
+        } else if (std::abs((new_x + w) - ws_r) < kSnapDist) {
+            new_x = ws_r - w;
+        }
+
+        // 2. Other windows
+        for (const auto* other : get_all_windows()) {
+            if (!other || other->id == current_id || !other->visible) continue;
+
+            if (std::abs(new_x - (other->x + other->w)) < kSnapDist) {
+                new_x = other->x + other->w;
+            } else if (std::abs((new_x + w) - other->x) < kSnapDist) {
+                new_x = other->x - w;
+            } else if (std::abs(new_x - other->x) < kSnapDist) {
+                new_x = other->x;
+            } else if (std::abs((new_x + w) - (other->x + other->w)) < kSnapDist) {
+                new_x = other->x + other->w - w;
+            }
+        }
+
+        // Y-axis snapping
+        // 1. Workspace edges
+        if (std::abs(new_y - ws_t) < kSnapDist) {
+            new_y = ws_t;
+        } else if (std::abs((new_y + h) - ws_b) < kSnapDist) {
+            new_y = ws_b - h;
+        }
+
+        // 2. Other windows
+        for (const auto* other : get_all_windows()) {
+            if (!other || other->id == current_id || !other->visible) continue;
+
+            if (std::abs(new_y - (other->y + other->h)) < kSnapDist) {
+                new_y = other->y + other->h;
+            } else if (std::abs((new_y + h) - other->y) < kSnapDist) {
+                new_y = other->y - h;
+            } else if (std::abs(new_y - other->y) < kSnapDist) {
+                new_y = other->y;
+            } else if (std::abs((new_y + h) - (other->y + other->h)) < kSnapDist) {
+                new_y = other->y + other->h - h;
+            }
+        }
+    }
+
+    void apply_resize_dragging(DawWindow& win, float dx, float dy) {
+        const float kSnapDist = 14.0f;
+        float ws_l = 8.0f;
+        float ws_t = 52.0f;
+        float ws_r = static_cast<float>(client_w_ - 8);
+        float ws_b = static_cast<float>(client_h_ - 30);
+
+        float new_x = drag_win_orig_x_;
+        float new_y = drag_win_orig_y_;
+        float new_w = drag_win_orig_w_;
+        float new_h = drag_win_orig_h_;
+
+        // Handle horizontal resizing
+        if (resize_edge_ == ResizeEdge::Right || resize_edge_ == ResizeEdge::TopRight || resize_edge_ == ResizeEdge::BottomRight) {
+            float cand_r = drag_win_orig_x_ + drag_win_orig_w_ + dx;
+            if (magnet_enabled_) {
+                if (std::abs(cand_r - ws_r) < kSnapDist) cand_r = ws_r;
+                for (const auto* other : get_all_windows()) {
+                    if (!other || other->id == win.id || !other->visible) continue;
+                    if (std::abs(cand_r - other->x) < kSnapDist) cand_r = other->x;
+                    else if (std::abs(cand_r - (other->x + other->w)) < kSnapDist) cand_r = other->x + other->w;
+                }
+            }
+            cand_r = std::min(cand_r, ws_r);
+            new_w = std::max(win.min_w, cand_r - new_x);
+        } else if (resize_edge_ == ResizeEdge::Left || resize_edge_ == ResizeEdge::TopLeft || resize_edge_ == ResizeEdge::BottomLeft) {
+            float cand_l = drag_win_orig_x_ + dx;
+            if (magnet_enabled_) {
+                if (std::abs(cand_l - ws_l) < kSnapDist) cand_l = ws_l;
+                for (const auto* other : get_all_windows()) {
+                    if (!other || other->id == win.id || !other->visible) continue;
+                    if (std::abs(cand_l - (other->x + other->w)) < kSnapDist) cand_l = other->x + other->w;
+                    else if (std::abs(cand_l - other->x) < kSnapDist) cand_l = other->x;
+                }
+            }
+            cand_l = std::max(cand_l, ws_l);
+            float right_pos = drag_win_orig_x_ + drag_win_orig_w_;
+            if (right_pos - cand_l >= win.min_w) {
+                new_x = cand_l;
+                new_w = right_pos - cand_l;
+            } else {
+                new_x = right_pos - win.min_w;
+                new_w = win.min_w;
+            }
+        }
+
+        // Handle vertical resizing
+        if (resize_edge_ == ResizeEdge::Bottom || resize_edge_ == ResizeEdge::BottomLeft || resize_edge_ == ResizeEdge::BottomRight) {
+            float cand_b = drag_win_orig_y_ + drag_win_orig_h_ + dy;
+            if (magnet_enabled_) {
+                if (std::abs(cand_b - ws_b) < kSnapDist) cand_b = ws_b;
+                for (const auto* other : get_all_windows()) {
+                    if (!other || other->id == win.id || !other->visible) continue;
+                    if (std::abs(cand_b - other->y) < kSnapDist) cand_b = other->y;
+                    else if (std::abs(cand_b - (other->y + other->h)) < kSnapDist) cand_b = other->y + other->h;
+                }
+            }
+            cand_b = std::min(cand_b, ws_b);
+            new_h = std::max(win.min_h, cand_b - new_y);
+        } else if (resize_edge_ == ResizeEdge::Top || resize_edge_ == ResizeEdge::TopLeft || resize_edge_ == ResizeEdge::TopRight) {
+            float cand_t = drag_win_orig_y_ + dy;
+            if (magnet_enabled_) {
+                if (std::abs(cand_t - ws_t) < kSnapDist) cand_t = ws_t;
+                for (const auto* other : get_all_windows()) {
+                    if (!other || other->id == win.id || !other->visible) continue;
+                    if (std::abs(cand_t - (other->y + other->h)) < kSnapDist) cand_t = other->y + other->h;
+                    else if (std::abs(cand_t - other->y) < kSnapDist) cand_t = other->y;
+                }
+            }
+            cand_t = std::max(cand_t, ws_t);
+            float bottom_pos = drag_win_orig_y_ + drag_win_orig_h_;
+            if (bottom_pos - cand_t >= win.min_h) {
+                new_y = cand_t;
+                new_h = bottom_pos - cand_t;
+            } else {
+                new_y = bottom_pos - win.min_h;
+                new_h = win.min_h;
+            }
+        }
+
+        win.x = new_x;
+        win.y = new_y;
+        win.w = new_w;
+        win.h = new_h;
+    }
+
+    void init_default_window_layout() {
+        if (client_w_ <= 0 || client_h_ <= 0) return;
+
+        float top_bound = 52.0f;
+        float bot_bound = std::max(top_bound + 100.0f, static_cast<float>(client_h_ - 30));
+        float ws_h = bot_bound - top_bound;
+        float ws_w = std::max(300.0f, static_cast<float>(client_w_ - 16));
+
+        float insp_w = 260.0f;
+        float gap = 6.0f;
+        float main_w = std::max(420.0f, ws_w - insp_w - gap);
+        float playlist_h = std::max(220.0f, std::round(ws_h * 0.58f));
+        float mixer_h = std::max(200.0f, ws_h - playlist_h - gap);
+
+        // 1. Playlist: Top Left
+        win_playlist_.x = 8.0f;
+        win_playlist_.y = top_bound;
+        win_playlist_.w = main_w;
+        win_playlist_.h = playlist_h;
+        win_playlist_.visible = true;
+
+        // 2. Mixer: Bottom Left (docked under Playlist)
+        win_mixer_.x = 8.0f;
+        win_mixer_.y = top_bound + playlist_h + gap;
+        win_mixer_.w = main_w;
+        win_mixer_.h = mixer_h;
+        win_mixer_.visible = true;
+
+        // 3. Inspector: Right column (docked to right edge)
+        win_inspector_.x = 8.0f + main_w + gap;
+        win_inspector_.y = top_bound;
+        win_inspector_.w = insp_w;
+        win_inspector_.h = ws_h;
+        win_inspector_.visible = true;
+        inspector_open_ = true;
+
+        // 4. Piano Roll: Center workspace (initially hidden)
+        win_pianoroll_.x = 24.0f;
+        win_pianoroll_.y = top_bound + 16.0f;
+        win_pianoroll_.w = std::max(460.0f, main_w - 32.0f);
+        win_pianoroll_.h = std::max(240.0f, ws_h - 32.0f);
+        win_pianoroll_.visible = false;
+
+        active_window_ = WindowId::Playlist;
+        layout_initialized_ = true;
+    }
+
+    void clamp_windows_to_screen() {
+        float top_bound = 52.0f;
+        float bot_bound = static_cast<float>(client_h_ - 30);
+        float right_bound = static_cast<float>(client_w_ - 8);
+
+        for (auto* win : get_all_windows()) {
+            if (!win) continue;
+            if (win->x + win->w > right_bound) {
+                win->x = std::max(8.0f, right_bound - win->w);
+            }
+            if (win->y + win->h > bot_bound) {
+                win->y = std::max(top_bound, bot_bound - win->h);
+            }
+        }
     }
 
     static constexpr int kInspectorWidth = 260;
@@ -307,15 +761,34 @@ public:
         float row_h{0.0f};
         float step_w{0.0f};
 
-        void init(int client_w, int client_h, int num_pitches, int visible_steps) {
-            rack_bottom = static_cast<float>(client_h - 268);
+        void init(float win_x, float win_y, float win_w, float win_h, int num_pitches, int visible_steps) {
+            rack_top = win_y + DawWindow::kTitleBarHeight;
+            rack_bottom = win_y + win_h;
+            toolbar_y = rack_top + 4.0f;
+            toolbar_h = 24.0f;
+            ruler_y = toolbar_y + toolbar_h + 4.0f;
+            ruler_h = 20.0f;
+            grid_top = ruler_y + ruler_h + 2.0f;
+            h_scroll_h = 16.0f;
+            v_scroll_w = 16.0f;
             grid_bottom = rack_bottom - h_scroll_h - 4.0f;
-            grid_h = std::max(100.0f, grid_bottom - grid_top);
-            v_scroll_x = static_cast<float>(client_w - 20) - v_scroll_w;
-            grid_w = std::max(200.0f, v_scroll_x - 4.0f - grid_x);
+            grid_h = std::max(60.0f, grid_bottom - grid_top);
+            piano_x = win_x + 8.0f;
+            piano_w = 64.0f;
+            grid_x = piano_x + piano_w + 2.0f;
+            v_scroll_x = (win_x + win_w - 8.0f) - v_scroll_w;
+            grid_w = std::max(100.0f, v_scroll_x - 4.0f - grid_x);
             h_scroll_y = grid_bottom + 2.0f;
             row_h = grid_h / static_cast<float>(num_pitches);
             step_w = grid_w / static_cast<float>(visible_steps);
+        }
+
+        void init(const DawWindow& win, int num_pitches, int visible_steps) {
+            init(win.x, win.y, win.w, win.h, num_pitches, visible_steps);
+        }
+
+        void init(int client_w, int client_h, int num_pitches, int visible_steps) {
+            init(10.0f, 52.0f, static_cast<float>(client_w - 20), static_cast<float>(client_h - 320), num_pitches, visible_steps);
         }
     };
 
@@ -403,6 +876,15 @@ private:
             case WM_SIZE: {
                 int w = LOWORD(lp);
                 int h = HIWORD(lp);
+                if (w > 0 && h > 0) {
+                    client_w_ = w;
+                    client_h_ = h;
+                    if (!layout_initialized_) {
+                        init_default_window_layout();
+                    } else {
+                        clamp_windows_to_screen();
+                    }
+                }
                 if (use_d2d_d3d_) {
                     resize_gpu_buffers(w, h);
                 } else {
@@ -428,12 +910,22 @@ private:
                 int w = cr.right - cr.left;
                 int h = cr.bottom - cr.top;
                 if (w > 0 && h > 0) {
+                    client_w_ = w;
+                    client_h_ = h;
+                    clamp_windows_to_screen();
                     if (use_d2d_d3d_) {
                         resize_gpu_buffers(w, h);
                     } else {
                         resize_backbuffer(w, h);
                     }
                 }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+
+            case WM_SETTINGCHANGE:
+            case WM_THEMECHANGED: {
+                apply_system_window_theme(hwnd);
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
             }
@@ -532,6 +1024,34 @@ private:
             }
 
             case WM_SETCURSOR: {
+                if (is_dragging_window_) {
+                    if (window_drag_mode_ == WindowDragMode::Move) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                        return TRUE;
+                    }
+                    if (window_drag_mode_ == WindowDragMode::Resize) {
+                        switch (resize_edge_) {
+                            case ResizeEdge::Left:
+                            case ResizeEdge::Right:
+                                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                                return TRUE;
+                            case ResizeEdge::Top:
+                            case ResizeEdge::Bottom:
+                                SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                                return TRUE;
+                            case ResizeEdge::TopLeft:
+                            case ResizeEdge::BottomRight:
+                                SetCursor(LoadCursor(NULL, IDC_SIZENWSE));
+                                return TRUE;
+                            case ResizeEdge::TopRight:
+                            case ResizeEdge::BottomLeft:
+                                SetCursor(LoadCursor(NULL, IDC_SIZENESW));
+                                return TRUE;
+                            default:
+                                break;
+                        }
+                    }
+                }
                 if (dragging_inspector_vol_ || dragging_inspector_pan_ || dragging_inspector_wet_slot_ >= 0) {
                     SetCursor(LoadCursor(NULL, IDC_SIZEWE));
                     return TRUE;
@@ -544,43 +1064,45 @@ private:
                     SetCursor(LoadCursor(NULL, IDC_SIZENS));
                     return TRUE;
                 }
-                if (view_mode_ == ViewMode::ChannelRack) {
-                    if (dragging_seq_v_scrollbar_ || is_hovering_seq_v_scrollbar_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
-                        return TRUE;
-                    }
-                    if (dragging_seq_scrollbar_ || is_hovering_seq_scrollbar_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                        return TRUE;
-                    }
-                    if (clip_drag_mode_ == ClipDragMode::Resize || is_hovering_clip_edge_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                        return TRUE;
-                    }
-                    if (clip_drag_mode_ == ClipDragMode::Move) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
-                        return TRUE;
-                    }
-                } else if (view_mode_ == ViewMode::PianoRoll) {
-                    if (dragging_piano_v_scrollbar_ || is_hovering_piano_v_scrollbar_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
-                        return TRUE;
-                    }
-                    if (dragging_piano_h_scrollbar_ || is_hovering_piano_h_scrollbar_ ||
-                        note_drag_mode_ == NoteDragMode::Resize || is_hovering_note_edge_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                        return TRUE;
-                    }
-                    if (note_drag_mode_ == NoteDragMode::Move || is_hovering_note_body_) {
-                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
-                        return TRUE;
-                    }
+                if (dragging_seq_v_scrollbar_ || is_hovering_seq_v_scrollbar_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                    return TRUE;
+                }
+                if (dragging_seq_scrollbar_ || is_hovering_seq_scrollbar_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    return TRUE;
+                }
+                if (clip_drag_mode_ == ClipDragMode::Resize || is_hovering_clip_edge_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    return TRUE;
+                }
+                if (clip_drag_mode_ == ClipDragMode::Move) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                    return TRUE;
+                }
+                if (dragging_piano_v_scrollbar_ || is_hovering_piano_v_scrollbar_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                    return TRUE;
+                }
+                if (dragging_piano_h_scrollbar_ || is_hovering_piano_h_scrollbar_ ||
+                    note_drag_mode_ == NoteDragMode::Resize || is_hovering_note_edge_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    return TRUE;
+                }
+                if (note_drag_mode_ == NoteDragMode::Move || is_hovering_note_body_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                    return TRUE;
                 }
                 return DefWindowProc(hwnd, msg, wp, lp);
             }
 
             case WM_LBUTTONUP: {
                 is_mouse_down_ = false;
+                if (is_dragging_window_) {
+                    is_dragging_window_ = false;
+                    window_drag_mode_ = WindowDragMode::None;
+                    resize_edge_ = ResizeEdge::None;
+                }
                 dragging_spm_ = false;
                 dragging_seq_scrollbar_ = false;
                 dragging_seq_v_scrollbar_ = false;
@@ -621,116 +1143,124 @@ private:
                 GetCursorPos(&mouse_pt);
                 ScreenToClient(hwnd, &mouse_pt);
 
-                if (mouse_pt.y >= client_h_ - 262) {
-                    // Mouse in Mixer Panel -> Horizontal insert track scrolling
-                    auto& proj = engine_.session().project();
-                    float track_w = 96.0f;
-                    float gap = 12.0f;
-                    float insert_start_x = 25.0f + track_w + gap;
-                    float avail_w = (static_cast<float>(client_w_) - 25.0f) - insert_start_x;
-                    int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
-                    size_t total_inserts = std::max(size_t(4), proj.channels().size());
-                    int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
-                    if (max_mix_scroll > 0) {
-                        mixer_scroll_track_ = std::clamp(mixer_scroll_track_ - steps, 0, max_mix_scroll);
-                        InvalidateRect(hwnd, NULL, FALSE);
-                    }
-                } else if (inspector_open_ && mouse_pt.x >= client_w_ - (kInspectorWidth + kLayoutMargin) && mouse_pt.x <= client_w_ - kLayoutMargin && mouse_pt.y >= 58 && mouse_pt.y <= client_h_ - 268) {
-                    // Mouse inside Right-Side Inspector Panel
-                    int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-                    int insp_r = client_w_ - kLayoutMargin;
-                    int insp_y = 58;
-                    int insp_bot = client_h_ - 268;
-                    auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
-                    if (track) {
-                        std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-                        // Volume slider area: [insp_x + 14, insp_y + 90, insp_r - 14, insp_y + 108]
-                        if (mouse_pt.x >= insp_x + 14 && mouse_pt.x <= insp_r - 14 && mouse_pt.y >= insp_y + 90 && mouse_pt.y <= insp_y + 108) {
-                            float new_vol = std::clamp(track->volume() + steps * 0.05f, 0.0f, 1.25f);
-                            track->set_volume(new_vol);
-                            int vol_pct = static_cast<int>(std::round(track->volume() * 100.0f));
-                            status_message_ = (selected_mixer_track_ == 0 ? "Master" : ("Track " + std::to_string(selected_mixer_track_))) +
-                                              " Volume: " + std::to_string(vol_pct) + "%";
-                        }
-                        // Pan slider area: [insp_x + 14, insp_y + 112, insp_r - 14, insp_y + 130]
-                        else if (mouse_pt.x >= insp_x + 14 && mouse_pt.x <= insp_r - 14 && mouse_pt.y >= insp_y + 112 && mouse_pt.y <= insp_y + 130) {
-                            float new_pan = std::clamp(track->pan() + steps * 0.05f, -1.0f, 1.0f);
-                            track->set_pan(new_pan);
-                            std::string pan_str = (std::abs(new_pan) < 0.02f) ? "Center" :
-                                (new_pan < 0.0f ? "Left " + std::to_string(static_cast<int>(std::round(-new_pan * 100.0f))) + "%"
-                                                : "Right " + std::to_string(static_cast<int>(std::round(new_pan * 100.0f))) + "%");
-                            status_message_ = (selected_mixer_track_ == 0 ? "Master" : ("Track " + std::to_string(selected_mixer_track_))) +
-                                              " Pan: " + pan_str;
-                        }
-                        // FX slot list / wet mix / vertical scrolling
-                        else {
-                            size_t num_fx = track->inserts().size();
-                            int slot_y_start = insp_y + 192;
-                            int slot_h = 32;
-                            int slot_gap = 4;
-                            int fx_area_bot = insp_bot - 8;
-                            int fx_avail_h = fx_area_bot - slot_y_start;
-                            int vis_fx_items = std::max(1, fx_avail_h / (slot_h + slot_gap));
-                            int total_fx_items = static_cast<int>(num_fx) + (num_fx < 10 ? 1 : 0);
-                            int max_fx_scroll = std::max(0, total_fx_items - vis_fx_items);
-                            int right_margin = (max_fx_scroll > 0) ? 14 : 8;
+                for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+                    auto* win = get_window(*it);
+                    if (!win || !win->visible) continue;
+                    if (!win->contains(static_cast<float>(mouse_pt.x), static_cast<float>(mouse_pt.y))) continue;
 
-                            bool adjusted_wet = false;
-                            for (int i = inspector_scroll_slot_; i < static_cast<int>(num_fx); ++i) {
-                                int sy = slot_y_start + (i - inspector_scroll_slot_) * (slot_h + slot_gap);
-                                if (sy + slot_h > fx_area_bot) break;
-                                if (mouse_pt.x >= insp_r - (right_margin + 80) && mouse_pt.x <= insp_r - (right_margin + 26) &&
-                                    mouse_pt.y >= sy + 5 && mouse_pt.y <= sy + slot_h - 5) {
-                                    track->inserts()[i].wet_mix = std::clamp(track->inserts()[i].wet_mix + steps * 0.05f, 0.0f, 1.0f);
-                                    int pct = static_cast<int>(std::round(track->inserts()[i].wet_mix * 100.0f));
-                                    std::string name = track->inserts()[i].device ? track->inserts()[i].device->name() : "Effect";
-                                    status_message_ = name + " Wet Mix: " + std::to_string(pct) + "%";
-                                    adjusted_wet = true;
-                                    break;
+                    if (*it == WindowId::Mixer) {
+                        auto& proj = engine_.session().project();
+                        float track_w = 96.0f;
+                        float gap = 10.0f;
+                        float master_x = win->x + 12.0f;
+                        float insert_start_x = master_x + track_w + gap;
+                        float avail_w = (win->x + win->w - 12.0f) - insert_start_x;
+                        int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
+                        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+                        int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
+                        if (max_mix_scroll > 0) {
+                            mixer_scroll_track_ = std::clamp(mixer_scroll_track_ - steps, 0, max_mix_scroll);
+                        }
+                    } else if (*it == WindowId::Inspector) {
+                        float insp_x = win->x;
+                        float insp_y = win->y + DawWindow::kTitleBarHeight;
+                        float insp_r = win->x + win->w;
+                        float insp_bot = win->y + win->h;
+                        auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
+                        if (track) {
+                            std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+                            // Volume slider area
+                            if (mouse_pt.x >= insp_x + 14 && mouse_pt.x <= insp_r - 14 && mouse_pt.y >= insp_y + 54 && mouse_pt.y <= insp_y + 72) {
+                                float new_vol = std::clamp(track->volume() + steps * 0.05f, 0.0f, 1.25f);
+                                track->set_volume(new_vol);
+                                int vol_pct = static_cast<int>(std::round(track->volume() * 100.0f));
+                                status_message_ = (selected_mixer_track_ == 0 ? "Master" : ("Track " + std::to_string(selected_mixer_track_))) +
+                                                  " Volume: " + std::to_string(vol_pct) + "%";
+                            }
+                            // Pan slider area
+                            else if (mouse_pt.x >= insp_x + 14 && mouse_pt.x <= insp_r - 14 && mouse_pt.y >= insp_y + 76 && mouse_pt.y <= insp_y + 94) {
+                                float new_pan = std::clamp(track->pan() + steps * 0.05f, -1.0f, 1.0f);
+                                track->set_pan(new_pan);
+                                std::string pan_str = (std::abs(new_pan) < 0.02f) ? "Center" :
+                                    (new_pan < 0.0f ? "Left " + std::to_string(static_cast<int>(std::round(-new_pan * 100.0f))) + "%"
+                                                    : "Right " + std::to_string(static_cast<int>(std::round(new_pan * 100.0f))) + "%");
+                                status_message_ = (selected_mixer_track_ == 0 ? "Master" : ("Track " + std::to_string(selected_mixer_track_))) +
+                                                  " Pan: " + pan_str;
+                            }
+                            // FX slot list / wet mix / vertical scrolling
+                            else {
+                                size_t num_fx = track->inserts().size();
+                                float slot_y_start = insp_y + 156.0f;
+                                float slot_h = 32.0f;
+                                float slot_gap = 4.0f;
+                                float fx_area_bot = insp_bot - 8.0f;
+                                float fx_avail_h = fx_area_bot - slot_y_start;
+                                int vis_fx_items = std::max(1, static_cast<int>(fx_avail_h / (slot_h + slot_gap)));
+                                int total_fx_items = static_cast<int>(num_fx) + (num_fx < 10 ? 1 : 0);
+                                int max_fx_scroll = std::max(0, total_fx_items - vis_fx_items);
+                                int right_margin = (max_fx_scroll > 0) ? 14 : 8;
+
+                                bool adjusted_wet = false;
+                                for (int i = inspector_scroll_slot_; i < static_cast<int>(num_fx); ++i) {
+                                    float sy = slot_y_start + static_cast<float>(i - inspector_scroll_slot_) * (slot_h + slot_gap);
+                                    if (sy + slot_h > fx_area_bot) break;
+                                    if (mouse_pt.x >= insp_r - (right_margin + 80) && mouse_pt.x <= insp_r - (right_margin + 26) &&
+                                        mouse_pt.y >= sy + 5 && mouse_pt.y <= sy + slot_h - 5) {
+                                        track->inserts()[i].wet_mix = std::clamp(track->inserts()[i].wet_mix + steps * 0.05f, 0.0f, 1.0f);
+                                        int pct = static_cast<int>(std::round(track->inserts()[i].wet_mix * 100.0f));
+                                        std::string name = track->inserts()[i].device ? track->inserts()[i].device->name() : "Effect";
+                                        status_message_ = name + " Wet Mix: " + std::to_string(pct) + "%";
+                                        adjusted_wet = true;
+                                        break;
+                                    }
+                                }
+                                if (!adjusted_wet && max_fx_scroll > 0) {
+                                    inspector_scroll_slot_ = std::clamp(inspector_scroll_slot_ - steps, 0, max_fx_scroll);
+                                    status_message_ = "Inspector FX Scrolled (" + std::to_string(inspector_scroll_slot_ + 1) + "/" + std::to_string(max_fx_scroll + 1) + ")";
                                 }
                             }
-                            if (!adjusted_wet && max_fx_scroll > 0) {
-                                inspector_scroll_slot_ = std::clamp(inspector_scroll_slot_ - steps, 0, max_fx_scroll);
-                                status_message_ = "Inspector FX Scrolled (" + std::to_string(inspector_scroll_slot_ + 1) + "/" + std::to_string(max_fx_scroll + 1) + ")";
+                        }
+                    } else if (*it == WindowId::PianoRoll) {
+                        if (is_shift) {
+                            int max_steps = get_max_piano_roll_steps();
+                            int max_scroll = std::max(0, max_steps - piano_roll_steps_);
+                            piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ - steps * 4, 0, max_scroll);
+                            status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
+                        } else {
+                            piano_roll_base_pitch_ = std::clamp(piano_roll_base_pitch_ + steps * 2, 0, 128 - PianoRollNumPitches);
+                            status_message_ = "Pitch Range: " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                              " to " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
+                        }
+                    } else if (*it == WindowId::Playlist) {
+                        if (is_shift) {
+                            int max_bars = get_max_sequencer_bars();
+                            float ruler_x = win->x + 245.0f;
+                            float ruler_w = std::max(60.0f, (win->x + win->w - 12.0f) - ruler_x);
+                            int bars_per_view = (ruler_w > 900.0f) ? 16 : ((ruler_w > 550.0f) ? 12 : 8);
+                            int max_scroll = std::max(0, max_bars - bars_per_view);
+                            sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
+                            status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
+                        } else {
+                            auto& proj = engine_.session().project();
+                            float row_h = 48.0f;
+                            float start_y = win->y + DawWindow::kTitleBarHeight + 62.0f;
+                            float rack_avail_h = (win->y + win->h - 24.0f) - start_y;
+                            int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
+                            int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
+                            if (max_ch_scroll > 0) {
+                                sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_ - steps, 0, max_ch_scroll);
+                            } else {
+                                int max_bars = get_max_sequencer_bars();
+                                float ruler_x = win->x + 245.0f;
+                                float ruler_w = std::max(60.0f, (win->x + win->w - 12.0f) - ruler_x);
+                                int bars_per_view = (ruler_w > 900.0f) ? 16 : ((ruler_w > 550.0f) ? 12 : 8);
+                                int max_scroll = std::max(0, max_bars - bars_per_view);
+                                sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
                             }
                         }
                     }
                     InvalidateRect(hwnd, NULL, FALSE);
-                } else if (view_mode_ == ViewMode::PianoRoll) {
-                    if (is_shift) {
-                        int max_steps = get_max_piano_roll_steps();
-                        int max_scroll = std::max(0, max_steps - piano_roll_steps_);
-                        piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ - steps * 4, 0, max_scroll);
-                        status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
-                    } else {
-                        piano_roll_base_pitch_ = std::clamp(piano_roll_base_pitch_ + steps * 2, 0, 128 - PianoRollNumPitches);
-                        status_message_ = "Pitch Range: " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
-                                          " to " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
-                    }
-                    InvalidateRect(hwnd, NULL, FALSE);
-                } else if (view_mode_ == ViewMode::ChannelRack) {
-                    if (is_shift) {
-                        int max_bars = get_max_sequencer_bars();
-                        int bars_per_view = get_bars_per_view();
-                        int max_scroll = std::max(0, max_bars - bars_per_view);
-                        sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
-                        status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
-                    } else {
-                        auto& proj = engine_.session().project();
-                        float row_h = 48.0f;
-                        float rack_avail_h = (static_cast<float>(client_h_ - 268) - 26.0f) - 124.0f;
-                        int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
-                        int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
-                        if (max_ch_scroll > 0) {
-                            sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_ - steps, 0, max_ch_scroll);
-                        } else {
-                            int max_bars = get_max_sequencer_bars();
-                            int bars_per_view = get_bars_per_view();
-                            int max_scroll = std::max(0, max_bars - bars_per_view);
-                            sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ - steps, 0, max_scroll);
-                        }
-                    }
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
                 }
                 return 0;
             }
@@ -738,19 +1268,45 @@ private:
             case WM_MOUSEHWHEEL: {
                 short zDelta = GET_WHEEL_DELTA_WPARAM(wp);
                 int steps = zDelta / WHEEL_DELTA;
-                if (view_mode_ == ViewMode::PianoRoll) {
-                    int max_steps = get_max_piano_roll_steps();
-                    int max_scroll = std::max(0, max_steps - piano_roll_steps_);
-                    piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ + steps * 4, 0, max_scroll);
-                    status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
+
+                POINT mouse_pt;
+                GetCursorPos(&mouse_pt);
+                ScreenToClient(hwnd, &mouse_pt);
+
+                for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+                    auto* win = get_window(*it);
+                    if (!win || !win->visible) continue;
+                    if (!win->contains(static_cast<float>(mouse_pt.x), static_cast<float>(mouse_pt.y))) continue;
+
+                    if (*it == WindowId::PianoRoll) {
+                        int max_steps = get_max_piano_roll_steps();
+                        int max_scroll = std::max(0, max_steps - piano_roll_steps_);
+                        piano_roll_scroll_step_ = std::clamp(piano_roll_scroll_step_ + steps * 4, 0, max_scroll);
+                        status_message_ = "Piano Roll Timeline: Step " + std::to_string(piano_roll_scroll_step_ + 1) + " / " + std::to_string(max_steps);
+                    } else if (*it == WindowId::Playlist) {
+                        int max_bars = get_max_sequencer_bars();
+                        float ruler_x = win->x + 245.0f;
+                        float ruler_w = std::max(60.0f, (win->x + win->w - 12.0f) - ruler_x);
+                        int bars_per_view = (ruler_w > 900.0f) ? 16 : ((ruler_w > 550.0f) ? 12 : 8);
+                        int max_scroll = std::max(0, max_bars - bars_per_view);
+                        sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ + steps, 0, max_scroll);
+                        status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
+                    } else if (*it == WindowId::Mixer) {
+                        auto& proj = engine_.session().project();
+                        float track_w = 96.0f;
+                        float gap = 10.0f;
+                        float master_x = win->x + 12.0f;
+                        float insert_start_x = master_x + track_w + gap;
+                        float avail_w = (win->x + win->w - 12.0f) - insert_start_x;
+                        int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
+                        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+                        int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
+                        if (max_mix_scroll > 0) {
+                            mixer_scroll_track_ = std::clamp(mixer_scroll_track_ + steps, 0, max_mix_scroll);
+                        }
+                    }
                     InvalidateRect(hwnd, NULL, FALSE);
-                } else if (view_mode_ == ViewMode::ChannelRack) {
-                    int max_bars = get_max_sequencer_bars();
-                    int bars_per_view = get_bars_per_view();
-                    int max_scroll = std::max(0, max_bars - bars_per_view);
-                    sequencer_scroll_bar_ = std::clamp(sequencer_scroll_bar_ + steps, 0, max_scroll);
-                    status_message_ = "Timeline scrolled to Bar " + std::to_string(sequencer_scroll_bar_ + 1) + " / " + std::to_string(max_bars);
-                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
                 }
                 return 0;
             }
@@ -775,9 +1331,23 @@ private:
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
+                if (wp == VK_F5 || wp == VK_F6) {
+                    toggle_or_focus_window(WindowId::Playlist);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (wp == VK_F7) {
+                    toggle_or_focus_window(WindowId::PianoRoll);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
                 if (wp == VK_F8) {
-                    inspector_open_ = !inspector_open_;
-                    status_message_ = inspector_open_ ? "Opened Inspector Panel (F8)" : "Collapsed Inspector Panel (F8)";
+                    toggle_or_focus_window(WindowId::Inspector);
+                    InvalidateRect(hwnd, NULL, FALSE);
+                    return 0;
+                }
+                if (wp == VK_F9) {
+                    toggle_or_focus_window(WindowId::Mixer);
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
@@ -801,9 +1371,14 @@ private:
                         InvalidateRect(hwnd, NULL, FALSE);
                         return 0;
                     }
+                    if (wp == 'M') {
+                        magnet_enabled_ = !magnet_enabled_;
+                        status_message_ = magnet_enabled_ ? "Magnetic Snapping: Enabled" : "Magnetic Snapping: Disabled";
+                        InvalidateRect(hwnd, NULL, FALSE);
+                        return 0;
+                    }
                     if (wp == 'I') {
-                        inspector_open_ = !inspector_open_;
-                        status_message_ = inspector_open_ ? "Opened Inspector Panel (Ctrl+I)" : "Collapsed Inspector Panel (Ctrl+I)";
+                        toggle_or_focus_window(WindowId::Inspector);
                         InvalidateRect(hwnd, NULL, FALSE);
                         return 0;
                     }
@@ -813,29 +1388,9 @@ private:
                     InvalidateRect(hwnd, NULL, FALSE);
                     return 0;
                 }
-                if (wp == VK_F6) {
-                    view_mode_ = ViewMode::ChannelRack;
-                    status_message_ = "Switched to Playlist (F6)";
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    return 0;
-                }
-                if (wp == VK_F7) {
-                    view_mode_ = ViewMode::PianoRoll;
-                    for (const auto& ch : engine_.session().project().channels()) {
-                        if (ch.id() == piano_roll_channel_) {
-                            selected_mixer_track_ = ch.settings().mixer_track;
-                            break;
-                        }
-                    }
-                    status_message_ = "Switched to Piano roll (F7)";
-                    InvalidateRect(hwnd, NULL, FALSE);
-                    return 0;
-                }
                 if (wp == VK_ESCAPE) {
                     if (active_editor_channel_ != 0) {
                         active_editor_channel_ = 0; // Close plugin editor
-                    } else if (view_mode_ == ViewMode::PianoRoll) {
-                        view_mode_ = ViewMode::ChannelRack; // Return to rack
                     } else {
                         stop_playback();
                     }
@@ -1023,6 +1578,58 @@ private:
         use_d2d_d3d_ = false;
     }
 
+    void render_window_frame_d2d(const DawWindow& win) {
+        const auto& t = D2DRenderer::theme();
+        bool is_active = (win.id == active_window_);
+
+        // 0. Solid opaque window background (prevents background bleed-through when overlapping)
+        D2D1_RECT_F full_rc = win.get_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, full_rc, t.bg_surface, t.border_subtle, 0.0f);
+
+        // 1. Title bar background
+        D2D1_RECT_F title_bar_rc = win.get_title_bar_rect();
+        D2D1_COLOR_F title_bg = is_active ? t.bg_surface_2 : t.bg_surface;
+        D2DRenderer::draw_rounded_box(d2d_target_, title_bar_rc, title_bg, is_active ? t.accent : t.border_subtle, 4.0f);
+
+        // 2. Active Accent Line on top of title bar
+        if (is_active) {
+            ID2D1SolidColorBrush* br_top = nullptr;
+            d2d_target_->CreateSolidColorBrush(t.accent_bright, &br_top);
+            if (br_top) {
+                d2d_target_->DrawLine(D2D1::Point2F(win.x + 2.0f, win.y + 1.0f),
+                                      D2D1::Point2F(win.x + win.w - 2.0f, win.y + 1.0f),
+                                      br_top, 2.0f);
+                br_top->Release();
+            }
+        }
+
+        // 3. Window Icon Pill
+        D2D1_RECT_F icon_pill = D2D1::RectF(win.x + 6.0f, win.y + 4.0f, win.x + 26.0f, win.y + 24.0f);
+        D2DRenderer::draw_rounded_box(d2d_target_, icon_pill, is_active ? t.bg_elevated : t.bg_control, t.border_subtle, 3.0f);
+        D2D1_RECT_F icon_rc = D2D1::RectF(win.x + 8.0f, win.y + 6.0f, win.x + 24.0f, win.y + 22.0f);
+        D2DRenderer::draw_svg_icon(d2d_target_, win.icon, icon_rc, is_active ? t.accent_bright : t.text_secondary, 13.0f);
+
+        // 4. Window Title Text
+        D2D1_RECT_F text_rc = D2D1::RectF(win.x + 30.0f, win.y + 2.0f, win.x + win.w - 32.0f, win.y + DawWindow::kTitleBarHeight);
+        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, win.title, text_rc,
+                              is_active ? t.text_primary : t.text_secondary,
+                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        // 5. Close Button [✕] with Danger/Red hover effect
+        D2D1_RECT_F close_rc = win.get_close_btn_rect();
+        bool is_close_hover = (hover_close_win_id_ == static_cast<int>(win.id));
+        D2D1_COLOR_F close_bg = is_close_hover ? D2D1::ColorF(0.88f, 0.35f, 0.39f, 0.90f) : t.bg_control;
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, close_rc, "✕", false, close_bg, is_close_hover ? t.danger : t.border_subtle, 3.0f);
+
+        // 6. Outer Border around entire window
+        ID2D1SolidColorBrush* br_border = nullptr;
+        d2d_target_->CreateSolidColorBrush(is_active ? t.accent : t.border_subtle, &br_border);
+        if (br_border) {
+            d2d_target_->DrawRectangle(full_rc, br_border, is_active ? 1.5f : 1.0f);
+            br_border->Release();
+        }
+    }
+
     void render_gpu() {
         if (!swap_chain_ || !d2d_target_ || !d3d_rtv_ || client_w_ <= 0 || client_h_ <= 0) return;
 
@@ -1046,13 +1653,32 @@ private:
         d2d_target_->BeginDraw();
 
         render_transport_bar_d2d();
-        if (view_mode_ == ViewMode::ChannelRack) {
-            render_channel_rack_d2d();
-        } else {
-            render_piano_roll_d2d();
+
+        // Render each visible window in z_order_ (back to front)
+        for (WindowId wid : z_order_) {
+            auto* win = get_window(wid);
+            if (!win || !win->visible) continue;
+
+            render_window_frame_d2d(*win);
+
+            d2d_target_->PushAxisAlignedClip(win->get_content_rect(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            switch (wid) {
+                case WindowId::Playlist:
+                    render_channel_rack_d2d(*win);
+                    break;
+                case WindowId::PianoRoll:
+                    render_piano_roll_d2d(*win);
+                    break;
+                case WindowId::Mixer:
+                    render_mixer_panel_d2d(*win);
+                    break;
+                case WindowId::Inspector:
+                    render_inspector_d2d(*win);
+                    break;
+            }
+            d2d_target_->PopAxisAlignedClip();
         }
-        render_inspector_d2d();
-        render_mixer_panel_d2d();
+
         render_status_bar_d2d();
 
         if (active_editor_channel_ != 0) {
@@ -1082,14 +1708,22 @@ private:
             br_border->Release();
         }
 
-        // Logo / Wordmark
-        D2D1_RECT_F title_rc = D2D1::RectF(16.0f, 0.0f, 84.0f, 48.0f);
+        // Logo / Wordmark (wide bounds so "DigiDAW" never wraps down)
+        D2D1_RECT_F title_rc = D2D1::RectF(16.0f, 0.0f, 130.0f, 48.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_title_, "DigiDAW", title_rc, t.text_primary);
 
-        // Project Name badge (e.g. "Untitled Project")
+        // Elegant vertical divider between brand and project info
+        ID2D1SolidColorBrush* br_div = nullptr;
+        d2d_target_->CreateSolidColorBrush(t.border_subtle, &br_div);
+        if (br_div) {
+            d2d_target_->DrawLine(D2D1::Point2F(138.0f, 14.0f), D2D1::Point2F(138.0f, 34.0f), br_div, 1.0f);
+            br_div->Release();
+        }
+
+        // Project Name badge (with generous breathing space from DigiDAW)
         std::string proj_name = engine_.session().project().name();
         if (proj_name.empty()) proj_name = "Untitled Project";
-        D2D1_RECT_F proj_rc = D2D1::RectF(88.0f, 8.0f, 198.0f, 40.0f);
+        D2D1_RECT_F proj_rc = D2D1::RectF(200.0f, 8.0f, 310.0f, 40.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, proj_rc, t.bg_control, t.border_subtle, 3.5f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, proj_name, proj_rc, t.accent_bright,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -1097,13 +1731,13 @@ private:
         // Undo [↶] & Redo [↷] buttons
         bool can_undo = engine_.session().undo_stack().can_undo();
         bool can_redo = engine_.session().undo_stack().can_redo();
-        D2D1_RECT_F undo_rc = D2D1::RectF(204.0f, 8.0f, 234.0f, 40.0f);
+        D2D1_RECT_F undo_rc = D2D1::RectF(316.0f, 8.0f, 346.0f, 40.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, undo_rc, t.bg_control, can_undo ? t.border_default : t.border_subtle, 3.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "↶", undo_rc,
                               can_undo ? t.text_primary : t.text_disabled,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        D2D1_RECT_F redo_rc = D2D1::RectF(238.0f, 8.0f, 268.0f, 40.0f);
+        D2D1_RECT_F redo_rc = D2D1::RectF(350.0f, 8.0f, 380.0f, 40.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, redo_rc, t.bg_control, can_redo ? t.border_default : t.border_subtle, 3.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "↷", redo_rc,
                               can_redo ? t.text_primary : t.text_disabled,
@@ -1113,32 +1747,32 @@ private:
         bool is_playing = engine_.transport().is_playing();
         bool is_paused = (engine_.transport().state() == app::TransportState::Paused);
 
-        // 1. PLAY Button [▶] (active: purple accent)
-        D2D1_RECT_F play_rc = D2D1::RectF(276.0f, 8.0f, 312.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, play_rc, "▶", is_playing, t.accent, t.bg_control, 3.5f);
+        // 1. PLAY Button (active: purple accent)
+        D2D1_RECT_F play_rc = D2D1::RectF(388.0f, 8.0f, 424.0f, 40.0f);
+        D2DRenderer::draw_icon_button(d2d_target_, play_rc, SvgIconType::Play, is_playing, t.accent, t.bg_control, 3.5f, 16.0f);
 
-        // 2. PAUSE Button [❚❚] (active: warning amber)
-        D2D1_RECT_F pause_rc = D2D1::RectF(316.0f, 8.0f, 352.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, pause_rc, "❚❚", is_paused, t.warning, t.bg_control, 3.5f);
+        // 2. PAUSE Button (active: warning amber)
+        D2D1_RECT_F pause_rc = D2D1::RectF(428.0f, 8.0f, 464.0f, 40.0f);
+        D2DRenderer::draw_icon_button(d2d_target_, pause_rc, SvgIconType::Pause, is_paused, t.warning, t.bg_control, 3.5f, 16.0f);
 
-        // 3. STOP Button [■]
-        D2D1_RECT_F stop_rc = D2D1::RectF(356.0f, 8.0f, 392.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, stop_rc, "■", false, t.danger, t.bg_control, 3.5f);
+        // 3. STOP Button
+        D2D1_RECT_F stop_rc = D2D1::RectF(468.0f, 8.0f, 504.0f, 40.0f);
+        D2DRenderer::draw_icon_button(d2d_target_, stop_rc, SvgIconType::Stop, false, t.danger, t.bg_control, 3.5f, 16.0f);
 
         // Tempo Controls (- BPM +)
         double bpm = engine_.session().project().time_map().get_bpm_at(0);
         std::stringstream ss_bpm;
         ss_bpm << std::fixed << std::setprecision(1) << bpm << " BPM";
 
-        D2D1_RECT_F bpm_minus_rc = D2D1::RectF(400.0f, 8.0f, 424.0f, 40.0f);
+        D2D1_RECT_F bpm_minus_rc = D2D1::RectF(512.0f, 8.0f, 536.0f, 40.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_bold_, bpm_minus_rc, "-", false, t.bg_control, t.bg_control, 3.0f);
 
-        D2D1_RECT_F bpm_disp_rc = D2D1::RectF(428.0f, 8.0f, 508.0f, 40.0f);
+        D2D1_RECT_F bpm_disp_rc = D2D1::RectF(540.0f, 8.0f, 620.0f, 40.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, bpm_disp_rc, t.bg_control, t.border_subtle, 3.5f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, ss_bpm.str(), bpm_disp_rc, t.text_primary,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        D2D1_RECT_F bpm_plus_rc = D2D1::RectF(512.0f, 8.0f, 536.0f, 40.0f);
+        D2D1_RECT_F bpm_plus_rc = D2D1::RectF(624.0f, 8.0f, 648.0f, 40.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_bold_, bpm_plus_rc, "+", false, t.bg_control, t.bg_control, 3.0f);
 
         // Real-Time Position Clock starting from 00:00.00
@@ -1158,26 +1792,38 @@ private:
                << std::setfill('0') << std::setw(2) << centis
                << " | Bar " << bar;
 
-        D2D1_RECT_F pos_rc = D2D1::RectF(544.0f, 8.0f, 676.0f, 40.0f);
+        D2D1_RECT_F pos_rc = D2D1::RectF(656.0f, 8.0f, 788.0f, 40.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, pos_rc, t.bg_control, t.border_subtle, 3.5f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, ss_pos.str(), pos_rc, t.accent_bright,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        // View Mode Switcher: Icon-first [🎛], [🎹], and Inspector toggle [ℹ]
-        D2D1_RECT_F rack_btn_rc = D2D1::RectF(684.0f, 8.0f, 722.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, rack_btn_rc, "🎛",
-                                view_mode_ == ViewMode::ChannelRack, t.accent, t.bg_control, 3.5f);
+        // Window / View Buttons: Playlist, Piano Roll, Mixer, Inspector, and Magnet Snapping
+        D2D1_RECT_F pl_btn_rc = D2D1::RectF(796.0f, 8.0f, 832.0f, 40.0f);
+        bool pl_top = (active_window_ == WindowId::Playlist && win_playlist_.visible);
+        D2DRenderer::draw_icon_button(d2d_target_, pl_btn_rc, SvgIconType::Playlist,
+                                      pl_top, t.accent, win_playlist_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
 
-        D2D1_RECT_F roll_btn_rc = D2D1::RectF(726.0f, 8.0f, 764.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, roll_btn_rc, "🎹",
-                                view_mode_ == ViewMode::PianoRoll, t.accent, t.bg_control, 3.5f);
+        D2D1_RECT_F roll_btn_rc = D2D1::RectF(836.0f, 8.0f, 872.0f, 40.0f);
+        bool pr_top = (active_window_ == WindowId::PianoRoll && win_pianoroll_.visible);
+        D2DRenderer::draw_icon_button(d2d_target_, roll_btn_rc, SvgIconType::PianoRoll,
+                                      pr_top, t.accent, win_pianoroll_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
 
-        D2D1_RECT_F insp_btn_rc = D2D1::RectF(768.0f, 8.0f, 806.0f, 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, insp_btn_rc, "ℹ",
-                                inspector_open_, t.accent, t.bg_control, 3.5f);
+        D2D1_RECT_F mix_btn_rc = D2D1::RectF(876.0f, 8.0f, 912.0f, 40.0f);
+        bool mx_top = (active_window_ == WindowId::Mixer && win_mixer_.visible);
+        D2DRenderer::draw_icon_button(d2d_target_, mix_btn_rc, SvgIconType::Mixer,
+                                      mx_top, t.accent, win_mixer_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
+
+        D2D1_RECT_F insp_btn_rc = D2D1::RectF(916.0f, 8.0f, 952.0f, 40.0f);
+        bool insp_top = (active_window_ == WindowId::Inspector && win_inspector_.visible);
+        D2DRenderer::draw_icon_button(d2d_target_, insp_btn_rc, SvgIconType::TrackFx,
+                                      insp_top, t.accent, win_inspector_.visible ? t.bg_surface_2 : t.bg_control, 3.5f, 16.0f);
+
+        D2D1_RECT_F mag_btn_rc = D2D1::RectF(956.0f, 8.0f, 992.0f, 40.0f);
+        D2DRenderer::draw_icon_button(d2d_target_, mag_btn_rc, SvgIconType::Magnet,
+                                      magnet_enabled_, t.accent, t.bg_control, 3.5f, 16.0f);
 
         // 7. Real-Time Audio Signal Oscilloscope Section (Electric violet phosphor filament)
-        float spec_x = 816.0f;
+        float spec_x = 1000.0f;
         float spec_max_right = static_cast<float>(client_w_ - 88);
         if (spec_max_right > spec_x + 50.0f) {
             float spec_w = std::min(240.0f, spec_max_right - spec_x);
@@ -1242,49 +1888,49 @@ private:
             }
         }
 
-        // Action Buttons: Icon-first [💾] and [💿]
+        // Action Buttons: Save [Save SVG] and Export [Export SVG]
         D2D1_RECT_F save_rc = D2D1::RectF(static_cast<float>(client_w_ - 80), 8.0f, static_cast<float>(client_w_ - 45), 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, save_rc, "💾", false, t.bg_control, t.bg_control, 3.5f);
+        D2DRenderer::draw_icon_button(d2d_target_, save_rc, SvgIconType::Save, false, t.bg_control, t.bg_control, 3.5f, 16.0f);
 
         D2D1_RECT_F exp_rc = D2D1::RectF(static_cast<float>(client_w_ - 41), 8.0f, static_cast<float>(client_w_ - 10), 40.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, exp_rc, "💿", false, t.bg_control, t.bg_control, 3.5f);
+        D2DRenderer::draw_icon_button(d2d_target_, exp_rc, SvgIconType::Export, false, t.accent, t.bg_control, 3.5f, 16.0f);
     }
 
-    void render_channel_rack_d2d() {
+    void render_channel_rack_d2d(const DawWindow& win) {
         const auto& t = D2DRenderer::theme();
-        float eff_w = static_cast<float>(get_effective_workspace_w());
-        D2D1_RECT_F rack_rc = D2D1::RectF(10.0f, 58.0f, eff_w - 10.0f, static_cast<float>(client_h_ - 268));
-        D2DRenderer::draw_rounded_box(d2d_target_, rack_rc, t.bg_surface, t.border_subtle, 6.0f);
+        D2D1_RECT_F rack_rc = win.get_content_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, rack_rc, t.bg_surface, t.border_subtle, 0.0f);
 
-        // Header Title (Uppercase micro-label semibold per DESIGN.md section 1)
-        D2D1_RECT_F title_rc = D2D1::RectF(25.0f, 66.0f, 105.0f, 90.0f);
-        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "PLAYLIST",
-                              title_rc, t.text_secondary);
+        float px = win.x;
+        float py = win.y + DawWindow::kTitleBarHeight;
+        float pw = win.w;
+        float ph = win.h - DawWindow::kTitleBarHeight;
 
         // Header [+ Add Instrument] button - always accessible
-        D2D1_RECT_F add_tool_rc = D2D1::RectF(110.0f, 64.0f, 250.0f, 90.0f);
+        D2D1_RECT_F add_tool_rc = D2D1::RectF(px + 12.0f, py + 6.0f, px + 150.0f, py + 30.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, add_tool_rc, "+ Add Instrument", false, t.accent, t.bg_control, 3.5f);
+
+        // Timeline Ruler & Lanes
+        float ruler_x = px + 245.0f;
+        float ruler_y = py + 36.0f;
+        float ruler_w = std::max(60.0f, (px + pw - 12.0f) - ruler_x);
+        float ruler_h = 22.0f;
 
         // Horizontal Bar Range Display
         auto ppq = engine_.session().project().time_map().ppq();
         auto bar_ticks = 4 * ppq;
-        int bars_per_view = get_bars_per_view();
+        int bars_per_view = (ruler_w > 900.0f) ? 16 : ((ruler_w > 550.0f) ? 12 : 8);
         int max_bars = get_max_sequencer_bars();
 
         int start_bar_num = sequencer_scroll_bar_ + 1;
         int end_bar_num = sequencer_scroll_bar_ + bars_per_view;
         std::string bar_lbl = "↔ Showing Bars " + std::to_string(start_bar_num) + "-" + std::to_string(end_bar_num) + " / " + std::to_string(max_bars);
-        D2D1_RECT_F bar_num_rc = D2D1::RectF(eff_w - 260.0f, 64.0f, eff_w - 25.0f, 90.0f);
+        D2D1_RECT_F bar_num_rc = D2D1::RectF(std::max(px + 155.0f, px + pw - 250.0f), py + 6.0f, px + pw - 12.0f, py + 30.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, bar_num_rc, t.bg_control, t.border_subtle, 3.5f);
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, bar_lbl, bar_num_rc, t.text_secondary,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         // Timeline Ruler
-        float ruler_x = 265.0f;
-        float ruler_y = 96.0f;
-        float ruler_w = static_cast<float>((eff_w - 25.0f) - 265.0f);
-        float ruler_h = 22.0f;
-
         D2D1_RECT_F ruler_rc = D2D1::RectF(ruler_x, ruler_y, ruler_x + ruler_w, ruler_y + ruler_h);
         D2DRenderer::draw_rounded_box(d2d_target_, ruler_rc, t.bg_surface_2, t.border_subtle, 3.0f);
 
@@ -1300,12 +1946,10 @@ private:
 
         for (int b = 0; b < bars_per_view; ++b) {
             float bx = ruler_x + b * bar_w;
-            // Bar Number
             D2D1_RECT_F num_rc = D2D1::RectF(bx + 4.0f, ruler_y + 2.0f, bx + 36.0f, ruler_y + ruler_h - 2.0f);
             int cur_bar_idx = sequencer_scroll_bar_ + b + 1;
             D2DRenderer::draw_text(d2d_target_, dwrite_small_, std::to_string(cur_bar_idx), num_rc, t.text_muted);
 
-            // Bar tick lines (half-pixel snapped for razor-sharp 1px line)
             if (br_border_dark && b > 0) {
                 float snap_bx = std::floor(bx) + 0.5f;
                 d2d_target_->DrawLine(D2D1::Point2F(snap_bx, ruler_y), D2D1::Point2F(snap_bx, ruler_y + ruler_h), br_border_dark, 1.0f);
@@ -1319,14 +1963,14 @@ private:
         }
 
         // Tracks & Lanes
-        float start_y = 124.0f;
+        float start_y = py + 62.0f;
         float row_h = 48.0f;
         float step_h = 42.0f;
         auto& channels = engine_.session().project().channels();
         auto& tracks = engine_.session().project().tracks();
         auto* pat = engine_.session().project().get_pattern(1);
 
-        float rack_avail_h = (rack_rc.bottom - 26.0f) - start_y;
+        float rack_avail_h = (py + ph - 24.0f) - start_y;
         int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
         int max_ch_scroll = std::max(0, static_cast<int>(channels.size()) - visible_channels + 1);
         sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_, 0, max_ch_scroll);
@@ -1338,7 +1982,7 @@ private:
         float max_track_bottom = start_y;
 
         // Clip channel tracks within rack area so scrolling never bleeds outside
-        D2D1_RECT_F clip_rc = D2D1::RectF(12.0f, start_y, eff_w - 12.0f, rack_rc.bottom - 26.0f);
+        D2D1_RECT_F clip_rc = D2D1::RectF(px + 8.0f, start_y, px + pw - 8.0f, py + ph - 24.0f);
         d2d_target_->PushAxisAlignedClip(clip_rc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         size_t start_ch = static_cast<size_t>(sequencer_scroll_track_);
@@ -1351,22 +1995,22 @@ private:
 
             // Channel Left Controls
             // 1. Mute
-            D2D1_RECT_F mute_rc = D2D1::RectF(25.0f, ch_y + 8.0f, 47.0f, ch_y + 34.0f);
+            D2D1_RECT_F mute_rc = D2D1::RectF(px + 12.0f, ch_y + 8.0f, px + 34.0f, ch_y + 34.0f);
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, mute_rc, "M", ch.settings().muted, t.danger, t.bg_control, 3.0f);
 
             // 2. Solo
-            D2D1_RECT_F solo_rc = D2D1::RectF(51.0f, ch_y + 8.0f, 73.0f, ch_y + 34.0f);
+            D2D1_RECT_F solo_rc = D2D1::RectF(px + 38.0f, ch_y + 8.0f, px + 60.0f, ch_y + 34.0f);
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, solo_rc, "S", ch.settings().solo, t.accent, t.bg_control, 3.0f);
 
-            // 3. Name & Settings Gear
-            D2D1_RECT_F name_rc = D2D1::RectF(78.0f, ch_y + 5.0f, 218.0f, ch_y + 37.0f);
-            std::string ch_label = ch.settings().name + " ⚙";
+            // 3. Name (Instruments display name without gear icon)
+            D2D1_RECT_F name_rc = D2D1::RectF(px + 65.0f, ch_y + 5.0f, px + 205.0f, ch_y + 37.0f);
+            std::string ch_label = ch.settings().name;
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, name_rc, ch_label, false, t.bg_control, t.bg_control, 3.0f);
 
             // 4. Piano Roll Button
-            D2D1_RECT_F roll_btn_rc = D2D1::RectF(223.0f, ch_y + 8.0f, 255.0f, ch_y + 34.0f);
+            D2D1_RECT_F roll_btn_rc = D2D1::RectF(px + 210.0f, ch_y + 8.0f, px + 242.0f, ch_y + 34.0f);
             bool is_active_roll = (piano_roll_channel_ == ch.id());
-            D2DRenderer::draw_button(d2d_target_, dwrite_small_, roll_btn_rc, "🎹", is_active_roll, t.accent, t.bg_control, 3.0f);
+            D2DRenderer::draw_icon_button(d2d_target_, roll_btn_rc, SvgIconType::PianoRoll, is_active_roll, t.accent, t.bg_control, 3.0f, 14.0f);
 
             // Track Arranger Lane (Alternating near-black dark surfaces)
             D2D1_RECT_F lane_rc = D2D1::RectF(ruler_x, ch_y, ruler_x + ruler_w, ch_y + step_h);
@@ -1388,7 +2032,7 @@ private:
                 }
             }
 
-            // Render Track Clips (Creative / Track Colors as muted / translucent tints per DESIGN.md section 0)
+            // Render Track Clips
             if (ch_idx < tracks.size()) {
                 const auto& track = tracks[ch_idx];
                 D2D1_COLOR_F track_accent = (ch_idx == 0 || ch_idx == 1) ? t.track_melody : ((ch_idx == 2) ? t.track_chords : t.track_drums);
@@ -1456,7 +2100,7 @@ private:
                         }
                     }
 
-                    // Right Resize Handle Grip (half-pixel snapped for crisp lines)
+                    // Right Resize Handle Grip
                     if (cw > 20.0f && br_border_light) {
                         float rx = std::floor(cx + cw - 4.0f) + 0.5f;
                         d2d_target_->DrawLine(D2D1::Point2F(rx - 2.0f, ch_y + 16.0f), D2D1::Point2F(rx - 2.0f, ch_y + step_h - 6.0f), br_border_light, 1.0f);
@@ -1469,7 +2113,7 @@ private:
         // Add Channel [+] Button in scrollable view
         if (channels.size() >= start_ch && channels.size() <= end_ch) {
             float add_y = start_y + static_cast<float>(channels.size() - start_ch) * row_h;
-            D2D1_RECT_F add_btn_rc = D2D1::RectF(25.0f, add_y + 4.0f, 218.0f, add_y + 34.0f);
+            D2D1_RECT_F add_btn_rc = D2D1::RectF(px + 12.0f, add_y + 4.0f, px + 205.0f, add_y + 34.0f);
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, add_btn_rc, "+ Add Instrument", false, t.bg_control, t.bg_control, 3.0f);
         }
 
@@ -1477,18 +2121,18 @@ private:
 
         // Vertical Scrollbar for channels if more channels than fit
         if (max_ch_scroll > 0) {
-            float vbar_x = 258.0f;
+            float vbar_x = px + 242.0f;
             float vbar_y = start_y;
-            float vbar_w = 4.0f;
+            float vbar_w = 3.0f;
             float vbar_h = rack_avail_h;
             D2D1_RECT_F v_track_rc = D2D1::RectF(vbar_x, vbar_y, vbar_x + vbar_w, vbar_y + vbar_h);
-            D2DRenderer::draw_rounded_box(d2d_target_, v_track_rc, t.bg_control, t.border_subtle, 2.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, v_track_rc, t.bg_control, t.border_subtle, 1.5f);
 
             float v_thumb_h = std::max(20.0f, (float(visible_channels) / float(channels.size() + 1)) * vbar_h);
             float v_scroll_ratio = float(sequencer_scroll_track_) / float(max_ch_scroll);
             float v_thumb_y = vbar_y + v_scroll_ratio * (vbar_h - v_thumb_h);
             D2D1_RECT_F v_thumb_rc = D2D1::RectF(vbar_x, v_thumb_y, vbar_x + vbar_w, v_thumb_y + v_thumb_h);
-            D2DRenderer::draw_rounded_box(d2d_target_, v_thumb_rc, t.accent, t.accent_bright, 2.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, v_thumb_rc, t.accent, t.accent_bright, 1.5f);
         }
 
         // Downward Electric Violet Playhead Marker (SPM / Playhead)
@@ -1500,13 +2144,13 @@ private:
         }
 
         // Sleek Horizontal Scrollbar Track & Thumb
-        float scroll_track_y = rack_rc.bottom - 22.0f;
+        float scroll_track_y = py + ph - 20.0f;
         float scroll_track_h = 14.0f;
         float scroll_track_x = ruler_x;
         float scroll_track_w = ruler_w;
 
         // Left Label for Scrollbar
-        D2D1_RECT_F scroll_lbl_rc = D2D1::RectF(25.0f, scroll_track_y - 2.0f, ruler_x - 15.0f, scroll_track_y + scroll_track_h + 2.0f);
+        D2D1_RECT_F scroll_lbl_rc = D2D1::RectF(px + 12.0f, scroll_track_y - 2.0f, ruler_x - 10.0f, scroll_track_y + scroll_track_h + 2.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, "↔ TIMELINE SCROLL", scroll_lbl_rc, t.text_muted,
                               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
@@ -1540,56 +2184,57 @@ private:
         if (br_border_dark) br_border_dark->Release();
     }
 
-    void render_piano_roll_d2d() {
+    void render_channel_rack_d2d() {
+        render_channel_rack_d2d(win_playlist_);
+    }
+
+    void render_piano_roll_d2d(const DawWindow& win) {
         const auto& t = D2DRenderer::theme();
         PianoRollLayout lay;
-        lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+        lay.init(win, PianoRollNumPitches, piano_roll_steps_);
 
-        D2D1_RECT_F roll_rc = D2D1::RectF(10.0f, lay.rack_top, static_cast<float>(get_effective_workspace_w() - 10), lay.rack_bottom);
-        D2DRenderer::draw_rounded_box(d2d_target_, roll_rc, t.bg_surface, t.border_subtle, 6.0f);
+        D2D1_RECT_F roll_rc = win.get_content_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, roll_rc, t.bg_surface, t.border_subtle, 0.0f);
 
-        // 1. Toolbar: Section Title, Back to Playlist, Step Toggle, Note Length, Clear, and Shortcuts
+        // 1. Toolbar: Pitch Range, Steps Toggle, Note Length, Clear, and Shortcuts
         auto* ch = engine_.session().project().get_channel(piano_roll_channel_);
         std::string ch_name = ch ? ch->settings().name : "Instrument";
 
-        // Section Title: "PIANO ROLL" (uppercase micro-label semibold per DESIGN.md section 1)
-        D2D1_RECT_F title_rc = D2D1::RectF(25.0f, lay.toolbar_y, 125.0f, lay.toolbar_y + lay.toolbar_h);
-        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "PIANO ROLL", title_rc, t.text_secondary,
-                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        // Back to Playlist button
-        D2D1_RECT_F back_rc = D2D1::RectF(135.0f, lay.toolbar_y, 255.0f, lay.toolbar_y + lay.toolbar_h);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, back_rc, "🎛 Back to Playlist", false, t.accent, t.bg_control, 3.5f);
-
+        float tx = win.x + 12.0f;
         // Pitch Range Display Badge (Full 128 semitones C0..B10)
         int max_base_pitch = 128 - PianoRollNumPitches;
-        std::string range_str = ch_name + "  |  " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
-                                " — " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1)) +
-                                " (C0..B10)";
-        D2D1_RECT_F range_rc = D2D1::RectF(263.0f, lay.toolbar_y, 475.0f, lay.toolbar_y + lay.toolbar_h);
+        std::string range_str = ch_name + " | " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
+                                " — " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1));
+        D2D1_RECT_F range_rc = D2D1::RectF(tx, lay.toolbar_y, tx + 180.0f, lay.toolbar_y + lay.toolbar_h);
         D2DRenderer::draw_rounded_box(d2d_target_, range_rc, t.bg_control, t.border_subtle, 3.5f);
-        D2DRenderer::draw_text(d2d_target_, dwrite_small_, range_str, range_rc, t.text_secondary,
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, range_str, range_rc, t.accent_bright,
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        tx += 186.0f;
 
         // Steps Toggle (16 or 32 visible)
         std::string step_str = (piano_roll_steps_ == 16) ? "16 Steps" : "32 Steps";
-        D2D1_RECT_F step_rc = D2D1::RectF(483.0f, lay.toolbar_y, 565.0f, lay.toolbar_y + lay.toolbar_h);
+        D2D1_RECT_F step_rc = D2D1::RectF(tx, lay.toolbar_y, tx + 80.0f, lay.toolbar_y + lay.toolbar_h);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, step_rc, step_str, (piano_roll_steps_ == 32), t.accent, t.bg_control, 3.5f);
+        tx += 86.0f;
 
         // Default Note Length
-        std::string len_str = "📏 Len: " + std::to_string(piano_roll_note_len_steps_) + (piano_roll_note_len_steps_ == 1 ? " Stp" : " Stps");
-        D2D1_RECT_F len_rc = D2D1::RectF(573.0f, lay.toolbar_y, 665.0f, lay.toolbar_y + lay.toolbar_h);
+        std::string len_str = "📏 " + std::to_string(piano_roll_note_len_steps_) + (piano_roll_note_len_steps_ == 1 ? " Stp" : " Stps");
+        D2D1_RECT_F len_rc = D2D1::RectF(tx, lay.toolbar_y, tx + 80.0f, lay.toolbar_y + lay.toolbar_h);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, len_rc, len_str, false, t.bg_control, t.bg_control, 3.5f);
+        tx += 86.0f;
 
         // Clear Notes button
-        D2D1_RECT_F clear_rc = D2D1::RectF(673.0f, lay.toolbar_y, 735.0f, lay.toolbar_y + lay.toolbar_h);
+        D2D1_RECT_F clear_rc = D2D1::RectF(tx, lay.toolbar_y, tx + 60.0f, lay.toolbar_y + lay.toolbar_h);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, clear_rc, "Clear", false, t.danger, t.bg_control, 3.5f);
+        tx += 66.0f;
 
         // Keyboard & Mouse Controls Guide Hint
-        D2D1_RECT_F hint_rc = D2D1::RectF(745.0f, lay.toolbar_y, static_cast<float>(get_effective_workspace_w() - 40), lay.toolbar_y + lay.toolbar_h);
-        D2DRenderer::draw_text(d2d_target_, dwrite_small_,
-                              "💡 Left: Add/Drag  •  Right: Delete  •  Right Edge: Resize  •  Wheel: Pitch/Scroll",
-                              hint_rc, t.text_muted, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        if (win.x + win.w - 12.0f > tx + 80.0f) {
+            D2D1_RECT_F hint_rc = D2D1::RectF(tx, lay.toolbar_y, win.x + win.w - 12.0f, lay.toolbar_y + lay.toolbar_h);
+            D2DRenderer::draw_text(d2d_target_, dwrite_small_,
+                                  "💡 Left: Add/Drag • Right: Delete • Wheel: Pitch",
+                                  hint_rc, t.text_muted, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
 
         ID2D1SolidColorBrush* br_border_faint = nullptr;
         ID2D1SolidColorBrush* br_border_dark = nullptr;
@@ -1784,36 +2429,23 @@ private:
         if (br_border_strong) br_border_strong->Release();
     }
 
-    void render_inspector_d2d() {
-        if (!inspector_open_) return;
+    void render_piano_roll_d2d() {
+        render_piano_roll_d2d(win_pianoroll_);
+    }
+
+    void render_inspector_d2d(const DawWindow& win) {
+        if (!win.visible) return;
         const auto& t = D2DRenderer::theme();
 
-        float insp_x = static_cast<float>(client_w_ - (kInspectorWidth + kLayoutMargin));
-        float insp_y = 58.0f;
-        float insp_r = static_cast<float>(client_w_ - kLayoutMargin);
-        float insp_bot = static_cast<float>(client_h_ - 268);
-        if (insp_bot <= insp_y + 100.0f) return;
+        float insp_x = win.x;
+        float insp_y = win.y + DawWindow::kTitleBarHeight;
+        float insp_r = win.x + win.w;
+        float insp_bot = win.y + win.h;
+        if (insp_bot <= insp_y + 80.0f) return;
 
-        // Outer Panel Card
-        D2D1_RECT_F panel_rc = D2D1::RectF(insp_x, insp_y, insp_r, insp_bot);
-        D2DRenderer::draw_rounded_box(d2d_target_, panel_rc, t.bg_surface, t.border_subtle, 6.0f);
-
-        // Header Title (Uppercase micro-label semibold per DESIGN.md section 1 & 3)
-        D2D1_RECT_F hdr_title_rc = D2D1::RectF(insp_x + 12.0f, insp_y + 6.0f, insp_r - 36.0f, insp_y + 36.0f);
-        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "INSPECTOR / TRACK FX", hdr_title_rc, t.text_secondary,
-                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        // Close button [✕]
-        D2D1_RECT_F close_btn_rc = D2D1::RectF(insp_r - 28.0f, insp_y + 9.0f, insp_r - 8.0f, insp_y + 29.0f);
-        D2DRenderer::draw_button(d2d_target_, dwrite_small_, close_btn_rc, "✕", false, t.bg_control, t.bg_control, 3.0f);
-
-        // Header bottom divider (1px hairline)
-        ID2D1SolidColorBrush* br_div = nullptr;
-        d2d_target_->CreateSolidColorBrush(t.border_subtle, &br_div);
-        if (br_div) {
-            d2d_target_->DrawLine(D2D1::Point2F(insp_x, insp_y + 36.5f), D2D1::Point2F(insp_r, insp_y + 36.5f), br_div, 1.0f);
-            br_div->Release();
-        }
+        // Outer Content Box
+        D2D1_RECT_F panel_rc = win.get_content_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, panel_rc, t.bg_surface, t.border_subtle, 0.0f);
 
         // Track Information
         auto& proj = engine_.session().project();
@@ -1839,21 +2471,21 @@ private:
             : (ch_source.empty() ? "Routing: Insert -> Master" : ("Input: " + ch_source + " -> Master"));
 
         // Summary Card Box
-        D2D1_RECT_F sum_card_rc = D2D1::RectF(insp_x + 8.0f, insp_y + 44.0f, insp_r - 8.0f, insp_y + 162.0f);
+        D2D1_RECT_F sum_card_rc = D2D1::RectF(insp_x + 8.0f, insp_y + 8.0f, insp_r - 8.0f, insp_y + 126.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, sum_card_rc, t.bg_surface_2, t.border_subtle, 4.0f);
 
         // Track Badge & Name
-        D2D1_RECT_F badge_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 50.0f, insp_x + 80.0f, insp_y + 68.0f);
+        D2D1_RECT_F badge_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 14.0f, insp_x + 80.0f, insp_y + 32.0f);
         D2DRenderer::draw_rounded_box(d2d_target_, badge_rc, t.accent_deep, t.accent_bright, 3.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, tr_badge, badge_rc, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        D2D1_RECT_F name_rc = D2D1::RectF(insp_x + 86.0f, insp_y + 50.0f, insp_r - 14.0f, insp_y + 68.0f);
+        D2D1_RECT_F name_rc = D2D1::RectF(insp_x + 86.0f, insp_y + 14.0f, insp_r - 14.0f, insp_y + 32.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, tr_name, name_rc, t.text_primary,
                               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         // Routing Info
-        D2D1_RECT_F route_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 70.0f, insp_r - 14.0f, insp_y + 86.0f);
+        D2D1_RECT_F route_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 34.0f, insp_r - 14.0f, insp_y + 50.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, route_str, route_rc, t.text_muted,
                               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
@@ -1862,7 +2494,7 @@ private:
         float norm_vol = std::clamp(cur_vol / 1.25f, 0.0f, 1.0f);
         int vol_pct = static_cast<int>(std::round(cur_vol * 100.0f));
         std::string vol_lbl = "Vol: " + std::to_string(vol_pct) + "%";
-        D2D1_RECT_F vol_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 90.0f, insp_r - 14.0f, insp_y + 108.0f);
+        D2D1_RECT_F vol_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 54.0f, insp_r - 14.0f, insp_y + 72.0f);
         D2DRenderer::draw_slider_horizontal(d2d_target_, dwrite_small_, vol_rc, norm_vol, vol_lbl);
 
         // Pan Horizontal Slider
@@ -1876,7 +2508,7 @@ private:
         } else {
             pan_lbl = "Pan: R " + std::to_string(static_cast<int>(std::round(cur_pan * 100.0f))) + "%";
         }
-        D2D1_RECT_F pan_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 112.0f, insp_r - 14.0f, insp_y + 130.0f);
+        D2D1_RECT_F pan_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 76.0f, insp_r - 14.0f, insp_y + 94.0f);
         D2DRenderer::draw_slider_horizontal(d2d_target_, dwrite_small_, pan_rc, norm_pan, pan_lbl);
 
         // Mute & Solo Buttons
@@ -1885,21 +2517,21 @@ private:
         float mid_w = (insp_r - 14.0f) - (insp_x + 14.0f);
         float btn_w = (mid_w - 6.0f) * 0.5f;
 
-        D2D1_RECT_F mute_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 134.0f, insp_x + 14.0f + btn_w, insp_y + 154.0f);
+        D2D1_RECT_F mute_rc = D2D1::RectF(insp_x + 14.0f, insp_y + 98.0f, insp_x + 14.0f + btn_w, insp_y + 118.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, mute_rc, "MUTE", is_mute, t.danger, t.bg_control, 3.0f);
 
-        D2D1_RECT_F solo_rc = D2D1::RectF(insp_x + 14.0f + btn_w + 6.0f, insp_y + 134.0f, insp_r - 14.0f, insp_y + 154.0f);
+        D2D1_RECT_F solo_rc = D2D1::RectF(insp_x + 14.0f + btn_w + 6.0f, insp_y + 98.0f, insp_r - 14.0f, insp_y + 118.0f);
         D2DRenderer::draw_button(d2d_target_, dwrite_small_, solo_rc, "SOLO", is_solo, t.warning, t.bg_control, 3.0f);
 
         // FX Inserts Section Header
         size_t num_fx = track ? track->inserts().size() : 0;
         std::string fx_sec_title = "CHANNEL FX INSERTS (" + std::to_string(num_fx) + "/10)";
-        D2D1_RECT_F fx_title_rc = D2D1::RectF(insp_x + 12.0f, insp_y + 168.0f, insp_r - 12.0f, insp_y + 188.0f);
+        D2D1_RECT_F fx_title_rc = D2D1::RectF(insp_x + 12.0f, insp_y + 132.0f, insp_r - 12.0f, insp_y + 152.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_bold_, fx_sec_title, fx_title_rc, t.text_secondary,
                               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         // Render Insert Slots (up to 10 slots per track)
-        float slot_y_start = insp_y + 192.0f;
+        float slot_y_start = insp_y + 156.0f;
         float slot_h = 32.0f;
         float slot_gap = 4.0f;
         float fx_area_bot = insp_bot - 8.0f;
@@ -1971,54 +2603,60 @@ private:
         }
     }
 
-    void render_mixer_panel_d2d() {
+    void render_inspector_d2d() {
+        render_inspector_d2d(win_inspector_);
+    }
+
+    void render_mixer_panel_d2d(const DawWindow& win) {
         const auto& t = D2DRenderer::theme();
-        D2D1_RECT_F mixer_rc = D2D1::RectF(10.0f, static_cast<float>(client_h_ - 262), static_cast<float>(client_w_ - 10), static_cast<float>(client_h_ - 30));
-        D2DRenderer::draw_rounded_box(d2d_target_, mixer_rc, t.bg_surface, t.border_subtle, 6.0f);
+        D2D1_RECT_F mixer_rc = win.get_content_rect();
+        D2DRenderer::draw_rounded_box(d2d_target_, mixer_rc, t.bg_surface, t.border_subtle, 0.0f);
 
         auto& proj = engine_.session().project();
-        float track_w = 96.0f;
-        float gap = 12.0f;
-        float ty = static_cast<float>(client_h_ - 234);
+        float mx = win.x;
+        float my = win.y + DawWindow::kTitleBarHeight;
+        float mw = win.w;
+        float mh = win.h - DawWindow::kTitleBarHeight;
 
-        float insert_start_x = 25.0f + track_w + gap;
-        float avail_w = (static_cast<float>(client_w_) - 25.0f) - insert_start_x;
+        float track_w = 96.0f;
+        float gap = 10.0f;
+        float ty = my + 26.0f;
+
+        float master_x = mx + 12.0f;
+        float insert_start_x = master_x + track_w + gap;
+        float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
         size_t total_inserts = std::max(size_t(4), proj.channels().size());
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
         mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
 
-        // Header Title (Uppercase micro-label semibold per DESIGN.md section 1)
-        D2D1_RECT_F title_rc = D2D1::RectF(25.0f, static_cast<float>(client_h_ - 257), 120.0f, static_cast<float>(client_h_ - 237));
-        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "MIXER",
-                              title_rc, t.text_secondary);
-
-        // Track Navigation Buttons & Range if tracks exceed window width
+        // Header Track Navigation Buttons & Range if tracks exceed window width
         if (max_mix_scroll > 0) {
             std::string mix_lbl = "Tracks " + std::to_string(1 + mixer_scroll_track_) + "-" +
                                   std::to_string(std::min(total_inserts, size_t(1 + mixer_scroll_track_ + vis_inserts - 1))) +
                                   " / " + std::to_string(total_inserts);
-            D2D1_RECT_F mix_lbl_rc = D2D1::RectF(static_cast<float>(client_w_ - 240), static_cast<float>(client_h_ - 258),
-                                                 static_cast<float>(client_w_ - 85), static_cast<float>(client_h_ - 238));
+            D2D1_RECT_F mix_lbl_rc = D2D1::RectF(mx + mw - 240.0f, my + 4.0f,
+                                                 mx + mw - 85.0f, my + 24.0f);
             D2DRenderer::draw_text(d2d_target_, dwrite_small_, mix_lbl, mix_lbl_rc, t.text_secondary,
                                   DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-            D2D1_RECT_F btn_l = D2D1::RectF(static_cast<float>(client_w_ - 80), static_cast<float>(client_h_ - 259),
-                                           static_cast<float>(client_w_ - 52), static_cast<float>(client_h_ - 237));
-            D2D1_RECT_F btn_r = D2D1::RectF(static_cast<float>(client_w_ - 48), static_cast<float>(client_h_ - 259),
-                                           static_cast<float>(client_w_ - 20), static_cast<float>(client_h_ - 237));
+            D2D1_RECT_F btn_l = D2D1::RectF(mx + mw - 80.0f, my + 3.0f,
+                                           mx + mw - 52.0f, my + 23.0f);
+            D2D1_RECT_F btn_r = D2D1::RectF(mx + mw - 48.0f, my + 3.0f,
+                                           mx + mw - 20.0f, my + 23.0f);
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, btn_l, "◀", false, t.bg_control, t.bg_control, 3.0f);
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, btn_r, "▶", false, t.bg_control, t.bg_control, 3.0f);
         }
 
         // Lambda to render a single mixer track strip
         auto render_strip = [&](int tid, float tx) {
-            D2D1_RECT_F ch_box = D2D1::RectF(tx, ty, tx + track_w, ty + 198.0f);
+            float strip_h = std::max(120.0f, mh - 30.0f);
+            D2D1_RECT_F ch_box = D2D1::RectF(tx, ty, tx + track_w, ty + strip_h);
             bool is_selected = (static_cast<uint32_t>(tid) == selected_mixer_track_);
             D2D1_COLOR_F border_c = is_selected ? t.accent_bright : t.border_subtle;
             D2DRenderer::draw_rounded_box(d2d_target_, ch_box, t.bg_surface_2, border_c, 4.0f, is_selected ? 1.5f : 1.0f);
 
-            // Track Header Name (Uppercase micro-label per DESIGN.md section 1)
+            // Track Header Name
             std::string t_name = (tid == 0) ? "MASTER" : ("TRACK " + std::to_string(tid));
             D2D1_RECT_F hdr_rc = D2D1::RectF(tx, ty, tx + track_w, ty + 22.0f);
             D2D1_COLOR_F hdr_col = (tid == 0) ? t.accent : t.text_primary;
@@ -2039,9 +2677,10 @@ private:
             D2DRenderer::draw_button(d2d_target_, dwrite_small_, s_rc, "S", is_solo, t.accent, t.bg_control, 3.0f);
 
             // Stereo VU Meter (Left & Right dual bars)
+            float fader_bot = ty + strip_h - 52.0f;
             float peak_l = (static_cast<size_t>(tid) < meter_peaks_l_.size()) ? meter_peaks_l_[tid] : 0.0f;
             float peak_r = (static_cast<size_t>(tid) < meter_peaks_r_.size()) ? meter_peaks_r_[tid] : 0.0f;
-            D2D1_RECT_F meter_rc = D2D1::RectF(tx + 8.0f, ty + 46.0f, tx + 28.0f, ty + 144.0f);
+            D2D1_RECT_F meter_rc = D2D1::RectF(tx + 8.0f, ty + 46.0f, tx + 28.0f, fader_bot);
             D2DRenderer::draw_vu_meter_stereo(d2d_target_, meter_rc, peak_l, peak_r);
 
             // Volume Fader & Decibel Readout
@@ -2053,16 +2692,16 @@ private:
                 if (db >= 0.0f) ss_db << "+";
                 ss_db << std::fixed << std::setprecision(1) << db << " dB";
             }
-            D2D1_RECT_F fader_rc = D2D1::RectF(tx + 33.0f, ty + 46.0f, tx + 88.0f, ty + 144.0f);
+            D2D1_RECT_F fader_rc = D2D1::RectF(tx + 33.0f, ty + 46.0f, tx + 88.0f, fader_bot);
             D2DRenderer::draw_slider_vertical(d2d_target_, dwrite_main_, dwrite_small_, fader_rc, norm_gain, ss_db.str());
 
             // Rotary Panning Knob Underneath Fader & Meters
-            D2D1_RECT_F pan_rc = D2D1::RectF(tx + 6.0f, ty + 148.0f, tx + track_w - 6.0f, ty + 194.0f);
+            D2D1_RECT_F pan_rc = D2D1::RectF(tx + 6.0f, fader_bot + 4.0f, tx + track_w - 6.0f, ty + strip_h - 4.0f);
             D2DRenderer::draw_pan_knob(d2d_target_, dwrite_small_, pan_rc, pan_val, "PAN");
         };
 
         // 1. Render Pinned Master Track (track 0)
-        render_strip(0, 25.0f);
+        render_strip(0, master_x);
 
         // 2. Render Visible Insert Tracks
         for (int s = 0; s < vis_inserts; ++s) {
@@ -2071,6 +2710,10 @@ private:
             float tx = insert_start_x + s * (track_w + gap);
             render_strip(tid, tx);
         }
+    }
+
+    void render_mixer_panel_d2d() {
+        render_mixer_panel_d2d(win_mixer_);
     }
 
     void render_status_bar_d2d() {
@@ -2216,6 +2859,54 @@ private:
         ReleaseDC(hwnd_, screen_dc);
     }
 
+    void render_window_frame_gdi(const DawWindow& win) {
+        const auto& t = get_theme();
+        bool is_active = (active_window_ == win.id);
+
+        int wx = static_cast<int>(win.x);
+        int wy = static_cast<int>(win.y);
+        int ww = static_cast<int>(win.w);
+        int wh = static_cast<int>(win.h);
+        int tbh = static_cast<int>(DawWindow::kTitleBarHeight);
+
+        // 0. Fill solid opaque background
+        RECT full_rc{wx, wy, wx + ww, wy + wh};
+        GuiRenderer::fill_rect(mem_dc_, full_rc, t.bg_surface);
+
+        // 1. Title bar background
+        RECT tb_rc{wx, wy, wx + ww, wy + tbh};
+        GuiRenderer::draw_rounded_box(mem_dc_, tb_rc, is_active ? t.bg_surface_2 : t.bg_surface, is_active ? t.accent : t.border_subtle, 3);
+
+        // 2. Active Accent Line at top
+        if (is_active) {
+            RECT acc_rc{wx, wy, wx + ww, wy + 2};
+            GuiRenderer::fill_rect(mem_dc_, acc_rc, t.accent);
+        }
+
+        // 3. SVG Window Icon
+        RECT icon_rc{wx + 6, wy + 5, wx + 24, wy + 23};
+        GuiRenderer::draw_svg_icon(mem_dc_, win.icon, icon_rc, is_active ? t.accent_bright : t.text_secondary, 15);
+
+        // 4. Title text
+        SelectObject(mem_dc_, font_bold_);
+        RECT title_rc{wx + 28, wy, wx + ww - 32, wy + tbh};
+        GuiRenderer::draw_text(mem_dc_, win.title, title_rc, is_active ? t.text_primary : t.text_muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        // 5. Close button [✕] with Danger hover
+        RECT close_rc{wx + ww - 24, wy + 4, wx + ww - 4, wy + tbh - 4};
+        bool is_close_hover = (hover_close_win_id_ == static_cast<int>(win.id));
+        GuiRenderer::draw_button(mem_dc_, close_rc, "✕", false, is_close_hover ? t.danger : t.bg_control, is_close_hover ? t.danger : t.border_subtle);
+
+        // 6. Outer border
+        HPEN border_pen = CreatePen(PS_SOLID, is_active ? 2 : 1, is_active ? t.accent : t.border_subtle);
+        HGDIOBJ old_pen = SelectObject(mem_dc_, border_pen);
+        HGDIOBJ old_brush = SelectObject(mem_dc_, GetStockObject(NULL_BRUSH));
+        Rectangle(mem_dc_, wx, wy, wx + ww, wy + wh);
+        SelectObject(mem_dc_, old_brush);
+        SelectObject(mem_dc_, old_pen);
+        DeleteObject(border_pen);
+    }
+
     void render(HDC target_hdc) {
         if (!mem_dc_ || client_w_ <= 0 || client_h_ <= 0) return;
 
@@ -2226,18 +2917,39 @@ private:
         // 1. Render Top Transport Bar (Play, Pause, Stop, Tempo, Time, SPM Readout, View Tabs)
         render_transport_bar();
 
-        // 2. Render Main View: Channel Rack OR Piano Roll
-        if (view_mode_ == ViewMode::ChannelRack) {
-            render_channel_rack();
-        } else {
-            render_piano_roll();
+        // 2. Render each visible window in z_order_ (back to front)
+        for (WindowId wid : z_order_) {
+            auto* win = get_window(wid);
+            if (!win || !win->visible) continue;
+
+            render_window_frame_gdi(*win);
+
+            int cx = static_cast<int>(win->x);
+            int cy = static_cast<int>(win->y + DawWindow::kTitleBarHeight);
+            int cw = static_cast<int>(win->w);
+            int ch = static_cast<int>(win->h - DawWindow::kTitleBarHeight);
+
+            HRGN clip_rgn = CreateRectRgn(cx, cy, cx + cw, cy + ch);
+            SelectClipRgn(mem_dc_, clip_rgn);
+
+            switch (wid) {
+                case WindowId::Playlist:
+                    render_channel_rack(*win);
+                    break;
+                case WindowId::PianoRoll:
+                    render_piano_roll(*win);
+                    break;
+                case WindowId::Mixer:
+                    render_mixer_panel(*win);
+                    break;
+                case WindowId::Inspector:
+                    render_inspector_gdi(*win);
+                    break;
+            }
+
+            SelectClipRgn(mem_dc_, NULL);
+            DeleteObject(clip_rgn);
         }
-
-        // 2b. Render Right-Side Collapsible Inspector / Effects Panel
-        render_inspector_gdi();
-
-        // 3. Render Mixer with Interactive Volume Faders & Meters
-        render_mixer_panel();
 
         // 4. Render Status Bar
         render_status_bar();
@@ -2262,16 +2974,24 @@ private:
         SelectObject(mem_dc_, oldPen);
         DeleteObject(bPen);
 
-        // App Logo
+        // App Logo (wide bounds so "DigiDAW" never wraps down)
         SelectObject(mem_dc_, font_title_);
-        RECT title_rc{16, 0, 84, 48};
+        RECT title_rc{16, 0, 130, 48};
         GuiRenderer::draw_text(mem_dc_, "DigiDAW", title_rc, t.text_primary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // Project Name badge
+        // Elegant vertical divider between brand and project info
+        HPEN divPen = CreatePen(PS_SOLID, 1, t.border_subtle);
+        HGDIOBJ oldDivPen = SelectObject(mem_dc_, divPen);
+        MoveToEx(mem_dc_, 138, 14, NULL);
+        LineTo(mem_dc_, 138, 34);
+        SelectObject(mem_dc_, oldDivPen);
+        DeleteObject(divPen);
+
+        // Project Name badge (with generous breathing space from DigiDAW)
         SelectObject(mem_dc_, font_bold_);
         std::string proj_name = engine_.session().project().name();
         if (proj_name.empty()) proj_name = "Untitled Project";
-        RECT proj_rc{88, 8, 198, 40};
+        RECT proj_rc{200, 8, 310, 40};
         GuiRenderer::draw_rounded_box(mem_dc_, proj_rc, t.bg_control, t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, proj_name, proj_rc, t.accent_bright, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -2279,11 +2999,11 @@ private:
         SelectObject(mem_dc_, font_bold_);
         bool can_undo = engine_.session().undo_stack().can_undo();
         bool can_redo = engine_.session().undo_stack().can_redo();
-        RECT undo_rc{204, 8, 234, 40};
+        RECT undo_rc{316, 8, 346, 40};
         GuiRenderer::draw_rounded_box(mem_dc_, undo_rc, t.bg_control, can_undo ? t.border_default : t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, "↶", undo_rc, can_undo ? t.text_primary : t.text_disabled, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        RECT redo_rc{238, 8, 268, 40};
+        RECT redo_rc{350, 8, 380, 40};
         GuiRenderer::draw_rounded_box(mem_dc_, redo_rc, t.bg_control, can_redo ? t.border_default : t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, "↷", redo_rc, can_redo ? t.text_primary : t.text_disabled, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
@@ -2291,31 +3011,31 @@ private:
         bool is_playing = engine_.transport().is_playing();
         bool is_paused = (engine_.transport().state() == app::TransportState::Paused);
 
-        // 1. PLAY Button [▶]
-        RECT play_rc{276, 8, 312, 40};
-        GuiRenderer::draw_button(mem_dc_, play_rc, "▶", is_playing, t.accent, t.bg_control);
+        // 1. PLAY Button
+        RECT play_rc{388, 8, 424, 40};
+        GuiRenderer::draw_icon_button(mem_dc_, play_rc, SvgIconType::Play, is_playing, t.accent, t.bg_control);
 
-        // 2. PAUSE Button [❚❚]
-        RECT pause_rc{316, 8, 352, 40};
-        GuiRenderer::draw_button(mem_dc_, pause_rc, "❚❚", is_paused, t.warning, t.bg_control);
+        // 2. PAUSE Button
+        RECT pause_rc{428, 8, 464, 40};
+        GuiRenderer::draw_icon_button(mem_dc_, pause_rc, SvgIconType::Pause, is_paused, t.warning, t.bg_control);
 
-        // 3. STOP Button [■]
-        RECT stop_rc{356, 8, 392, 40};
-        GuiRenderer::draw_button(mem_dc_, stop_rc, "■", false, t.danger, t.bg_control);
+        // 3. STOP Button
+        RECT stop_rc{468, 8, 504, 40};
+        GuiRenderer::draw_icon_button(mem_dc_, stop_rc, SvgIconType::Stop, false, t.danger, t.bg_control);
 
         // Tempo BPM Controls
         double bpm = engine_.session().project().time_map().get_bpm_at(0);
         std::stringstream ss_bpm;
         ss_bpm << std::fixed << std::setprecision(1) << bpm << " BPM";
 
-        RECT bpm_minus_rc{400, 8, 424, 40};
+        RECT bpm_minus_rc{512, 8, 536, 40};
         GuiRenderer::draw_button(mem_dc_, bpm_minus_rc, "-", false, t.bg_control, t.bg_control);
 
-        RECT bpm_disp_rc{428, 8, 508, 40};
+        RECT bpm_disp_rc{540, 8, 620, 40};
         GuiRenderer::draw_rounded_box(mem_dc_, bpm_disp_rc, t.bg_control, t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, ss_bpm.str(), bpm_disp_rc, t.text_primary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        RECT bpm_plus_rc{512, 8, 536, 40};
+        RECT bpm_plus_rc{624, 8, 648, 40};
         GuiRenderer::draw_button(mem_dc_, bpm_plus_rc, "+", false, t.bg_control, t.bg_control);
 
         // Real-Time Position Clock starting from 00:00.00
@@ -2335,25 +3055,37 @@ private:
                << std::setfill('0') << std::setw(2) << centis
                << " | Bar " << bar;
 
-        RECT pos_rc{544, 8, 676, 40};
+        RECT pos_rc{656, 8, 788, 40};
         GuiRenderer::draw_rounded_box(mem_dc_, pos_rc, t.bg_control, t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, ss_pos.str(), pos_rc, t.accent_bright, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // View Mode Tabs: Icon-only [🎛], [🎹], and [ℹ]
-        RECT rack_tab_rc{684, 8, 722, 40};
-        GuiRenderer::draw_button(mem_dc_, rack_tab_rc, "🎛", (view_mode_ == ViewMode::ChannelRack),
-                                 t.accent, t.bg_control);
+        // Window / View Buttons: Playlist, Piano Roll, Mixer, Inspector, and Magnet Snapping
+        RECT pl_btn_rc{796, 8, 832, 40};
+        bool pl_top = (active_window_ == WindowId::Playlist && win_playlist_.visible);
+        GuiRenderer::draw_icon_button(mem_dc_, pl_btn_rc, SvgIconType::Playlist,
+                                      pl_top, t.accent, win_playlist_.visible ? t.bg_surface_2 : t.bg_control);
 
-        RECT roll_tab_rc{726, 8, 764, 40};
-        GuiRenderer::draw_button(mem_dc_, roll_tab_rc, "🎹", (view_mode_ == ViewMode::PianoRoll),
-                                 t.accent, t.bg_control);
+        RECT roll_btn_rc{836, 8, 872, 40};
+        bool pr_top = (active_window_ == WindowId::PianoRoll && win_pianoroll_.visible);
+        GuiRenderer::draw_icon_button(mem_dc_, roll_btn_rc, SvgIconType::PianoRoll,
+                                      pr_top, t.accent, win_pianoroll_.visible ? t.bg_surface_2 : t.bg_control);
 
-        RECT insp_tab_rc{768, 8, 806, 40};
-        GuiRenderer::draw_button(mem_dc_, insp_tab_rc, "ℹ", inspector_open_,
-                                 t.accent, t.bg_control);
+        RECT mix_btn_rc{876, 8, 912, 40};
+        bool mx_top = (active_window_ == WindowId::Mixer && win_mixer_.visible);
+        GuiRenderer::draw_icon_button(mem_dc_, mix_btn_rc, SvgIconType::Mixer,
+                                      mx_top, t.accent, win_mixer_.visible ? t.bg_surface_2 : t.bg_control);
+
+        RECT insp_btn_rc{916, 8, 952, 40};
+        bool insp_top = (active_window_ == WindowId::Inspector && win_inspector_.visible);
+        GuiRenderer::draw_icon_button(mem_dc_, insp_btn_rc, SvgIconType::TrackFx,
+                                      insp_top, t.accent, win_inspector_.visible ? t.bg_surface_2 : t.bg_control);
+
+        RECT mag_btn_rc{956, 8, 992, 40};
+        GuiRenderer::draw_icon_button(mem_dc_, mag_btn_rc, SvgIconType::Magnet,
+                                      magnet_enabled_, t.accent, t.bg_control);
 
         // Analog Real-Time Audio Signal Oscilloscope Section (Electric violet phosphor filament)
-        int spec_x = 816;
+        int spec_x = 1000;
         int spec_max_right = client_w_ - 88;
         if (spec_max_right > spec_x + 50) {
             int spec_w = std::min(240, spec_max_right - spec_x);
@@ -2390,23 +3122,24 @@ private:
             DeleteObject(pen_wave);
         }
 
-        // Action Buttons: Icon-only [💾] and [💿]
+        // Action Buttons: Save [Save SVG] and Export [Export SVG]
         SelectObject(mem_dc_, font_main_);
         RECT save_rc{client_w_ - 80, 8, client_w_ - 45, 40};
-        GuiRenderer::draw_button(mem_dc_, save_rc, "💾", false, t.bg_control, t.bg_control);
+        GuiRenderer::draw_icon_button(mem_dc_, save_rc, SvgIconType::Save, false, t.bg_control, t.bg_control);
 
         RECT rend_rc{client_w_ - 41, 8, client_w_ - 10, 40};
-        GuiRenderer::draw_button(mem_dc_, rend_rc, "💿", false, t.accent, t.bg_control);
+        GuiRenderer::draw_icon_button(mem_dc_, rend_rc, SvgIconType::Export, false, t.accent, t.bg_control);
     }
 
-    void render_channel_rack() {
+    void render_channel_rack(const DawWindow& win) {
         const auto& t = get_theme();
-        int rack_top = 58;
-        int rack_bottom = client_h_ - 268;
-        int eff_w = get_effective_workspace_w();
-        RECT rack_rc{10, rack_top, eff_w - 10, rack_bottom};
+        int px = static_cast<int>(win.x);
+        int py = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int pw = static_cast<int>(win.w);
+        int ph = static_cast<int>(win.h - DawWindow::kTitleBarHeight);
 
-        GuiRenderer::draw_rounded_box(mem_dc_, rack_rc, t.bg_surface, t.border_subtle, 6);
+        RECT rack_rc{px, py, px + pw, py + ph};
+        GuiRenderer::draw_rounded_box(mem_dc_, rack_rc, t.bg_surface, t.border_subtle, 0);
 
         auto& proj = engine_.session().project();
         auto* pat = proj.get_pattern(1);
@@ -2420,33 +3153,27 @@ private:
         }
 
         // Layout: Continuous Playlist Arranger
-        int bars_per_view = get_bars_per_view();
-        int start_x = 265;
-        int total_seq_w = (eff_w - 25) - start_x;
+        int start_x = px + 245;
+        int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+        int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
         int bar_w = std::max(60, total_seq_w / bars_per_view);
         float beat_w = float(bar_w) / 4.0f;
 
-        // Header Title (Uppercase micro-label per DESIGN.md section 1)
-        SelectObject(mem_dc_, font_bold_);
-        RECT header_rc{25, 66, 105, 90};
-        GuiRenderer::draw_text(mem_dc_, "PLAYLIST", header_rc, t.text_secondary);
-
         // Header [+ Add Instrument] button - always accessible
         SelectObject(mem_dc_, font_small_);
-        RECT add_tool_rc{110, 64, 250, 90};
+        RECT add_tool_rc{px + 12, py + 6, px + 150, py + 30};
         GuiRenderer::draw_button(mem_dc_, add_tool_rc, "+ Add Instrument", false, t.accent, t.bg_control);
 
         // Horizontal Bar Range Display
         int max_bars = get_max_sequencer_bars();
-        SelectObject(mem_dc_, font_small_);
-        RECT disp_b_rc{eff_w - 260, 64, eff_w - 25, 90};
+        RECT disp_b_rc{std::max(px + 155, px + pw - 250), py + 6, px + pw - 12, py + 30};
         std::string b_range_str = "↔ Showing Bars " + std::to_string(sequencer_scroll_bar_ + 1) + "-" +
                                   std::to_string(sequencer_scroll_bar_ + bars_per_view) + " / " + std::to_string(max_bars);
         GuiRenderer::draw_rounded_box(mem_dc_, disp_b_rc, t.bg_control, t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, b_range_str, disp_b_rc, t.text_secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // --- Timeline Ruler ---
-        int ruler_y = 96;
+        // Timeline Ruler
+        int ruler_y = py + 36;
         int ruler_h = 22;
         RECT ruler_bg_rc{start_x, ruler_y, start_x + total_seq_w, ruler_y + ruler_h};
         GuiRenderer::draw_rounded_box(mem_dc_, ruler_bg_rc, t.bg_surface_2, t.border_subtle, 3);
@@ -2486,11 +3213,11 @@ private:
             DeleteObject(tickPen);
         }
 
-        // --- Channels List & Continuous Playlist Lanes ---
-        int start_y = 124;
+        // Channels List & Continuous Playlist Lanes
+        int start_y = py + 62;
         int row_h = 48;
         int step_h_i = 42;
-        int rack_avail_h = (rack_bottom - 26) - start_y;
+        int rack_avail_h = (py + ph - 24) - start_y;
         int visible_channels = std::max(1, rack_avail_h / row_h);
         int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
         sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_, 0, max_ch_scroll);
@@ -2508,22 +3235,22 @@ private:
             max_track_bottom = ch_y + step_h_i;
 
             // Mute Button [M]
-            RECT mute_rc{25, ch_y + 8, 47, ch_y + 34};
+            RECT mute_rc{px + 12, ch_y + 8, px + 34, ch_y + 34};
             GuiRenderer::draw_button(mem_dc_, mute_rc, "M", ch.settings().muted, t.danger, t.bg_control);
 
             // Solo Button [S]
-            RECT solo_rc{51, ch_y + 8, 73, ch_y + 34};
+            RECT solo_rc{px + 38, ch_y + 8, px + 60, ch_y + 34};
             GuiRenderer::draw_button(mem_dc_, solo_rc, "S", ch.settings().solo, t.accent, t.bg_control);
 
-            // Channel / VST Button
-            RECT name_rc{78, ch_y + 5, 218, ch_y + 37};
+            // Channel / VST Button (Instruments display name without gear icon)
+            RECT name_rc{px + 65, ch_y + 5, px + 205, ch_y + 37};
             bool is_editing = (active_editor_channel_ == ch.id());
-            GuiRenderer::draw_button(mem_dc_, name_rc, ch.settings().name + " ⚙", is_editing, t.accent, t.bg_control);
+            GuiRenderer::draw_button(mem_dc_, name_rc, ch.settings().name, is_editing, t.accent, t.bg_control);
 
             // Dedicated Piano Roll button for this channel
-            RECT roll_btn_rc{223, ch_y + 8, 255, ch_y + 34};
+            RECT roll_btn_rc{px + 210, ch_y + 8, px + 242, ch_y + 34};
             bool is_active_roll = (piano_roll_channel_ == ch.id());
-            GuiRenderer::draw_button(mem_dc_, roll_btn_rc, "🎹", is_active_roll, t.accent, t.bg_control);
+            GuiRenderer::draw_icon_button(mem_dc_, roll_btn_rc, SvgIconType::PianoRoll, is_active_roll, t.accent, t.bg_control, 4, 14);
 
             // Playlist Grid Lane Background (Alternating near-black dark surfaces)
             RECT lane_rc{start_x, ch_y, start_x + total_seq_w, ch_y + step_h_i};
@@ -2563,30 +3290,35 @@ private:
             // Creative track tint
             COLORREF clip_tint = (ch_idx % 3 == 0) ? t.track_melody : ((ch_idx % 3 == 1) ? t.track_chords : t.track_drums);
 
-            // --- Render Clips for this Track ---
+            // Render Clips for this Track
             for (const auto& clip : track.clips()) {
                 if (clip.end() <= view_start_tick || clip.start >= view_end_tick) continue;
 
-                double norm_start = double(clip.start - view_start_tick) / double(view_duration);
-                double norm_len = double(clip.length) / double(view_duration);
+                domain::Tick draw_start = std::max(clip.start, view_start_tick);
+                domain::Tick draw_end = std::min(clip.end(), view_end_tick);
+
+                double norm_start = double(draw_start - view_start_tick) / double(view_duration);
+                double norm_len = double(draw_end - draw_start) / double(view_duration);
+
                 int cx = start_x + static_cast<int>(norm_start * total_seq_w);
                 int cw = std::max(16, static_cast<int>(norm_len * total_seq_w));
 
-                RECT clip_rc{cx, ch_y + 1, cx + cw, ch_y + step_h_i - 1};
-                GuiRenderer::draw_rounded_box(mem_dc_, clip_rc, t.bg_elevated, t.border_default, 3);
+                RECT clip_rc{cx, ch_y + 2, cx + cw, ch_y + step_h_i - 2};
+                GuiRenderer::draw_rounded_box(mem_dc_, clip_rc, clip_tint, t.border_subtle, 3);
 
-                RECT clip_hdr_rc{cx + 1, ch_y + 2, cx + cw - 1, ch_y + 17};
-                GuiRenderer::fill_rect(mem_dc_, clip_hdr_rc, clip_tint);
+                int hdr_h = 14;
+                RECT clip_hdr_rc{cx, ch_y + 2, cx + cw, ch_y + 2 + hdr_h};
+                COLORREF hdr_col = (ch_idx % 3 == 0) ? RGB(100, 45, 170) : ((ch_idx % 3 == 1) ? RGB(20, 110, 150) : RGB(140, 70, 20));
+                GuiRenderer::fill_rect(mem_dc_, clip_hdr_rc, hdr_col);
 
                 SelectObject(mem_dc_, font_small_);
-                std::string clip_title = " ≡ Pattern " + std::to_string(clip.pattern_id);
-                if (pat && !pat->name().empty()) {
-                    clip_title = " ≡ " + pat->name();
-                }
-                GuiRenderer::draw_text(mem_dc_, clip_title, clip_hdr_rc, RGB(255, 255, 255), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                RECT pat_text_rc{cx + 4, ch_y + 2, cx + cw - 4, ch_y + 2 + hdr_h};
+                std::string pat_title = pat ? ("≡ " + pat->name()) : "≡ Pattern 1";
+                GuiRenderer::draw_text(mem_dc_, pat_title, pat_text_rc, RGB(255, 255, 255), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-                // Render Miniature Melody Note Bars
                 if (note_set && !note_set->notes().empty()) {
+                    int body_top = ch_y + 2 + hdr_h;
+                    int body_h = step_h_i - 4 - hdr_h;
                     uint8_t min_p = 127, max_p = 0;
                     for (const auto& n : note_set->notes()) {
                         min_p = std::min(min_p, n.pitch);
@@ -2598,83 +3330,95 @@ private:
                     for (domain::Tick rep = 0; rep < clip.length; rep += pat_len) {
                         for (const auto& n : note_set->notes()) {
                             if (rep + n.start >= clip.length) break;
-                            domain::Tick abs_n_start = rep + n.start;
-                            double n_rel_start = double(abs_n_start) / double(clip.length);
-                            double n_rel_len = double(n.length) / double(clip.length);
+                            domain::Tick abs_n_start = clip.start + rep + n.start;
+                            domain::Tick abs_n_end = abs_n_start + n.length;
 
-                            int nx = cx + static_cast<int>(n_rel_start * cw) + 1;
-                            int nw = std::max(6, static_cast<int>(n_rel_len * cw) - 1);
-                            if (nx + nw > cx + cw - 2) nw = (cx + cw - 2) - nx;
-                            if (nw < 3) nw = 3;
+                            if (abs_n_end > draw_start && abs_n_start < draw_end) {
+                                double n_rel_start = double(abs_n_start - draw_start) / double(draw_end - draw_start);
+                                double n_rel_len = double(n.length) / double(draw_end - draw_start);
 
-                            float norm_p = float(n.pitch - min_p) / float(p_range);
-                            int ny = (ch_y + step_h_i - 7) - static_cast<int>(norm_p * (step_h_i - 28));
-                            int nh = 5;
+                                int nx = cx + static_cast<int>(n_rel_start * cw);
+                                int nw = std::max(3, static_cast<int>(n_rel_len * cw));
 
-                            RECT note_bar_rc{nx, ny, nx + nw, ny + nh};
-                            GuiRenderer::draw_rounded_box(mem_dc_, note_bar_rc, RGB(212, 222, 232), RGB(245, 250, 255), 1);
+                                float norm_p = float(n.pitch - min_p) / float(p_range);
+                                int ny = body_top + static_cast<int>((1.0f - norm_p) * float(body_h - 6)) + 1;
+                                int nh = 3;
+
+                                RECT note_rc{nx, ny, nx + nw, ny + nh};
+                                GuiRenderer::fill_rect(mem_dc_, note_rc, t.note_silver);
+                            }
                         }
                     }
                 }
 
-                // Right Resize Edge Grip Handle
-                HPEN gripPen = CreatePen(PS_SOLID, 1, RGB(100, 110, 125));
-                HGDIOBJ oldGrip = SelectObject(mem_dc_, gripPen);
-                MoveToEx(mem_dc_, cx + cw - 4, ch_y + 19, NULL);
-                LineTo(mem_dc_, cx + cw - 4, ch_y + step_h_i - 3);
-                SelectObject(mem_dc_, oldGrip);
-                DeleteObject(gripPen);
+                // Right Resize Handle Grip
+                if (cw > 20) {
+                    HPEN gripPen = CreatePen(PS_SOLID, 1, t.border_strong);
+                    HGDIOBJ oldG = SelectObject(mem_dc_, gripPen);
+                    MoveToEx(mem_dc_, cx + cw - 6, ch_y + 16, NULL);
+                    LineTo(mem_dc_, cx + cw - 6, ch_y + step_h_i - 6);
+                    MoveToEx(mem_dc_, cx + cw - 4, ch_y + 16, NULL);
+                    LineTo(mem_dc_, cx + cw - 4, ch_y + step_h_i - 6);
+                    SelectObject(mem_dc_, oldG);
+                    DeleteObject(gripPen);
+                }
             }
         }
 
         // Add Channel [+] Button in scrollable view
         if (proj.channels().size() >= start_ch && proj.channels().size() <= end_ch) {
             int add_y = start_y + static_cast<int>((proj.channels().size() - start_ch) * row_h);
-            RECT add_btn_rc{25, add_y + 4, 218, add_y + 34};
-            GuiRenderer::draw_button(mem_dc_, add_btn_rc, "+ Add Instrument", false, t.accent, t.bg_control);
+            SelectObject(mem_dc_, font_small_);
+            RECT add_btn_rc{px + 12, add_y + 4, px + 205, add_y + 34};
+            GuiRenderer::draw_button(mem_dc_, add_btn_rc, "+ Add Instrument", false, t.bg_control, t.bg_control);
         }
 
-        // Vertical Scrollbar for channels
+        // Vertical Scrollbar for channels if more channels than fit
         if (max_ch_scroll > 0) {
-            RECT v_track_rc{258, start_y, 262, start_y + rack_avail_h};
-            GuiRenderer::fill_rect(mem_dc_, v_track_rc, t.bg_control);
-            int v_thumb_h = std::max(20, static_cast<int>((float(visible_channels) / float(proj.channels().size() + 1)) * float(rack_avail_h)));
-            int v_thumb_y = start_y + static_cast<int>((float(sequencer_scroll_track_) / float(max_ch_scroll)) * float(rack_avail_h - v_thumb_h));
-            RECT v_thumb_rc{258, v_thumb_y, 262, v_thumb_y + v_thumb_h};
-            GuiRenderer::fill_rect(mem_dc_, v_thumb_rc, t.border_strong);
+            int vbar_x = px + 242;
+            int vbar_y = start_y;
+            int vbar_w = 3;
+            int vbar_h = rack_avail_h;
+            RECT v_track_rc{vbar_x, vbar_y, vbar_x + vbar_w, vbar_y + vbar_h};
+            GuiRenderer::draw_rounded_box(mem_dc_, v_track_rc, t.bg_control, t.border_subtle, 1);
+
+            int v_thumb_h = std::max(20, static_cast<int>((float(visible_channels) / float(proj.channels().size() + 1)) * float(vbar_h)));
+            float v_scroll_ratio = float(sequencer_scroll_track_) / float(max_ch_scroll);
+            int v_thumb_y = vbar_y + static_cast<int>(v_scroll_ratio * float(vbar_h - v_thumb_h));
+            RECT v_thumb_rc{vbar_x, v_thumb_y, vbar_x + vbar_w, v_thumb_y + v_thumb_h};
+            GuiRenderer::draw_rounded_box(mem_dc_, v_thumb_rc, t.accent, t.accent_bright, 1);
         }
 
-        // --- Render Playhead Indicator (Electric Violet signature accent) ---
-        int seq_bottom = max_track_bottom + 2;
-        COLORREF playhead_violet = t.accent;
+        // SPM Playhead Marker
+        auto cur_tick = engine_.transport().is_playing() ? engine_.transport().current_tick() : song_position_marker_;
+        if (cur_tick >= view_start_tick && cur_tick <= view_end_tick) {
+            double norm_pos = double(cur_tick - view_start_tick) / double(view_duration);
+            int head_x = start_x + static_cast<int>(norm_pos * total_seq_w);
 
-        if (!engine_.transport().is_playing()) {
-            if (song_position_marker_ >= view_start_tick && song_position_marker_ < view_end_tick) {
-                int spm_x = start_x + static_cast<int>((double(song_position_marker_ - view_start_tick) / view_duration) * total_seq_w);
-                GuiRenderer::draw_playhead(mem_dc_, spm_x, ruler_y, seq_bottom, playhead_violet);
-            }
-        } else {
-            if (song_position_marker_ >= view_start_tick && song_position_marker_ < view_end_tick) {
-                int spm_x = start_x + static_cast<int>((double(song_position_marker_ - view_start_tick) / view_duration) * total_seq_w);
-                GuiRenderer::draw_playhead(mem_dc_, spm_x, ruler_y, seq_bottom, t.accent_bright, "SPM");
-            }
+            HPEN spm_pen = CreatePen(PS_SOLID, 2, t.accent);
+            HGDIOBJ old_pen = SelectObject(mem_dc_, spm_pen);
+            MoveToEx(mem_dc_, head_x, ruler_y, NULL);
+            LineTo(mem_dc_, head_x, max_track_bottom);
+            SelectObject(mem_dc_, old_pen);
+            DeleteObject(spm_pen);
 
-            auto tick = engine_.transport().current_tick();
-            if (tick >= view_start_tick && tick < view_end_tick) {
-                int playhead_x = start_x + static_cast<int>((double(tick - view_start_tick) / view_duration) * total_seq_w);
-                GuiRenderer::draw_playhead(mem_dc_, playhead_x, ruler_y, seq_bottom, playhead_violet);
-            }
+            POINT spm_poly[3] = {
+                {head_x - 5, ruler_y},
+                {head_x + 5, ruler_y},
+                {head_x, ruler_y + 8}
+            };
+            HBRUSH spm_br = CreateSolidBrush(t.accent);
+            HGDIOBJ old_br = SelectObject(mem_dc_, spm_br);
+            Polygon(mem_dc_, spm_poly, 3);
+            SelectObject(mem_dc_, old_br);
+            DeleteObject(spm_br);
         }
 
-        // 5. Horizontal Scrollbar Track & Thumb (GDI fallback)
-        int scroll_y = rack_bottom - 22;
-        int scroll_h = 16;
+        // Horizontal Scrollbar Track & Thumb
+        int scroll_y = py + ph - 20;
+        int scroll_h = 14;
         RECT scroll_track_rc{start_x, scroll_y, start_x + total_seq_w, scroll_y + scroll_h};
         GuiRenderer::draw_rounded_box(mem_dc_, scroll_track_rc, t.bg_control, t.border_subtle, 3);
-
-        RECT scroll_lbl_rc{25, scroll_y - 2, start_x - 15, scroll_y + scroll_h + 2};
-        SelectObject(mem_dc_, font_small_);
-        GuiRenderer::draw_text(mem_dc_, "↔ TIMELINE SCROLL", scroll_lbl_rc, t.text_muted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         float max_scroll = std::max(1.0f, float(max_bars - bars_per_view));
         float thumb_w = std::max(35.0f, (float(bars_per_view) / float(max_bars)) * float(total_seq_w));
@@ -2685,14 +3429,20 @@ private:
         GuiRenderer::draw_rounded_box(mem_dc_, thumb_rc, thumb_col, t.border_subtle, 3);
     }
 
+    void render_channel_rack() {
+        render_channel_rack(win_playlist_);
+    }
+
     // --- Interactive Piano Roll View (GDI Fallback) ---
-    void render_piano_roll() {
+    void render_piano_roll(const DawWindow& win) {
         const auto& t = get_theme();
         PianoRollLayout lay;
-        lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+        lay.init(win, PianoRollNumPitches, piano_roll_steps_);
 
-        RECT roll_rc{10, static_cast<int>(lay.rack_top), get_effective_workspace_w() - 10, static_cast<int>(lay.rack_bottom)};
-        GuiRenderer::draw_rounded_box(mem_dc_, roll_rc, t.bg_surface, t.border_subtle, 6);
+        int px = static_cast<int>(win.x);
+        int pw = static_cast<int>(win.w);
+        RECT roll_rc{px, static_cast<int>(lay.rack_top), px + pw, static_cast<int>(lay.rack_bottom)};
+        GuiRenderer::draw_rounded_box(mem_dc_, roll_rc, t.bg_surface, t.border_subtle, 0);
 
         auto& proj = engine_.session().project();
         auto* pat = proj.get_pattern(1);
@@ -2703,12 +3453,15 @@ private:
         std::string ch_name = cur_ch ? cur_ch->settings().name : "Instrument";
 
         // 1. Piano Roll Toolbar: Section Title, Back to Playlist, Step Toggle, Note Length, Clear, and Shortcuts
+        int ty = static_cast<int>(lay.toolbar_y);
+        int th = static_cast<int>(lay.toolbar_h);
+
         SelectObject(mem_dc_, font_bold_);
-        RECT title_rc{25, static_cast<int>(lay.toolbar_y), 125, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT title_rc{px + 8, ty, px + 95, ty + th};
         GuiRenderer::draw_text(mem_dc_, "PIANO ROLL", title_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         SelectObject(mem_dc_, font_small_);
-        RECT back_rc{135, static_cast<int>(lay.toolbar_y), 255, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT back_rc{px + 100, ty, px + 215, ty + th};
         GuiRenderer::draw_button(mem_dc_, back_rc, "🎛 Back to Playlist", false, t.accent, t.bg_control);
 
         // Pitch Range Display Badge (Full 128 semitones C0..B10)
@@ -2716,29 +3469,31 @@ private:
         std::string range_str = ch_name + "  |  " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_)) +
                                 " — " + get_midi_note_name(static_cast<uint8_t>(piano_roll_base_pitch_ + PianoRollNumPitches - 1)) +
                                 " (C0..B10)";
-        RECT range_rc{263, static_cast<int>(lay.toolbar_y), 475, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT range_rc{px + 220, ty, px + 400, ty + th};
         GuiRenderer::draw_rounded_box(mem_dc_, range_rc, t.bg_control, t.border_subtle, 3);
         GuiRenderer::draw_text(mem_dc_, range_str, range_rc, t.text_secondary, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // Steps Toggle (16 or 32 visible)
         std::string step_str = (piano_roll_steps_ == 16) ? "16 Steps" : "32 Steps";
-        RECT step_rc{483, static_cast<int>(lay.toolbar_y), 565, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT step_rc{px + 405, ty, px + 475, ty + th};
         GuiRenderer::draw_button(mem_dc_, step_rc, step_str, (piano_roll_steps_ == 32), t.accent, t.bg_control);
 
         // Default Note Length
         std::string len_str = "📏 Len: " + std::to_string(piano_roll_note_len_steps_) + (piano_roll_note_len_steps_ == 1 ? " Stp" : " Stps");
-        RECT len_rc{573, static_cast<int>(lay.toolbar_y), 665, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT len_rc{px + 480, ty, px + 555, ty + th};
         GuiRenderer::draw_button(mem_dc_, len_rc, len_str, false, t.bg_control, t.bg_control);
 
         // Clear Notes button
-        RECT clear_rc{673, static_cast<int>(lay.toolbar_y), 735, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
+        RECT clear_rc{px + 560, ty, px + 615, ty + th};
         GuiRenderer::draw_button(mem_dc_, clear_rc, "Clear", false, t.danger, t.bg_control);
 
-        // Guide Hint
-        SelectObject(mem_dc_, font_small_);
-        RECT hint_rc{745, static_cast<int>(lay.toolbar_y), get_effective_workspace_w() - 40, static_cast<int>(lay.toolbar_y + lay.toolbar_h)};
-        GuiRenderer::draw_text(mem_dc_, "💡 Left: Add/Drag  •  Right: Delete  •  Right Edge: Resize  •  Wheel: Pitch/Scroll",
-                              hint_rc, t.text_muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        // Guide Hint (shown if enough width)
+        if (pw > 720) {
+            SelectObject(mem_dc_, font_small_);
+            RECT hint_rc{px + 625, ty, px + pw - 8, ty + th};
+            GuiRenderer::draw_text(mem_dc_, "💡 Left: Add/Drag • Right: Del • Edge: Resize • Wheel: Pitch",
+                                  hint_rc, t.text_muted, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        }
 
         // 2. Ruler Header
         for (int col = 0; col < piano_roll_steps_; ++col) {
@@ -2885,37 +3640,23 @@ private:
         GuiRenderer::draw_rounded_box(mem_dc_, h_thumb_rc, h_thumb_col, t.border_subtle, 2);
     }
 
-    void render_inspector_gdi() {
-        if (!inspector_open_) return;
+    void render_piano_roll() {
+        render_piano_roll(win_pianoroll_);
+    }
+
+    void render_inspector_gdi(const DawWindow& win) {
+        if (!win.visible) return;
         const auto& t = get_theme();
 
-        int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-        int insp_y = 58;
-        int insp_r = client_w_ - kLayoutMargin;
-        int insp_bot = client_h_ - 268;
-        if (insp_bot <= insp_y + 100) return;
+        int insp_x = static_cast<int>(win.x);
+        int insp_y = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int insp_r = static_cast<int>(win.x + win.w);
+        int insp_bot = static_cast<int>(win.y + win.h);
+        if (insp_bot <= insp_y + 80) return;
 
-        // Outer Panel Card
+        // Outer Content Box
         RECT panel_rc{insp_x, insp_y, insp_r, insp_bot};
-        GuiRenderer::draw_rounded_box(mem_dc_, panel_rc, t.bg_surface, t.border_subtle, 6);
-
-        // Header Title
-        SelectObject(mem_dc_, font_bold_);
-        RECT hdr_title_rc{insp_x + 12, insp_y + 6, insp_r - 36, insp_y + 36};
-        GuiRenderer::draw_text(mem_dc_, "INSPECTOR / TRACK FX", hdr_title_rc, t.text_secondary);
-
-        // Close button [✕]
-        SelectObject(mem_dc_, font_small_);
-        RECT close_btn_rc{insp_r - 28, insp_y + 9, insp_r - 8, insp_y + 29};
-        GuiRenderer::draw_button(mem_dc_, close_btn_rc, "✕", false, t.bg_control, t.bg_control);
-
-        // Divider
-        HPEN divPen = CreatePen(PS_SOLID, 1, t.border_subtle);
-        HGDIOBJ oldP = SelectObject(mem_dc_, divPen);
-        MoveToEx(mem_dc_, insp_x, insp_y + 36, NULL);
-        LineTo(mem_dc_, insp_r, insp_y + 36);
-        SelectObject(mem_dc_, oldP);
-        DeleteObject(divPen);
+        GuiRenderer::draw_rounded_box(mem_dc_, panel_rc, t.bg_surface, t.border_subtle, 0);
 
         // Track Information
         auto& proj = engine_.session().project();
@@ -2940,28 +3681,28 @@ private:
             : (ch_source.empty() ? "Routing: Insert -> Master" : ("Input: " + ch_source + " -> Master"));
 
         // Summary Card Box
-        RECT sum_card_rc{insp_x + 8, insp_y + 44, insp_r - 8, insp_y + 162};
+        RECT sum_card_rc{insp_x + 8, insp_y + 8, insp_r - 8, insp_y + 126};
         GuiRenderer::draw_rounded_box(mem_dc_, sum_card_rc, t.bg_surface_2, t.border_subtle, 4);
 
         // Track Badge & Name
-        RECT badge_rc{insp_x + 14, insp_y + 50, insp_x + 80, insp_y + 68};
+        RECT badge_rc{insp_x + 14, insp_y + 14, insp_x + 80, insp_y + 32};
         GuiRenderer::draw_rounded_box(mem_dc_, badge_rc, t.accent_deep, t.accent_bright, 3);
         GuiRenderer::draw_text(mem_dc_, tr_badge, badge_rc, RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         SelectObject(mem_dc_, font_bold_);
-        RECT name_rc{insp_x + 86, insp_y + 50, insp_r - 14, insp_y + 68};
+        RECT name_rc{insp_x + 86, insp_y + 14, insp_r - 14, insp_y + 32};
         GuiRenderer::draw_text(mem_dc_, tr_name, name_rc, t.text_primary);
 
         // Routing Info
         SelectObject(mem_dc_, font_small_);
-        RECT route_rc{insp_x + 14, insp_y + 70, insp_r - 14, insp_y + 86};
+        RECT route_rc{insp_x + 14, insp_y + 34, insp_r - 14, insp_y + 50};
         GuiRenderer::draw_text(mem_dc_, route_str, route_rc, t.text_muted);
 
         // Volume Slider
         float cur_vol = track ? track->volume() : 0.8f;
         float norm_vol = std::clamp(cur_vol / 1.25f, 0.0f, 1.0f);
         std::string vol_lbl = "Vol: " + std::to_string(static_cast<int>(std::round(cur_vol * 100.0f))) + "%";
-        RECT vol_rc{insp_x + 14, insp_y + 90, insp_r - 14, insp_y + 108};
+        RECT vol_rc{insp_x + 14, insp_y + 54, insp_r - 14, insp_y + 72};
         GuiRenderer::draw_slider_horizontal(mem_dc_, vol_rc, norm_vol, vol_lbl);
 
         // Pan Slider
@@ -2975,7 +3716,7 @@ private:
         } else {
             pan_lbl = "Pan: R " + std::to_string(static_cast<int>(std::round(cur_pan * 100.0f))) + "%";
         }
-        RECT pan_rc{insp_x + 14, insp_y + 112, insp_r - 14, insp_y + 130};
+        RECT pan_rc{insp_x + 14, insp_y + 76, insp_r - 14, insp_y + 94};
         GuiRenderer::draw_slider_horizontal(mem_dc_, pan_rc, norm_pan, pan_lbl);
 
         // Mute & Solo Buttons
@@ -2984,21 +3725,21 @@ private:
         int mid_w = (insp_r - 14) - (insp_x + 14);
         int btn_w = (mid_w - 6) / 2;
 
-        RECT mute_rc{insp_x + 14, insp_y + 134, insp_x + 14 + btn_w, insp_y + 154};
+        RECT mute_rc{insp_x + 14, insp_y + 98, insp_x + 14 + btn_w, insp_y + 118};
         GuiRenderer::draw_button(mem_dc_, mute_rc, "MUTE", is_mute, t.danger, t.bg_control);
 
-        RECT solo_rc{insp_x + 14 + btn_w + 6, insp_y + 134, insp_r - 14, insp_y + 154};
+        RECT solo_rc{insp_x + 14 + btn_w + 6, insp_y + 98, insp_r - 14, insp_y + 118};
         GuiRenderer::draw_button(mem_dc_, solo_rc, "SOLO", is_solo, t.warning, t.bg_control);
 
         // FX Inserts Section Header
         size_t num_fx = track ? track->inserts().size() : 0;
         std::string fx_sec_title = "CHANNEL FX INSERTS (" + std::to_string(num_fx) + "/10)";
         SelectObject(mem_dc_, font_bold_);
-        RECT fx_title_rc{insp_x + 12, insp_y + 168, insp_r - 12, insp_y + 188};
+        RECT fx_title_rc{insp_x + 12, insp_y + 132, insp_r - 12, insp_y + 152};
         GuiRenderer::draw_text(mem_dc_, fx_sec_title, fx_title_rc, t.text_secondary);
 
         // Render Insert Slots
-        int slot_y_start = insp_y + 192;
+        int slot_y_start = insp_y + 156;
         int slot_h = 32;
         int slot_gap = 4;
         int fx_area_bot = insp_bot - 8;
@@ -3068,29 +3809,37 @@ private:
         }
     }
 
-    void render_mixer_panel() {
-        const auto& t = get_theme();
-        int mixer_top = client_h_ - 262;
-        int mixer_bottom = client_h_ - 30;
-        RECT mixer_rc{10, mixer_top, client_w_ - 10, mixer_bottom};
+    void render_inspector_gdi() {
+        render_inspector_gdi(win_inspector_);
+    }
 
-        GuiRenderer::draw_rounded_box(mem_dc_, mixer_rc, t.bg_surface, t.border_subtle, 6);
+    void render_mixer_panel(const DawWindow& win) {
+        const auto& t = get_theme();
+        int mx = static_cast<int>(win.x);
+        int my = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int mw = static_cast<int>(win.w);
+        int mh = static_cast<int>(win.h - DawWindow::kTitleBarHeight);
+
+        RECT mixer_rc{mx, my, mx + mw, my + mh};
+        GuiRenderer::draw_rounded_box(mem_dc_, mixer_rc, t.bg_surface, t.border_subtle, 0);
 
         auto& proj = engine_.session().project();
 
         int strip_w = 96;
-        int strip_gap = 12;
-        int ty = client_h_ - 234;
+        int strip_gap = 10;
+        int ty = my + 30;
+        int strip_h = std::max(120, mh - 36);
 
-        int insert_start_x = 25 + strip_w + strip_gap;
-        int avail_w = (client_w_ - 25) - insert_start_x;
+        int master_x = mx + 12;
+        int insert_start_x = master_x + strip_w + strip_gap;
+        int avail_w = (mx + mw - 12) - insert_start_x;
         int vis_inserts = std::max(1, avail_w / (strip_w + strip_gap));
         size_t total_inserts = std::max(size_t(4), proj.channels().size());
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
         mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
 
         SelectObject(mem_dc_, font_bold_);
-        RECT title_rc{25, mixer_top + 5, 120, mixer_top + 25};
+        RECT title_rc{mx + 12, my + 5, mx + 120, my + 25};
         GuiRenderer::draw_text(mem_dc_, "MIXER", title_rc, t.text_secondary);
 
         if (max_mix_scroll > 0) {
@@ -3098,17 +3847,17 @@ private:
             std::string mix_lbl = "Tracks " + std::to_string(1 + mixer_scroll_track_) + "-" +
                                   std::to_string(std::min(total_inserts, size_t(1 + mixer_scroll_track_ + vis_inserts - 1))) +
                                   " / " + std::to_string(total_inserts);
-            RECT lbl_rc{client_w_ - 240, client_h_ - 258, client_w_ - 85, client_h_ - 238};
+            RECT lbl_rc{mx + mw - 220, my + 5, mx + mw - 75, my + 25};
             GuiRenderer::draw_text(mem_dc_, mix_lbl, lbl_rc, t.text_secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-            RECT btn_l{client_w_ - 80, client_h_ - 259, client_w_ - 52, client_h_ - 237};
-            RECT btn_r{client_w_ - 48, client_h_ - 259, client_w_ - 20, client_h_ - 237};
+            RECT btn_l{mx + mw - 68, my + 4, mx + mw - 40, my + 26};
+            RECT btn_r{mx + mw - 36, my + 4, mx + mw - 8, my + 26};
             GuiRenderer::draw_button(mem_dc_, btn_l, "◀", false, t.bg_control, t.bg_control);
             GuiRenderer::draw_button(mem_dc_, btn_r, "▶", false, t.bg_control, t.bg_control);
         }
 
         auto render_gdi_strip = [&](int tid, int sx) {
-            RECT strip_rc{sx, ty, sx + strip_w, ty + 198};
+            RECT strip_rc{sx, ty, sx + strip_w, ty + strip_h};
             bool is_selected = (static_cast<uint32_t>(tid) == selected_mixer_track_);
             COLORREF border_c = is_selected ? t.accent_bright : t.border_subtle;
             GuiRenderer::draw_rounded_box(mem_dc_, strip_rc, t.bg_surface_2, border_c, 4);
@@ -3134,13 +3883,14 @@ private:
             GuiRenderer::draw_button(mem_dc_, s_rc, "S", is_solo, t.accent, t.bg_control);
 
             // Stereo VU Meter on Left (Dual bars)
+            int fader_bot = ty + strip_h - 52;
             float peak_l = (static_cast<size_t>(tid) < meter_peaks_l_.size()) ? meter_peaks_l_[tid] : 0.0f;
             float peak_r = (static_cast<size_t>(tid) < meter_peaks_r_.size()) ? meter_peaks_r_[tid] : 0.0f;
-            RECT meter_rc{sx + 8, ty + 46, sx + 28, ty + 144};
+            RECT meter_rc{sx + 8, ty + 46, sx + 28, fader_bot};
             GuiRenderer::draw_meter_vertical_stereo(mem_dc_, meter_rc, peak_l, peak_r);
 
             // Vertical Volume Fader on Right
-            RECT fader_rc{sx + 33, ty + 46, sx + 88, ty + 144};
+            RECT fader_rc{sx + 33, ty + 46, sx + 88, fader_bot};
             float norm_vol = vol / 1.5f;
 
             std::string db_str;
@@ -3155,17 +3905,21 @@ private:
             GuiRenderer::draw_slider_vertical(mem_dc_, fader_rc, norm_vol, db_str);
 
             // Panning Knob Underneath
-            RECT pan_rc{sx + 6, ty + 148, sx + strip_w - 6, ty + 194};
+            RECT pan_rc{sx + 6, fader_bot + 4, sx + strip_w - 6, ty + strip_h - 4};
             GuiRenderer::draw_pan_knob(mem_dc_, pan_rc, pan_val, "PAN");
         };
 
-        render_gdi_strip(0, 25);
+        render_gdi_strip(0, master_x);
         for (int s = 0; s < vis_inserts; ++s) {
             int tid = 1 + mixer_scroll_track_ + s;
             if (static_cast<size_t>(tid) > total_inserts) break;
             int sx = insert_start_x + s * (strip_w + strip_gap);
             render_gdi_strip(tid, sx);
         }
+    }
+
+    void render_mixer_panel() {
+        render_mixer_panel(win_mixer_);
     }
 
     void render_status_bar() {
@@ -3312,8 +4066,8 @@ private:
         }
 
         // B. Top Transport Bar
-        // Project Name badge click [ 88, 8, 198, 40 ]
-        if (x >= 88 && x <= 198 && y >= 8 && y <= 40) {
+        // Project Name badge click [ 200, 8, 310, 40 ]
+        if (x >= 200 && x <= 310 && y >= 8 && y <= 40) {
             std::string cur_name = engine_.session().project().name();
             if (cur_name.empty()) cur_name = "Untitled Project";
             status_message_ = "Active Project: " + cur_name + " (" +
@@ -3323,67 +4077,67 @@ private:
         }
 
         // Undo [↶] button
-        if (x >= 204 && x <= 234 && y >= 8 && y <= 40) {
+        if (x >= 316 && x <= 346 && y >= 8 && y <= 40) {
             do_undo();
             return;
         }
 
         // Redo [↷] button
-        if (x >= 238 && x <= 268 && y >= 8 && y <= 40) {
+        if (x >= 350 && x <= 380 && y >= 8 && y <= 40) {
             do_redo();
             return;
         }
 
         // 1. PLAY Button [▶]
-        if (x >= 276 && x <= 312 && y >= 8 && y <= 40) {
+        if (x >= 388 && x <= 424 && y >= 8 && y <= 40) {
             start_playback_from_spm();
             return;
         }
 
         // 2. PAUSE Button [❚❚]
-        if (x >= 316 && x <= 352 && y >= 8 && y <= 40) {
+        if (x >= 428 && x <= 464 && y >= 8 && y <= 40) {
             pause_playback();
             return;
         }
 
         // 3. STOP Button [■]
-        if (x >= 356 && x <= 392 && y >= 8 && y <= 40) {
+        if (x >= 468 && x <= 504 && y >= 8 && y <= 40) {
             stop_playback();
             return;
         }
 
         // 4. Tempo - / +
-        if (x >= 400 && x <= 424 && y >= 8 && y <= 40) {
+        if (x >= 512 && x <= 536 && y >= 8 && y <= 40) {
             double bpm = engine_.session().project().time_map().get_bpm_at(0);
             engine_.session().project().time_map().set_tempo(std::max(20.0, bpm - 1.0));
             return;
         }
-        if (x >= 512 && x <= 536 && y >= 8 && y <= 40) {
+        if (x >= 624 && x <= 648 && y >= 8 && y <= 40) {
             double bpm = engine_.session().project().time_map().get_bpm_at(0);
             engine_.session().project().time_map().set_tempo(std::min(999.0, bpm + 1.0));
             return;
         }
 
-        // 5. View Mode Switcher: [ 🎛 ] / [ 🎹 ] / [ ℹ ]
-        if (x >= 684 && x <= 722 && y >= 8 && y <= 40) {
-            view_mode_ = ViewMode::ChannelRack;
-            status_message_ = "Switched to Playlist (F6)";
+        // 5. Window Toggle / Focus Buttons: Playlist, Piano Roll, Mixer, Inspector, and Magnet
+        if (x >= 796 && x <= 832 && y >= 8 && y <= 40) {
+            toggle_or_focus_window(WindowId::Playlist);
             return;
         }
-        if (x >= 726 && x <= 764 && y >= 8 && y <= 40) {
-            view_mode_ = ViewMode::PianoRoll;
-            for (const auto& ch : engine_.session().project().channels()) {
-                if (ch.id() == piano_roll_channel_) {
-                    selected_mixer_track_ = ch.settings().mixer_track;
-                    break;
-                }
-            }
-            status_message_ = "Switched to Piano roll (F7)";
+        if (x >= 836 && x <= 872 && y >= 8 && y <= 40) {
+            toggle_or_focus_window(WindowId::PianoRoll);
             return;
         }
-        if (x >= 768 && x <= 806 && y >= 8 && y <= 40) {
-            inspector_open_ = !inspector_open_;
-            status_message_ = inspector_open_ ? "Opened Inspector Panel (F8)" : "Collapsed Inspector Panel (F8)";
+        if (x >= 876 && x <= 912 && y >= 8 && y <= 40) {
+            toggle_or_focus_window(WindowId::Mixer);
+            return;
+        }
+        if (x >= 916 && x <= 952 && y >= 8 && y <= 40) {
+            toggle_or_focus_window(WindowId::Inspector);
+            return;
+        }
+        if (x >= 956 && x <= 992 && y >= 8 && y <= 40) {
+            magnet_enabled_ = !magnet_enabled_;
+            status_message_ = magnet_enabled_ ? "Magnetic Snapping Enabled (Ctrl+M)" : "Magnetic Snapping Disabled (Ctrl+M)";
             return;
         }
 
@@ -3397,38 +4151,81 @@ private:
             return;
         }
 
-        // C. Mixer Panel Interaction
-        if (y >= client_h_ - 262 && y <= client_h_ - 30) {
-            handle_mixer_click(x, y);
-            return;
-        }
+        // C. Windowed Desktop Panel Interaction (Reverse Z-Order: Top-to-Bottom)
+        for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+            auto* win = get_window(*it);
+            if (!win || !win->visible) continue;
+            if (!win->contains(static_cast<float>(x), static_cast<float>(y))) continue;
 
-        // D. Right-Side Inspector Panel Interaction
-        if (inspector_open_ && x >= client_w_ - (kInspectorWidth + kLayoutMargin) && x <= client_w_ - kLayoutMargin && y >= 58 && y <= client_h_ - 268) {
-            handle_inspector_click(x, y);
-            return;
-        }
+            // Click hit this window: bring to front!
+            bring_to_front(*it);
 
-        // E. Dispatch based on ViewMode
-        if (view_mode_ == ViewMode::ChannelRack) {
-            handle_channel_rack_click(x, y);
-        } else {
-            handle_piano_roll_click(x, y);
+            // 1. Close Button [✕]
+            if (win->is_in_close_btn(static_cast<float>(x), static_cast<float>(y))) {
+                win->visible = false;
+                if (win->id == WindowId::Inspector) inspector_open_ = false;
+                status_message_ = "Closed " + win->title;
+                update_top_active_window();
+                return;
+            }
+
+            // 2. Resize Border Edges & Corners
+            auto edge = get_resize_edge(*win, static_cast<float>(x), static_cast<float>(y));
+            if (edge != ResizeEdge::None) {
+                is_dragging_window_ = true;
+                window_drag_mode_ = WindowDragMode::Resize;
+                resize_edge_ = edge;
+                dragging_window_id_ = win->id;
+                drag_win_start_mouse_x_ = x;
+                drag_win_start_mouse_y_ = y;
+                drag_win_orig_x_ = win->x;
+                drag_win_orig_y_ = win->y;
+                drag_win_orig_w_ = win->w;
+                drag_win_orig_h_ = win->h;
+                status_message_ = "Resizing " + win->title;
+                return;
+            }
+
+            // 3. Title Bar Dragging (Move)
+            if (win->is_in_title_bar(static_cast<float>(x), static_cast<float>(y))) {
+                is_dragging_window_ = true;
+                window_drag_mode_ = WindowDragMode::Move;
+                resize_edge_ = ResizeEdge::None;
+                dragging_window_id_ = win->id;
+                drag_win_start_mouse_x_ = x;
+                drag_win_start_mouse_y_ = y;
+                drag_win_orig_x_ = win->x;
+                drag_win_orig_y_ = win->y;
+                drag_win_orig_w_ = win->w;
+                drag_win_orig_h_ = win->h;
+                status_message_ = "Moving " + win->title;
+                return;
+            }
+
+            // 4. Content Area Click
+            switch (win->id) {
+                case WindowId::Playlist:
+                    handle_channel_rack_click(*win, x, y);
+                    return;
+                case WindowId::PianoRoll:
+                    handle_piano_roll_click(*win, x, y);
+                    return;
+                case WindowId::Mixer:
+                    handle_mixer_click(*win, x, y);
+                    return;
+                case WindowId::Inspector:
+                    handle_inspector_click(*win, x, y);
+                    return;
+            }
+            return;
         }
     }
 
-    void handle_inspector_click(int x, int y) {
-        int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-        int insp_y = 58;
-        int insp_r = client_w_ - kLayoutMargin;
-        int insp_bot = client_h_ - 268;
-
-        // 1. Close button [✕]
-        if (x >= insp_r - 28 && x <= insp_r - 8 && y >= insp_y + 9 && y <= insp_y + 29) {
-            inspector_open_ = false;
-            status_message_ = "Collapsed Inspector Panel (F8)";
-            return;
-        }
+    void handle_inspector_click(const DawWindow& win, int x, int y) {
+        int insp_x = static_cast<int>(win.x);
+        int insp_y = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int insp_r = static_cast<int>(win.x + win.w);
+        int insp_bot = static_cast<int>(win.y + win.h);
 
         uint32_t tid = selected_mixer_track_;
         auto& proj = engine_.session().project();
@@ -3440,7 +4237,7 @@ private:
         if (!track) return;
 
         size_t num_fx = track->inserts().size();
-        int slot_y_start = insp_y + 192;
+        int slot_y_start = insp_y + 156;
         int slot_h = 32;
         int slot_gap = 4;
         int fx_area_bot = insp_bot - 8;
@@ -3467,7 +4264,6 @@ private:
 
                         POINT pt{x, y};
                         ClientToScreen(hwnd_, &pt);
-                        // Note: TrackPopupMenu runs without audio_mutex_ held, preventing audio dropout during menu browsing
                         int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, NULL);
                         DestroyMenu(hMenu);
 
@@ -3506,8 +4302,8 @@ private:
         // Lock audio_mutex_ for parameter adjustment and insert slot mutations
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
 
-        // 2. Volume slider: [insp_x + 14, insp_y + 90, insp_r - 14, insp_y + 108]
-        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 90 && y <= insp_y + 108) {
+        // 2. Volume slider: [insp_x + 14, insp_y + 54, insp_r - 14, insp_y + 72]
+        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 54 && y <= insp_y + 72) {
             dragging_inspector_vol_ = true;
             float norm = float(x - (insp_x + 14)) / float((insp_r - 14) - (insp_x + 14));
             norm = std::clamp(norm, 0.0f, 1.0f);
@@ -3517,8 +4313,8 @@ private:
             return;
         }
 
-        // 3. Pan slider: [insp_x + 14, insp_y + 112, insp_r - 14, insp_y + 130]
-        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 112 && y <= insp_y + 130) {
+        // 3. Pan slider: [insp_x + 14, insp_y + 76, insp_r - 14, insp_y + 94]
+        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 76 && y <= insp_y + 94) {
             dragging_inspector_pan_ = true;
             float norm = float(x - (insp_x + 14)) / float((insp_r - 14) - (insp_x + 14));
             float new_pan = std::clamp(norm * 2.0f - 1.0f, -1.0f, 1.0f);
@@ -3533,7 +4329,7 @@ private:
         // 4. Mute & Solo buttons:
         int mid_w = (insp_r - 14) - (insp_x + 14);
         int btn_w = (mid_w - 6) / 2;
-        if (y >= insp_y + 134 && y <= insp_y + 154) {
+        if (y >= insp_y + 98 && y <= insp_y + 118) {
             if (x >= insp_x + 14 && x <= insp_x + 14 + btn_w) {
                 track->set_muted(!track->muted());
                 status_message_ = (tid == 0 ? "Master" : ("Track " + std::to_string(tid))) +
@@ -3592,11 +4388,15 @@ private:
         }
     }
 
-    void handle_inspector_right_click(int x, int y) {
-        int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-        int insp_r = client_w_ - kLayoutMargin;
-        int insp_y = 58;
-        int insp_bot = client_h_ - 268;
+    void handle_inspector_click(int x, int y) {
+        handle_inspector_click(win_inspector_, x, y);
+    }
+
+    void handle_inspector_right_click(const DawWindow& win, int x, int y) {
+        int insp_x = static_cast<int>(win.x);
+        int insp_y = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int insp_r = static_cast<int>(win.x + win.w);
+        int insp_bot = static_cast<int>(win.y + win.h);
 
         uint32_t tid = selected_mixer_track_;
         auto& proj = engine_.session().project();
@@ -3604,14 +4404,14 @@ private:
         if (!track) return;
 
         // Right-click on Volume slider -> reset to default unity (1.0f = 0 dB)
-        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 90 && y <= insp_y + 108) {
+        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 54 && y <= insp_y + 72) {
             track->set_volume(1.0f);
             status_message_ = (tid == 0 ? "Master" : ("Track " + std::to_string(tid))) + " Volume reset to 0 dB (100%)";
             return;
         }
 
         // Right-click on Pan slider -> reset to Center (0.0f)
-        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 112 && y <= insp_y + 130) {
+        if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 76 && y <= insp_y + 94) {
             track->set_pan(0.0f);
             status_message_ = (tid == 0 ? "Master" : ("Track " + std::to_string(tid))) + " Pan reset to Center";
             return;
@@ -3619,7 +4419,7 @@ private:
 
         // Right-click on FX Inserts:
         size_t num_fx = track->inserts().size();
-        int slot_y_start = insp_y + 192;
+        int slot_y_start = insp_y + 156;
         int slot_h = 32;
         int slot_gap = 4;
         int fx_area_bot = insp_bot - 8;
@@ -3653,27 +4453,38 @@ private:
         }
     }
 
-    void handle_mixer_click(int x, int y) {
+    void handle_inspector_right_click(int x, int y) {
+        handle_inspector_right_click(win_inspector_, x, y);
+    }
+
+    void handle_mixer_click(const DawWindow& win, int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         auto& proj = engine_.session().project();
 
+        float mx = win.x;
+        float my = win.y + DawWindow::kTitleBarHeight;
+        float mw = win.w;
+        float mh = win.h - DawWindow::kTitleBarHeight;
+
         float track_w = 96.0f;
-        float gap = 12.0f;
-        float ty = static_cast<float>(client_h_ - 234);
-        float insert_start_x = 25.0f + track_w + gap;
-        float avail_w = (static_cast<float>(client_w_) - 25.0f) - insert_start_x;
+        float gap = 10.0f;
+        float ty = my + 30.0f;
+        float strip_h = std::max(120.0f, mh - 36.0f);
+        float master_x = mx + 12.0f;
+        float insert_start_x = master_x + track_w + gap;
+        float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
         size_t total_inserts = std::max(size_t(4), proj.channels().size());
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
 
         // 1. Navigation buttons: [ ◀ ] and [ ▶ ]
         if (max_mix_scroll > 0) {
-            if (x >= client_w_ - 80 && x <= client_w_ - 52 && y >= client_h_ - 259 && y <= client_h_ - 237) {
+            if (x >= mx + mw - 68.0f && x <= mx + mw - 40.0f && y >= my + 4.0f && y <= my + 26.0f) {
                 mixer_scroll_track_ = std::max(0, mixer_scroll_track_ - 1);
                 status_message_ = "Scrolled mixer to Track " + std::to_string(1 + mixer_scroll_track_);
                 return;
             }
-            if (x >= client_w_ - 48 && x <= client_w_ - 20 && y >= client_h_ - 259 && y <= client_h_ - 237) {
+            if (x >= mx + mw - 36.0f && x <= mx + mw - 8.0f && y >= my + 4.0f && y <= my + 26.0f) {
                 mixer_scroll_track_ = std::min(max_mix_scroll, mixer_scroll_track_ + 1);
                 status_message_ = "Scrolled mixer to Track " + std::to_string(1 + mixer_scroll_track_);
                 return;
@@ -3682,7 +4493,8 @@ private:
 
         // Helper lambda for track strip hit testing
         auto handle_strip_click = [&](int tid, float tx) -> bool {
-            if (x < tx || x > tx + track_w || y < ty || y > ty + 198.0f) {
+            float fader_bot = ty + strip_h - 52.0f;
+            if (x < tx || x > tx + track_w || y < ty || y > ty + strip_h) {
                 return false;
             }
 
@@ -3711,16 +4523,16 @@ private:
             }
 
             // C. Fader drag / click
-            if (x >= tx + 28.0f && x <= tx + 92.0f && y >= ty + 44.0f && y <= ty + 146.0f) {
+            if (x >= tx + 28.0f && x <= tx + 92.0f && y >= ty + 44.0f && y <= fader_bot + 2.0f) {
                 dragging_mixer_track_ = tid;
                 RECT fader_rc{static_cast<int>(tx + 33.0f), static_cast<int>(ty + 46.0f),
-                              static_cast<int>(tx + 88.0f), static_cast<int>(ty + 144.0f)};
+                              static_cast<int>(tx + 88.0f), static_cast<int>(fader_bot)};
                 update_mixer_volume_from_mouse(tid, y, fader_rc);
                 return true;
             }
 
             // D. Panning knob drag
-            if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= ty + 146.0f && y <= ty + 196.0f) {
+            if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= fader_bot + 2.0f && y <= ty + strip_h - 2.0f) {
                 dragging_mixer_pan_track_ = tid;
                 pan_drag_start_y_ = y;
                 pan_drag_start_val_ = mix_tr ? mix_tr->pan() : 0.0f;
@@ -3731,7 +4543,7 @@ private:
         };
 
         // Check Master Strip (tid = 0)
-        if (handle_strip_click(0, 25.0f)) return;
+        if (handle_strip_click(0, master_x)) return;
 
         // Check Visible Insert Strips
         for (int s = 0; s < vis_inserts; ++s) {
@@ -3742,20 +4554,32 @@ private:
         }
     }
 
-    void handle_mixer_right_click(int x, int y) {
+    void handle_mixer_click(int x, int y) {
+        handle_mixer_click(win_mixer_, x, y);
+    }
+
+    void handle_mixer_right_click(const DawWindow& win, int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         auto& proj = engine_.session().project();
 
+        float mx = win.x;
+        float my = win.y + DawWindow::kTitleBarHeight;
+        float mw = win.w;
+        float mh = win.h - DawWindow::kTitleBarHeight;
+
         float track_w = 96.0f;
-        float gap = 12.0f;
-        float ty = static_cast<float>(client_h_ - 234);
-        float insert_start_x = 25.0f + track_w + gap;
-        float avail_w = (static_cast<float>(client_w_) - 25.0f) - insert_start_x;
+        float gap = 10.0f;
+        float ty = my + 30.0f;
+        float strip_h = std::max(120.0f, mh - 36.0f);
+        float master_x = mx + 12.0f;
+        float insert_start_x = master_x + track_w + gap;
+        float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
         size_t total_inserts = std::max(size_t(4), proj.channels().size());
 
         auto handle_strip_right_click = [&](int tid, float tx) -> bool {
-            if (x < tx || x > tx + track_w || y < ty || y > ty + 198.0f) {
+            float fader_bot = ty + strip_h - 52.0f;
+            if (x < tx || x > tx + track_w || y < ty || y > ty + strip_h) {
                 return false;
             }
 
@@ -3764,14 +4588,14 @@ private:
             if (!mix_tr) return false;
 
             // Right-click on Panning knob -> reset to Center (0.0)
-            if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= ty + 146.0f && y <= ty + 196.0f) {
+            if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= fader_bot + 2.0f && y <= ty + strip_h - 2.0f) {
                 mix_tr->set_pan(0.0f);
                 status_message_ = (tid == 0 ? "Master" : "Track " + std::to_string(tid)) + " Pan reset to Center";
                 return true;
             }
 
             // Right-click on Fader -> reset to Unity Gain (1.0 = 0 dB)
-            if (x >= tx + 28.0f && x <= tx + 92.0f && y >= ty + 44.0f && y <= ty + 146.0f) {
+            if (x >= tx + 28.0f && x <= tx + 92.0f && y >= ty + 44.0f && y <= fader_bot + 2.0f) {
                 mix_tr->set_volume(1.0f);
                 status_message_ = (tid == 0 ? "Master" : "Track " + std::to_string(tid)) + " Volume reset to 0 dB";
                 return true;
@@ -3780,7 +4604,7 @@ private:
             return false;
         };
 
-        if (handle_strip_right_click(0, 25.0f)) return;
+        if (handle_strip_right_click(0, master_x)) return;
 
         for (int s = 0; s < vis_inserts; ++s) {
             int tid = 1 + mixer_scroll_track_ + s;
@@ -3790,32 +4614,38 @@ private:
         }
     }
 
-    void handle_channel_rack_click(int x, int y) {
+    void handle_mixer_right_click(int x, int y) {
+        handle_mixer_right_click(win_mixer_, x, y);
+    }
+
+    void handle_channel_rack_click(const DawWindow& win, int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-        int ruler_y = 96;
-        int ruler_h = 22;
-        auto ppq = engine_.session().project().time_map().ppq();
-        auto bar_ticks = 4 * ppq;
-        auto& proj = engine_.session().project();
+        int px = static_cast<int>(win.x);
+        int py = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int pw = static_cast<int>(win.w);
+        int ph = static_cast<int>(win.h - DawWindow::kTitleBarHeight);
 
         // 0. Top Toolbar [+ Add Instrument] button - always accessible
-        if (x >= 110 && x <= 250 && y >= 64 && y <= 90) {
+        if (x >= px + 12 && x <= px + 150 && y >= py + 6 && y <= py + 30) {
             add_channel();
             return;
         }
 
-        int bars_per_view = get_bars_per_view();
+        int start_x = px + 245;
+        int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+        int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
         int max_bars = get_max_sequencer_bars();
-        int start_x = 265;
-        int total_seq_w = (get_effective_workspace_w() - 25) - start_x;
+        auto ppq = engine_.session().project().time_map().ppq();
+        auto bar_ticks = 4 * ppq;
+        auto& proj = engine_.session().project();
+
         domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
         domain::Tick view_duration = bars_per_view * bar_ticks;
         domain::Tick view_end_tick = view_start_tick + view_duration;
 
         // 1. Horizontal Scrollbar Track & Thumb Interaction
-        int rack_bottom = client_h_ - 268;
-        int scroll_y = rack_bottom - 22;
-        int scroll_h = 16;
+        int scroll_y = py + ph - 20;
+        int scroll_h = 14;
         float max_scroll = std::max(1.0f, float(max_bars - bars_per_view));
         float thumb_w = std::max(35.0f, (float(bars_per_view) / float(max_bars)) * float(total_seq_w));
         float available_w = float(total_seq_w) - thumb_w;
@@ -3824,12 +4654,10 @@ private:
 
         if (x >= start_x && x <= start_x + total_seq_w && y >= scroll_y - 4 && y <= scroll_y + scroll_h + 4) {
             if (x >= thumb_x && x <= thumb_x + thumb_w) {
-                // Clicked directly on thumb
                 dragging_seq_scrollbar_ = true;
                 drag_seq_scroll_start_mouse_x_ = float(x);
                 drag_seq_scroll_orig_bar_ = sequencer_scroll_bar_;
             } else {
-                // Clicked on scroll track -> jump thumb center to clicked location
                 float click_rel_x = std::clamp(float(x - start_x) - thumb_w * 0.5f, 0.0f, available_w);
                 sequencer_scroll_bar_ = (available_w > 0.0f)
                     ? std::clamp(static_cast<int>(std::round((click_rel_x / available_w) * max_scroll)), 0, static_cast<int>(max_scroll))
@@ -3843,6 +4671,8 @@ private:
         }
 
         // 2. Timeline Ruler Click (Snap SPM to clicked beat / ketukan)
+        int ruler_y = py + 36;
+        int ruler_h = 22;
         if (x >= start_x && x <= start_x + total_seq_w && y >= ruler_y && y <= ruler_y + ruler_h + 4) {
             dragging_spm_ = true;
             double norm_x = double(x - start_x) / double(total_seq_w);
@@ -3858,22 +4688,22 @@ private:
         }
 
         // 3. Channels List & Track Clip Interaction with Vertical Scrolling
-        float start_y = 124.0f;
-        float row_h = 48.0f;
-        float step_h_f = 42.0f;
-        float rack_avail_h = (float(client_h_ - 268) - 26.0f) - start_y;
-        int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
+        int start_y = py + 62;
+        int row_h = 48;
+        int step_h_i = 42;
+        int rack_avail_h = (py + ph - 24) - start_y;
+        int visible_channels = std::max(1, rack_avail_h / row_h);
         int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
         sequencer_scroll_track_ = std::clamp(sequencer_scroll_track_, 0, max_ch_scroll);
 
         // Vertical scrollbar click / drag
         if (max_ch_scroll > 0) {
-            float vbar_x = 254.0f;
-            float vbar_w = 10.0f;
-            if (x >= vbar_x && x <= vbar_x + vbar_w && y >= start_y && y <= start_y + rack_avail_h) {
-                float v_thumb_h = std::max(20.0f, (float(visible_channels) / float(proj.channels().size() + 1)) * rack_avail_h);
-                float avail_scroll_h = rack_avail_h - v_thumb_h;
-                float click_y = std::clamp(float(y) - start_y - v_thumb_h * 0.5f, 0.0f, avail_scroll_h);
+            int vbar_x = px + 242;
+            int vbar_w = 10;
+            if (x >= vbar_x - 3 && x <= vbar_x + vbar_w + 3 && y >= start_y && y <= start_y + rack_avail_h) {
+                float v_thumb_h = std::max(20.0f, (float(visible_channels) / float(proj.channels().size() + 1)) * float(rack_avail_h));
+                float avail_scroll_h = float(rack_avail_h) - v_thumb_h;
+                float click_y = std::clamp(float(y - start_y) - v_thumb_h * 0.5f, 0.0f, avail_scroll_h);
                 if (avail_scroll_h > 0.0f) {
                     sequencer_scroll_track_ = std::clamp(static_cast<int>(std::round((click_y / avail_scroll_h) * float(max_ch_scroll))), 0, max_ch_scroll);
                 }
@@ -3889,9 +4719,9 @@ private:
 
         for (size_t ch_idx = start_ch; ch_idx < end_ch; ++ch_idx) {
             auto& ch = proj.channels()[ch_idx];
-            float ch_y = start_y + static_cast<float>(ch_idx - start_ch) * row_h;
-            int ch_top = static_cast<int>(ch_y);
-            int ch_bot = static_cast<int>(ch_y + step_h_f);
+            int ch_y = start_y + static_cast<int>((ch_idx - start_ch) * row_h);
+            int ch_top = ch_y;
+            int ch_bot = ch_y + step_h_i;
 
             while (proj.tracks().size() <= ch_idx) {
                 domain::TrackId tid = static_cast<domain::TrackId>(proj.tracks().size() + 1);
@@ -3900,21 +4730,21 @@ private:
             auto& track = proj.tracks()[ch_idx];
 
             // Mute [M]
-            if (x >= 25 && x <= 47 && y >= ch_top + 8 && y <= ch_bot - 8) {
+            if (x >= px + 12 && x <= px + 34 && y >= ch_top + 8 && y <= ch_top + 34) {
                 ch.settings().muted = !ch.settings().muted;
                 selected_mixer_track_ = ch.settings().mixer_track;
                 return;
             }
 
             // Solo [S]
-            if (x >= 51 && x <= 73 && y >= ch_top + 8 && y <= ch_bot - 8) {
+            if (x >= px + 38 && x <= px + 60 && y >= ch_top + 8 && y <= ch_top + 34) {
                 ch.settings().solo = !ch.settings().solo;
                 selected_mixer_track_ = ch.settings().mixer_track;
                 return;
             }
 
             // Channel Name / VST GUI Editor button
-            if (x >= 78 && x <= 218 && y >= ch_top + 5 && y <= ch_bot - 5) {
+            if (x >= px + 65 && x <= px + 205 && y >= ch_top + 5 && y <= ch_top + 37) {
                 active_editor_channel_ = ch.id();
                 selected_mixer_track_ = ch.settings().mixer_track;
                 status_message_ = "Opened Instrument Editor: " + ch.settings().name;
@@ -3922,10 +4752,10 @@ private:
             }
 
             // Piano Roll Button [ 🎹 ]
-            if (x >= 223 && x <= 255 && y >= ch_top + 8 && y <= ch_bot - 8) {
+            if (x >= px + 210 && x <= px + 242 && y >= ch_top + 8 && y <= ch_top + 34) {
                 piano_roll_channel_ = ch.id();
                 selected_mixer_track_ = ch.settings().mixer_track;
-                view_mode_ = ViewMode::PianoRoll;
+                toggle_or_focus_window(WindowId::PianoRoll);
                 status_message_ = "Opened Piano Roll for " + ch.settings().name;
                 return;
             }
@@ -4006,40 +4836,45 @@ private:
 
         // Add Channel Button in scrollable view
         if (proj.channels().size() >= start_ch && proj.channels().size() <= end_ch) {
-            float add_y = start_y + static_cast<float>(proj.channels().size() - start_ch) * row_h;
-            if (x >= 25 && x <= 218 && y >= add_y + 4.0f && y <= add_y + 34.0f) {
+            int add_y = start_y + static_cast<int>((proj.channels().size() - start_ch) * row_h);
+            if (x >= px + 12 && x <= px + 205 && y >= add_y + 4 && y <= add_y + 34) {
                 add_channel();
                 return;
             }
         }
     }
 
-    void handle_piano_roll_click(int x, int y) {
+    void handle_channel_rack_click(int x, int y) {
+        handle_channel_rack_click(win_playlist_, x, y);
+    }
+
+    void handle_piano_roll_click(const DawWindow& win, int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         PianoRollLayout lay;
-        lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+        lay.init(win, PianoRollNumPitches, piano_roll_steps_);
         auto ppq = engine_.session().project().time_map().ppq();
         auto step_ticks = ppq / 4;
         int max_base_pitch = 128 - PianoRollNumPitches;
         int max_steps = get_max_piano_roll_steps();
         int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
+        int px = static_cast<int>(win.x);
 
         // 1. Toolbar clicks
         if (float(y) >= lay.toolbar_y && float(y) <= lay.toolbar_y + lay.toolbar_h) {
-            // [ 🎛 Back to Rack ]
-            if (x >= 135 && x <= 255) {
-                view_mode_ = ViewMode::ChannelRack;
-                status_message_ = "Returned to Playlist (F6)";
+            // [ 🎛 Back to Playlist ]
+            if (x >= px + 100 && x <= px + 215) {
+                bring_to_front(WindowId::Playlist);
+                status_message_ = "Switched to Playlist (F6)";
                 return;
             }
             // [ 16 Steps / 32 Steps ]
-            if (x >= 483 && x <= 565) {
+            if (x >= px + 405 && x <= px + 475) {
                 piano_roll_steps_ = (piano_roll_steps_ == 16) ? 32 : 16;
                 status_message_ = "Grid resolution set to " + std::to_string(piano_roll_steps_) + " Steps";
                 return;
             }
             // [ 📏 Len: X ]
-            if (x >= 573 && x <= 665) {
+            if (x >= px + 480 && x <= px + 555) {
                 if (piano_roll_note_len_steps_ == 1) piano_roll_note_len_steps_ = 2;
                 else if (piano_roll_note_len_steps_ == 2) piano_roll_note_len_steps_ = 4;
                 else if (piano_roll_note_len_steps_ == 4) piano_roll_note_len_steps_ = 8;
@@ -4049,7 +4884,7 @@ private:
                 return;
             }
             // [ Clear ]
-            if (x >= 673 && x <= 735) {
+            if (x >= px + 560 && x <= px + 615) {
                 auto& proj = engine_.session().project();
                 auto* pat = proj.get_pattern(1);
                 if (pat) {
@@ -4088,7 +4923,7 @@ private:
 
         // 3. Horizontal Scrollbar (Timeline Left / Right)
         if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
-            float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_y + lay.h_scroll_h) {
+            float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_h + lay.h_scroll_y) {
             float thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
             float s_ratio = (max_scroll_step > 0) ? (float(piano_roll_scroll_step_) / float(max_scroll_step)) : 0.0f;
             float thumb_x = lay.grid_x + s_ratio * (lay.grid_w - thumb_w);
@@ -4222,14 +5057,23 @@ private:
         }
     }
 
-    void handle_channel_rack_right_click(int x, int y) {
-        float start_y = 124.0f;
-        float row_h = 48.0f;
-        float step_h_f = 42.0f;
-        float rack_avail_h = (float(client_h_ - 268) - 26.0f) - start_y;
-        int start_x = 265;
-        int bars_per_view = get_bars_per_view();
-        int total_seq_w = (get_effective_workspace_w() - 25) - start_x;
+    void handle_piano_roll_click(int x, int y) {
+        handle_piano_roll_click(win_pianoroll_, x, y);
+    }
+
+    void handle_channel_rack_right_click(const DawWindow& win, int x, int y) {
+        int px = static_cast<int>(win.x);
+        int py = static_cast<int>(win.y + DawWindow::kTitleBarHeight);
+        int pw = static_cast<int>(win.w);
+        int ph = static_cast<int>(win.h - DawWindow::kTitleBarHeight);
+
+        int start_y = py + 62;
+        int row_h = 48;
+        int step_h_i = 42;
+        int rack_avail_h = (py + ph - 24) - start_y;
+        int start_x = px + 245;
+        int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+        int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
         auto ppq = engine_.session().project().time_map().ppq();
         auto bar_ticks = 4 * ppq;
         domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
@@ -4237,14 +5081,14 @@ private:
         domain::Tick view_end_tick = view_start_tick + view_duration;
         auto& proj = engine_.session().project();
 
-        int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
+        int visible_channels = std::max(1, rack_avail_h / row_h);
         size_t start_ch = static_cast<size_t>(sequencer_scroll_track_);
         size_t end_ch = std::min(proj.channels().size(), start_ch + static_cast<size_t>(visible_channels) + 1);
 
         for (size_t ch_idx = start_ch; ch_idx < end_ch; ++ch_idx) {
-            float ch_y = start_y + static_cast<float>(ch_idx - start_ch) * row_h;
-            int ch_top = static_cast<int>(ch_y);
-            int ch_bot = static_cast<int>(ch_y + step_h_f);
+            int ch_y = start_y + static_cast<int>((ch_idx - start_ch) * row_h);
+            int ch_top = ch_y;
+            int ch_bot = ch_y + step_h_i;
 
             if (ch_idx < proj.tracks().size() && y >= ch_top && y <= ch_bot && x >= start_x && x <= start_x + total_seq_w) {
                 auto& track = proj.tracks()[ch_idx];
@@ -4267,66 +5111,83 @@ private:
         }
     }
 
+    void handle_channel_rack_right_click(int x, int y) {
+        handle_channel_rack_right_click(win_playlist_, x, y);
+    }
+
     void on_passive_mouse_move(int x, int y) {
+        int prev_hover_close = hover_close_win_id_;
+        hover_close_win_id_ = -1;
+
         // 1. Header Bar buttons hover indicator & contextual hints
         if (y >= 8 && y <= 40) {
-            if (x >= 88 && x <= 198) {
+            if (x >= 200 && x <= 310) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 std::string cur_name = engine_.session().project().name();
                 if (cur_name.empty()) cur_name = "Untitled Project";
                 status_message_ = "Project: " + cur_name;
                 return;
             }
-            if (x >= 204 && x <= 234) {
+            if (x >= 316 && x <= 346) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 std::string u_lbl = engine_.session().undo_stack().last_undo_label();
                 status_message_ = engine_.session().undo_stack().can_undo() ? ("Undo: " + u_lbl + " (Ctrl+Z)") : "Undo (Ctrl+Z) - Nothing to undo";
                 return;
             }
-            if (x >= 238 && x <= 268) {
+            if (x >= 350 && x <= 380) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 std::string r_lbl = engine_.session().undo_stack().last_redo_label();
                 status_message_ = engine_.session().undo_stack().can_redo() ? ("Redo: " + r_lbl + " (Ctrl+Y)") : "Redo (Ctrl+Y) - Nothing to redo";
                 return;
             }
-            if (x >= 276 && x <= 312) {
+            if (x >= 388 && x <= 424) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = "Start Audio Playback (Space)";
                 return;
             }
-            if (x >= 316 && x <= 352) {
+            if (x >= 428 && x <= 464) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = "Pause Audio Playback (Space)";
                 return;
             }
-            if (x >= 356 && x <= 392) {
+            if (x >= 468 && x <= 504) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = "Stop Audio Playback & Reset Playhead (Esc)";
                 return;
             }
-            if (x >= 400 && x <= 424) {
+            if (x >= 512 && x <= 536) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = "Decrease Project Tempo (-1 BPM)";
                 return;
             }
-            if (x >= 512 && x <= 536) {
+            if (x >= 624 && x <= 648) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 status_message_ = "Increase Project Tempo (+1 BPM)";
                 return;
             }
-            if (x >= 684 && x <= 722) {
+            if (x >= 796 && x <= 832) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                status_message_ = "Switch to Playlist Arrangement (F6)";
+                status_message_ = "Toggle / Focus Playlist Window (F6)";
                 return;
             }
-            if (x >= 726 && x <= 764) {
+            if (x >= 836 && x <= 872) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                status_message_ = "Switch to Piano Roll Editor (F7)";
+                status_message_ = "Toggle / Focus Piano Roll Window (F7)";
                 return;
             }
-            if (x >= 768 && x <= 806) {
+            if (x >= 876 && x <= 912) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                status_message_ = inspector_open_ ? "Collapse Inspector / Track FX Panel (F8 / Ctrl+I)" : "Open Inspector / Track FX Panel (F8 / Ctrl+I)";
+                status_message_ = "Toggle / Focus Mixer Window (F9)";
+                return;
+            }
+            if (x >= 916 && x <= 952) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                status_message_ = "Toggle / Focus Inspector / Track FX Window (F8 / Ctrl+I)";
+                return;
+            }
+            if (x >= 956 && x <= 992) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                status_message_ = magnet_enabled_ ? "Disable Magnetic Snapping (Ctrl+M)" : "Enable Magnetic Snapping (Ctrl+M)";
                 return;
             }
             if (x >= client_w_ - 80 && x <= client_w_ - 45) {
@@ -4341,247 +5202,338 @@ private:
             }
         }
 
-        // 2. Right-Side Inspector Panel Hover
-        int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-        int insp_r = client_w_ - kLayoutMargin;
-        int insp_y = 58;
-        int insp_bot = client_h_ - 268;
-        if (inspector_open_ && x >= insp_x && x <= insp_r && y >= insp_y && y <= insp_bot) {
-            uint32_t tid = selected_mixer_track_;
-            auto* track = engine_.session().project().mixer_graph().get_track(tid);
-            // Close button [✕]
-            if (x >= insp_r - 28 && x <= insp_r - 8 && y >= insp_y + 9 && y <= insp_y + 29) {
+        // 2. Desktop Windowed Panels (Reverse Z-Order: Top-to-Bottom)
+        for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+            auto* win = get_window(*it);
+            if (!win || !win->visible) continue;
+            if (!win->contains(static_cast<float>(x), static_cast<float>(y))) continue;
+
+            // Close button hover [✕]
+            if (win->is_in_close_btn(static_cast<float>(x), static_cast<float>(y))) {
+                hover_close_win_id_ = static_cast<int>(win->id);
                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                status_message_ = "Close Inspector / Track FX Panel (F8 / Ctrl+I)";
-                return;
-            }
-            // Volume slider
-            if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 90 && y <= insp_y + 108) {
-                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                status_message_ = "Drag or Wheel to adjust Track Volume (Right-click resets to 0 dB)";
-                return;
-            }
-            // Pan slider
-            if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 112 && y <= insp_y + 130) {
-                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                status_message_ = "Drag or Wheel to adjust Track Panning (Right-click resets to Center)";
-                return;
-            }
-            // Mute & Solo buttons
-            int mid_w = (insp_r - 14) - (insp_x + 14);
-            int btn_w = (mid_w - 6) / 2;
-            if (y >= insp_y + 134 && y <= insp_y + 154) {
-                if (x >= insp_x + 14 && x <= insp_x + 14 + btn_w) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
-                    status_message_ = (track && track->muted()) ? "Unmute Track" : "Mute Track";
-                    return;
+                status_message_ = "Close " + win->title;
+                if (hover_close_win_id_ != prev_hover_close) {
+                    InvalidateRect(hwnd_, NULL, FALSE);
                 }
-                if (x >= insp_x + 14 + btn_w + 6 && x <= insp_r - 14) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
-                    status_message_ = (track && track->solo()) ? "Unsolo Track" : "Solo Track";
-                    return;
-                }
-            }
-            // FX items & Add button & Scrollbar
-            size_t num_fx = track ? track->inserts().size() : 0;
-            int slot_y_start = insp_y + 192;
-            int slot_h = 32;
-            int slot_gap = 4;
-            int fx_area_bot = insp_bot - 8;
-            int fx_avail_h = fx_area_bot - slot_y_start;
-            int vis_fx_items = std::max(1, fx_avail_h / (slot_h + slot_gap));
-            int total_fx_items = static_cast<int>(num_fx) + (num_fx < 10 ? 1 : 0);
-            int max_fx_scroll = std::max(0, total_fx_items - vis_fx_items);
-            int right_margin = (max_fx_scroll > 0) ? 14 : 8;
-
-            // Scrollbar hover
-            if (max_fx_scroll > 0 && total_fx_items > 0) {
-                if (x >= insp_r - 12 && x <= insp_r - 2 && y >= slot_y_start && y <= fx_area_bot) {
-                    SetCursor(LoadCursor(NULL, IDC_SIZENS));
-                    status_message_ = "Drag vertical scrollbar to view more FX inserts";
-                    return;
-                }
+                return;
             }
 
-            for (int i = inspector_scroll_slot_; i < static_cast<int>(num_fx); ++i) {
-                int sy = slot_y_start + (i - inspector_scroll_slot_) * (slot_h + slot_gap);
-                if (sy + slot_h > fx_area_bot) break;
-                if (x >= insp_x + 12 && x <= insp_x + 36 && y >= sy + 4 && y <= sy + slot_h - 4) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
-                    status_message_ = track->inserts()[i].enabled ? "Click to bypass effect" : "Click to enable effect";
-                    return;
+            // Resize Border Edges & Corners hover
+            auto edge = get_resize_edge(*win, static_cast<float>(x), static_cast<float>(y));
+            if (edge != ResizeEdge::None) {
+                switch (edge) {
+                    case ResizeEdge::Left:
+                    case ResizeEdge::Right:
+                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                        break;
+                    case ResizeEdge::Top:
+                    case ResizeEdge::Bottom:
+                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                        break;
+                    case ResizeEdge::TopLeft:
+                    case ResizeEdge::BottomRight:
+                        SetCursor(LoadCursor(NULL, IDC_SIZENWSE));
+                        break;
+                    case ResizeEdge::TopRight:
+                    case ResizeEdge::BottomLeft:
+                        SetCursor(LoadCursor(NULL, IDC_SIZENESW));
+                        break;
+                    default:
+                        break;
                 }
-                if (x >= insp_r - (right_margin + 80) && x <= insp_r - (right_margin + 26) && y >= sy + 5 && y <= sy + slot_h - 5) {
+                status_message_ = "Resize " + win->title + (magnet_enabled_ ? " (Magnet Snapping On)" : "");
+                return;
+            }
+
+            // Title Bar hover
+            if (win->is_in_title_bar(static_cast<float>(x), static_cast<float>(y))) {
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                status_message_ = "Click and drag to move " + win->title + (magnet_enabled_ ? " (Magnet Snapping On)" : "");
+                return;
+            }
+
+            // Content Area Hover inspection
+            if (win->id == WindowId::Inspector) {
+                int insp_x = static_cast<int>(win->x);
+                int insp_r = static_cast<int>(win->x + win->w);
+                int insp_y = static_cast<int>(win->y + DawWindow::kTitleBarHeight);
+                int insp_bot = static_cast<int>(win->y + win->h);
+                uint32_t tid = selected_mixer_track_;
+                auto* track = engine_.session().project().mixer_graph().get_track(tid);
+
+                if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 54 && y <= insp_y + 72) {
                     SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                    status_message_ = "Drag or Wheel to adjust Wet/Dry Mix (Right-click resets to 100%)";
+                    status_message_ = "Drag or Wheel to adjust Track Volume (Right-click resets to 0 dB)";
                     return;
                 }
-                if (x >= insp_r - (right_margin + 22) && x <= insp_r - (right_margin + 4) && y >= sy + 5 && y <= sy + slot_h - 5) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
-                    status_message_ = "Remove Insert Effect Slot";
+                if (x >= insp_x + 14 && x <= insp_r - 14 && y >= insp_y + 76 && y <= insp_y + 94) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    status_message_ = "Drag or Wheel to adjust Track Panning (Right-click resets to Center)";
                     return;
                 }
-                if (x >= insp_x + 40 && x <= insp_r - (right_margin + 84) && y >= sy + 2 && y <= sy + slot_h - 2) {
-                    SetCursor(LoadCursor(NULL, IDC_HAND));
-                    std::string name = track->inserts()[i].device ? track->inserts()[i].device->name() : "Effect";
-                    status_message_ = "Insert " + std::to_string(i + 1) + ": " + name;
-                    return;
-                }
-            }
-            if (num_fx < 10) {
-                int add_slot_idx = static_cast<int>(num_fx);
-                if (add_slot_idx >= inspector_scroll_slot_) {
-                    int add_btn_y = slot_y_start + (add_slot_idx - inspector_scroll_slot_) * (slot_h + slot_gap);
-                    if (add_btn_y + 30 <= fx_area_bot && add_btn_y >= slot_y_start) {
-                        if (x >= insp_x + 8 && x <= insp_r - right_margin && y >= add_btn_y + 2 && y <= add_btn_y + 30) {
-                            SetCursor(LoadCursor(NULL, IDC_HAND));
-                            status_message_ = "Add Insert Effect (EQ, Delay, Reverb, Compressor, Limiter)";
-                            return;
-                        }
+                int mid_w = (insp_r - 14) - (insp_x + 14);
+                int btn_w = (mid_w - 6) / 2;
+                if (y >= insp_y + 98 && y <= insp_y + 118) {
+                    if (x >= insp_x + 14 && x <= insp_x + 14 + btn_w) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        status_message_ = (track && track->muted()) ? "Unmute Track" : "Mute Track";
+                        return;
+                    }
+                    if (x >= insp_x + 14 + btn_w + 6 && x <= insp_r - 14) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        status_message_ = (track && track->solo()) ? "Unsolo Track" : "Solo Track";
+                        return;
                     }
                 }
-            }
-            SetCursor(LoadCursor(NULL, IDC_ARROW));
-            return;
-        }
-        if (view_mode_ == ViewMode::ChannelRack) {
-            float start_y = 124.0f;
-            float row_h = 48.0f;
-            float step_h_f = 42.0f;
-            float rack_avail_h = (float(client_h_ - 268) - 26.0f) - start_y;
-            int start_x = 265;
-            int bars_per_view = get_bars_per_view();
-            int total_seq_w = (get_effective_workspace_w() - 25) - start_x;
-            auto ppq = engine_.session().project().time_map().ppq();
-            auto bar_ticks = 4 * ppq;
-            domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
-            domain::Tick view_duration = bars_per_view * bar_ticks;
-            domain::Tick view_end_tick = view_start_tick + view_duration;
-            auto& proj = engine_.session().project();
+                size_t num_fx = track ? track->inserts().size() : 0;
+                int slot_y_start = insp_y + 156;
+                int slot_h = 32;
+                int slot_gap = 4;
+                int fx_area_bot = insp_bot - 8;
+                int fx_avail_h = fx_area_bot - slot_y_start;
+                int vis_fx_items = std::max(1, fx_avail_h / (slot_h + slot_gap));
+                int total_fx_items = static_cast<int>(num_fx) + (num_fx < 10 ? 1 : 0);
+                int max_fx_scroll = std::max(0, total_fx_items - vis_fx_items);
+                int right_margin = (max_fx_scroll > 0) ? 14 : 8;
 
-            int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
-            size_t start_ch = static_cast<size_t>(sequencer_scroll_track_);
-            size_t end_ch = std::min(proj.channels().size(), start_ch + static_cast<size_t>(visible_channels) + 1);
-
-            bool hovering_edge = false;
-            for (size_t ch_idx = start_ch; ch_idx < end_ch; ++ch_idx) {
-                float ch_y = start_y + static_cast<float>(ch_idx - start_ch) * row_h;
-                int ch_top = static_cast<int>(ch_y);
-                int ch_bot = static_cast<int>(ch_y + step_h_f);
-
-                if (ch_idx < proj.tracks().size() && y >= ch_top && y <= ch_bot && x >= start_x && x <= start_x + total_seq_w) {
-                    const auto& track = proj.tracks()[ch_idx];
-                    for (const auto& clip : track.clips()) {
-                        if (clip.end() <= view_start_tick || clip.start >= view_end_tick) continue;
-                        double norm_start = double(clip.start - view_start_tick) / double(view_duration);
-                        double norm_len = double(clip.length) / double(view_duration);
-                        int cx = start_x + static_cast<int>(norm_start * total_seq_w);
-                        int cw = std::max(16, static_cast<int>(norm_len * total_seq_w));
-
-                        if (x >= cx + cw - 8 && x <= cx + cw + 4) {
-                            hovering_edge = true;
-                            break;
-                        }
+                if (max_fx_scroll > 0 && total_fx_items > 0) {
+                    if (x >= insp_r - 12 && x <= insp_r - 2 && y >= slot_y_start && y <= fx_area_bot) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                        status_message_ = "Drag vertical scrollbar to view more FX inserts";
+                        return;
                     }
-                    break;
                 }
-            }
 
-            int rack_bottom = client_h_ - 268;
-            int scroll_y = rack_bottom - 22;
-            int scroll_h = 16;
-            is_hovering_seq_scrollbar_ = (x >= start_x && x <= start_x + total_seq_w && y >= scroll_y - 2 && y <= scroll_y + scroll_h + 2);
-
-            int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
-            is_hovering_seq_v_scrollbar_ = (max_ch_scroll > 0 && x >= 254 && x <= 264 && y >= start_y && y <= start_y + rack_avail_h);
-
-            if (is_hovering_seq_v_scrollbar_) {
-                SetCursor(LoadCursor(NULL, IDC_SIZENS));
-                return;
-            }
-
-            if (is_hovering_seq_scrollbar_) {
-                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                return;
-            }
-
-            if (is_hovering_clip_edge_ != hovering_edge) {
-                is_hovering_clip_edge_ = hovering_edge;
-                SetCursor(LoadCursor(NULL, hovering_edge ? IDC_SIZEWE : IDC_ARROW));
-            }
-        } else if (view_mode_ == ViewMode::PianoRoll) {
-            PianoRollLayout lay;
-            lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
-            auto ppq = engine_.session().project().time_map().ppq();
-            auto step_ticks = ppq / 4;
-
-            is_hovering_note_edge_ = false;
-            is_hovering_note_body_ = false;
-            is_hovering_piano_v_scrollbar_ = false;
-            is_hovering_piano_h_scrollbar_ = false;
-
-            // Check vertical scrollbar hover
-            if (float(x) >= lay.v_scroll_x && float(x) <= lay.v_scroll_x + lay.v_scroll_w &&
-                float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
-                is_hovering_piano_v_scrollbar_ = true;
-                SetCursor(LoadCursor(NULL, IDC_SIZENS));
-                return;
-            }
-
-            // Check horizontal scrollbar hover
-            if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
-                float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_y + lay.h_scroll_h) {
-                is_hovering_piano_h_scrollbar_ = true;
-                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                return;
-            }
-
-            // Check note body or resize edge hover
-            if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
-                float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
-                auto& proj = engine_.session().project();
-                auto* pat = proj.get_pattern(1);
-                if (pat) {
-                    auto* note_set = pat->get_channel_notes(piano_roll_channel_);
-                    if (note_set) {
-                        int min_vis_p = piano_roll_base_pitch_;
-                        int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
-                        domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
-                        domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
-
-                        for (const auto& n : note_set->notes()) {
-                            if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
-                            domain::Tick n_end = n.start + n.length;
-                            if (n_end <= view_start_tick || n.start >= view_end_tick) continue;
-
-                            int r = max_vis_p - n.pitch;
-                            float ny = lay.grid_top + r * lay.row_h;
-                            float rel_start = float(n.start - view_start_tick) / float(step_ticks);
-                            float rel_len = float(n.length) / float(step_ticks);
-                            float nx = lay.grid_x + rel_start * lay.step_w;
-                            float nw = std::max(6.0f, rel_len * lay.step_w);
-
-                            if (float(x) >= nx && float(x) <= nx + nw && float(y) >= ny && float(y) <= ny + lay.row_h) {
-                                if (float(x) >= nx + nw - 10.0f) {
-                                    is_hovering_note_edge_ = true;
-                                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
-                                } else {
-                                    is_hovering_note_body_ = true;
-                                    SetCursor(LoadCursor(NULL, IDC_SIZEALL));
-                                }
+                for (int i = inspector_scroll_slot_; i < static_cast<int>(num_fx); ++i) {
+                    int sy = slot_y_start + (i - inspector_scroll_slot_) * (slot_h + slot_gap);
+                    if (sy + slot_h > fx_area_bot) break;
+                    if (x >= insp_x + 12 && x <= insp_x + 36 && y >= sy + 4 && y <= sy + slot_h - 4) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        status_message_ = track->inserts()[i].enabled ? "Click to bypass effect" : "Click to enable effect";
+                        return;
+                    }
+                    if (x >= insp_r - (right_margin + 80) && x <= insp_r - (right_margin + 26) && y >= sy + 5 && y <= sy + slot_h - 5) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                        status_message_ = "Drag or Wheel to adjust Wet/Dry Mix (Right-click resets to 100%)";
+                        return;
+                    }
+                    if (x >= insp_r - (right_margin + 22) && x <= insp_r - (right_margin + 4) && y >= sy + 5 && y <= sy + slot_h - 5) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        status_message_ = "Remove Insert Effect Slot";
+                        return;
+                    }
+                    if (x >= insp_x + 40 && x <= insp_r - (right_margin + 84) && y >= sy + 2 && y <= sy + slot_h - 2) {
+                        SetCursor(LoadCursor(NULL, IDC_HAND));
+                        std::string name = track->inserts()[i].device ? track->inserts()[i].device->name() : "Effect";
+                        status_message_ = "Insert " + std::to_string(i + 1) + ": " + name;
+                        return;
+                    }
+                }
+                if (num_fx < 10) {
+                    int add_slot_idx = static_cast<int>(num_fx);
+                    if (add_slot_idx >= inspector_scroll_slot_) {
+                        int add_btn_y = slot_y_start + (add_slot_idx - inspector_scroll_slot_) * (slot_h + slot_gap);
+                        if (add_btn_y + 30 <= fx_area_bot && add_btn_y >= slot_y_start) {
+                            if (x >= insp_x + 8 && x <= insp_r - right_margin && y >= add_btn_y + 2 && y <= add_btn_y + 30) {
+                                SetCursor(LoadCursor(NULL, IDC_HAND));
+                                status_message_ = "Add Insert Effect (EQ, Delay, Reverb, Compressor, Limiter)";
                                 return;
                             }
                         }
                     }
                 }
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return;
             }
-            SetCursor(LoadCursor(NULL, IDC_ARROW));
+
+            if (win->id == WindowId::Playlist) {
+                int px = static_cast<int>(win->x);
+                int py = static_cast<int>(win->y + DawWindow::kTitleBarHeight);
+                int pw = static_cast<int>(win->w);
+                int ph = static_cast<int>(win->h - DawWindow::kTitleBarHeight);
+                int start_y = py + 62;
+                int row_h = 48;
+                int step_h_i = 42;
+                int rack_avail_h = (py + ph - 24) - start_y;
+                int start_x = px + 245;
+                int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+                int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
+                auto ppq = engine_.session().project().time_map().ppq();
+                auto bar_ticks = 4 * ppq;
+                domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
+                domain::Tick view_duration = bars_per_view * bar_ticks;
+                domain::Tick view_end_tick = view_start_tick + view_duration;
+                auto& proj = engine_.session().project();
+
+                int visible_channels = std::max(1, rack_avail_h / row_h);
+                size_t start_ch = static_cast<size_t>(sequencer_scroll_track_);
+                size_t end_ch = std::min(proj.channels().size(), start_ch + static_cast<size_t>(visible_channels) + 1);
+
+                bool hovering_edge = false;
+                for (size_t ch_idx = start_ch; ch_idx < end_ch; ++ch_idx) {
+                    int ch_y = start_y + static_cast<int>((ch_idx - start_ch) * row_h);
+                    int ch_top = ch_y;
+                    int ch_bot = ch_y + step_h_i;
+
+                    if (ch_idx < proj.tracks().size() && y >= ch_top && y <= ch_bot && x >= start_x && x <= start_x + total_seq_w) {
+                        const auto& track = proj.tracks()[ch_idx];
+                        for (const auto& clip : track.clips()) {
+                            if (clip.end() <= view_start_tick || clip.start >= view_end_tick) continue;
+                            double norm_start = double(clip.start - view_start_tick) / double(view_duration);
+                            double norm_len = double(clip.length) / double(view_duration);
+                            int cx = start_x + static_cast<int>(norm_start * total_seq_w);
+                            int cw = std::max(16, static_cast<int>(norm_len * total_seq_w));
+
+                            if (x >= cx + cw - 8 && x <= cx + cw + 4) {
+                                hovering_edge = true;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                int scroll_y = py + ph - 20;
+                int scroll_h = 14;
+                is_hovering_seq_scrollbar_ = (x >= start_x && x <= start_x + total_seq_w && y >= scroll_y - 2 && y <= scroll_y + scroll_h + 2);
+
+                int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
+                is_hovering_seq_v_scrollbar_ = (max_ch_scroll > 0 && x >= px + 238 && x <= px + 252 && y >= start_y && y <= start_y + rack_avail_h);
+
+                if (is_hovering_seq_v_scrollbar_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                    return;
+                }
+
+                if (is_hovering_seq_scrollbar_) {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    return;
+                }
+
+                if (is_hovering_clip_edge_ != hovering_edge) {
+                    is_hovering_clip_edge_ = hovering_edge;
+                }
+                SetCursor(LoadCursor(NULL, hovering_edge ? IDC_SIZEWE : IDC_ARROW));
+                return;
+            }
+
+            if (win->id == WindowId::PianoRoll) {
+                PianoRollLayout lay;
+                lay.init(*win, PianoRollNumPitches, piano_roll_steps_);
+                auto ppq = engine_.session().project().time_map().ppq();
+                auto step_ticks = ppq / 4;
+
+                is_hovering_note_edge_ = false;
+                is_hovering_note_body_ = false;
+                is_hovering_piano_v_scrollbar_ = false;
+                is_hovering_piano_h_scrollbar_ = false;
+
+                if (float(x) >= lay.v_scroll_x && float(x) <= lay.v_scroll_x + lay.v_scroll_w &&
+                    float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+                    is_hovering_piano_v_scrollbar_ = true;
+                    SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                    return;
+                }
+
+                if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+                    float(y) >= lay.h_scroll_y && float(y) <= lay.h_scroll_y + lay.h_scroll_h) {
+                    is_hovering_piano_h_scrollbar_ = true;
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    return;
+                }
+
+                if (float(x) >= lay.grid_x && float(x) <= lay.grid_x + lay.grid_w &&
+                    float(y) >= lay.grid_top && float(y) <= lay.grid_bottom) {
+                    auto& proj = engine_.session().project();
+                    auto* pat = proj.get_pattern(1);
+                    if (pat) {
+                        auto* note_set = pat->get_channel_notes(piano_roll_channel_);
+                        if (note_set) {
+                            int min_vis_p = piano_roll_base_pitch_;
+                            int max_vis_p = piano_roll_base_pitch_ + PianoRollNumPitches - 1;
+                            domain::Tick view_start_tick = piano_roll_scroll_step_ * step_ticks;
+                            domain::Tick view_end_tick = (piano_roll_scroll_step_ + piano_roll_steps_) * step_ticks;
+
+                            for (const auto& n : note_set->notes()) {
+                                if (n.pitch < min_vis_p || n.pitch > max_vis_p) continue;
+                                domain::Tick n_end = n.start + n.length;
+                                if (n_end <= view_start_tick || n.start >= view_end_tick) continue;
+
+                                int r = max_vis_p - n.pitch;
+                                float ny = lay.grid_top + r * lay.row_h;
+                                float rel_start = float(n.start - view_start_tick) / float(step_ticks);
+                                float rel_len = float(n.length) / float(step_ticks);
+                                float nx = lay.grid_x + rel_start * lay.step_w;
+                                float nw = std::max(6.0f, rel_len * lay.step_w);
+
+                                if (float(x) >= nx && float(x) <= nx + nw && float(y) >= ny && float(y) <= ny + lay.row_h) {
+                                    if (float(x) >= nx + nw - 10.0f) {
+                                        is_hovering_note_edge_ = true;
+                                        SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                                    } else {
+                                        is_hovering_note_body_ = true;
+                                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return;
+            }
+
+            if (win->id == WindowId::Mixer) {
+                float mx = win->x;
+                float my = win->y + DawWindow::kTitleBarHeight;
+                float mw = win->w;
+                float mh = win->h - DawWindow::kTitleBarHeight;
+                float track_w = 96.0f;
+                float gap = 10.0f;
+                float ty = my + 30.0f;
+                float strip_h = std::max(120.0f, mh - 36.0f);
+                float master_x = mx + 12.0f;
+                float insert_start_x = master_x + track_w + gap;
+                float avail_w = (mx + mw - 12.0f) - insert_start_x;
+                int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
+
+                auto check_strip_hover = [&](int tid, float tx) -> bool {
+                    float fader_bot = ty + strip_h - 52.0f;
+                    if (x < tx || x > tx + track_w || y < ty || y > ty + strip_h) return false;
+                    if (x >= tx + 28.0f && x <= tx + 92.0f && y >= ty + 44.0f && y <= fader_bot + 2.0f) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                        status_message_ = (tid == 0 ? "Master" : "Track " + std::to_string(tid)) + " Volume (Drag to adjust)";
+                        return true;
+                    }
+                    if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= fader_bot + 2.0f && y <= ty + strip_h - 2.0f) {
+                        SetCursor(LoadCursor(NULL, IDC_SIZENS));
+                        status_message_ = (tid == 0 ? "Master" : "Track " + std::to_string(tid)) + " Pan (Drag to adjust)";
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (check_strip_hover(0, master_x)) return;
+                for (int s = 0; s < vis_inserts; ++s) {
+                    int tid = 1 + mixer_scroll_track_ + s;
+                    float tx = insert_start_x + s * (track_w + gap);
+                    if (check_strip_hover(tid, tx)) return;
+                }
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return;
+            }
         }
+        if (hover_close_win_id_ != prev_hover_close) {
+            InvalidateRect(hwnd_, NULL, FALSE);
+        }
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
     }
 
-    void handle_piano_roll_right_click(int x, int y) {
+    void handle_piano_roll_right_click(const DawWindow& win, int x, int y) {
         PianoRollLayout lay;
-        lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+        lay.init(win, PianoRollNumPitches, piano_roll_steps_);
         auto ppq = engine_.session().project().time_map().ppq();
         auto step_ticks = ppq / 4;
 
@@ -4618,28 +5570,63 @@ private:
         }
     }
 
+    void handle_piano_roll_right_click(int x, int y) {
+        handle_piano_roll_right_click(win_pianoroll_, x, y);
+    }
+
     void on_right_click(int x, int y) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-        if (y >= client_h_ - 262 && y <= client_h_ - 30) {
-            handle_mixer_right_click(x, y);
+        // Reverse Z-order dispatch: Topmost window under cursor receives the right-click
+        for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
+            auto* win = get_window(*it);
+            if (!win || !win->visible) continue;
+            if (!win->contains(static_cast<float>(x), static_cast<float>(y))) continue;
+
+            bring_to_front(*it);
+            switch (win->id) {
+                case WindowId::Playlist:
+                    handle_channel_rack_right_click(*win, x, y);
+                    return;
+                case WindowId::PianoRoll:
+                    handle_piano_roll_right_click(*win, x, y);
+                    return;
+                case WindowId::Mixer:
+                    handle_mixer_right_click(*win, x, y);
+                    return;
+                case WindowId::Inspector:
+                    handle_inspector_right_click(*win, x, y);
+                    return;
+            }
             return;
-        }
-        if (inspector_open_ && x >= client_w_ - (kInspectorWidth + kLayoutMargin) && x <= client_w_ - kLayoutMargin && y >= 58 && y <= client_h_ - 268) {
-            handle_inspector_right_click(x, y);
-            return;
-        }
-        if (view_mode_ == ViewMode::ChannelRack) {
-            handle_channel_rack_right_click(x, y);
-        } else {
-            handle_piano_roll_right_click(x, y);
         }
     }
 
     void on_mouse_move(int x, int y) {
+        if (is_dragging_window_) {
+            auto* win = get_window(dragging_window_id_);
+            if (!win) return;
+            float dx = static_cast<float>(x - drag_win_start_mouse_x_);
+            float dy = static_cast<float>(y - drag_win_start_mouse_y_);
+            if (window_drag_mode_ == WindowDragMode::Move) {
+                float new_x = drag_win_orig_x_ + dx;
+                float new_y = drag_win_orig_y_ + dy;
+                apply_magnet_snapping(new_x, new_y, win->w, win->h, win->id);
+                float ws_l = 8.0f;
+                float ws_t = 52.0f;
+                float ws_r = static_cast<float>(client_w_ - 8);
+                float ws_b = static_cast<float>(client_h_ - 30);
+                win->x = std::clamp(new_x, ws_l, std::max(ws_l, ws_r - win->w));
+                win->y = std::clamp(new_y, ws_t, std::max(ws_t, ws_b - win->h));
+            } else if (window_drag_mode_ == WindowDragMode::Resize) {
+                apply_resize_dragging(*win, dx, dy);
+            }
+            return;
+        }
+
         if (dragging_inspector_vol_) {
             std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-            int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-            int insp_r = client_w_ - kLayoutMargin;
+            int insp_x = static_cast<int>(win_inspector_.x);
+            int insp_r = static_cast<int>(win_inspector_.x + win_inspector_.w);
             float norm = float(x - (insp_x + 14)) / float((insp_r - 14) - (insp_x + 14));
             norm = std::clamp(norm, 0.0f, 1.0f);
             auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
@@ -4654,8 +5641,8 @@ private:
 
         if (dragging_inspector_pan_) {
             std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-            int insp_x = client_w_ - (kInspectorWidth + kLayoutMargin);
-            int insp_r = client_w_ - kLayoutMargin;
+            int insp_x = static_cast<int>(win_inspector_.x);
+            int insp_r = static_cast<int>(win_inspector_.x + win_inspector_.w);
             float norm = float(x - (insp_x + 14)) / float((insp_r - 14) - (insp_x + 14));
             float new_pan = std::clamp(norm * 2.0f - 1.0f, -1.0f, 1.0f);
             auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
@@ -4671,9 +5658,9 @@ private:
         }
 
         if (dragging_inspector_scrollbar_) {
-            int insp_y = 58;
-            int insp_bot = client_h_ - 268;
-            float slot_y_start = static_cast<float>(insp_y + 192);
+            int insp_y = static_cast<int>(win_inspector_.y + DawWindow::kTitleBarHeight);
+            int insp_bot = static_cast<int>(win_inspector_.y + win_inspector_.h);
+            float slot_y_start = static_cast<float>(insp_y + 156);
             float fx_area_bot = static_cast<float>(insp_bot - 8);
             float sb_h = fx_area_bot - slot_y_start;
             auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
@@ -4697,23 +5684,11 @@ private:
 
         if (dragging_inspector_wet_slot_ >= 0) {
             std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
-            int insp_y = 58;
-            int insp_bot = client_h_ - 268;
-            int slot_y_start = insp_y + 192;
-            int slot_h = 32;
-            int slot_gap = 4;
-            int fx_area_bot = insp_bot - 8;
-            int fx_avail_h = fx_area_bot - slot_y_start;
-            int vis_fx_items = std::max(1, fx_avail_h / (slot_h + slot_gap));
-            auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
-            size_t num_fx = track ? track->inserts().size() : 0;
-            int total_fx_items = static_cast<int>(num_fx) + (num_fx < 10 ? 1 : 0);
-            int max_fx_scroll = std::max(0, total_fx_items - vis_fx_items);
-            int right_margin = (max_fx_scroll > 0) ? 14 : 8;
-
-            int insp_r = client_w_ - kLayoutMargin;
+            int insp_r = static_cast<int>(win_inspector_.x + win_inspector_.w);
+            int right_margin = 8;
             float norm = float(x - (insp_r - (right_margin + 80))) / 54.0f;
             norm = std::clamp(norm, 0.0f, 1.0f);
+            auto* track = engine_.session().project().mixer_graph().get_track(selected_mixer_track_);
             if (track && static_cast<size_t>(dragging_inspector_wet_slot_) < track->inserts().size()) {
                 track->inserts()[dragging_inspector_wet_slot_].wet_mix = norm;
                 int pct = static_cast<int>(std::round(norm * 100.0f));
@@ -4723,12 +5698,13 @@ private:
             }
             return;
         }
+
         if (dragging_seq_v_scrollbar_) {
-            float start_y = 124.0f;
-            float row_h = 48.0f;
-            float rack_avail_h = (float(client_h_ - 268) - 26.0f) - start_y;
+            int py = static_cast<int>(win_playlist_.y + DawWindow::kTitleBarHeight);
+            int ph = static_cast<int>(win_playlist_.h - DawWindow::kTitleBarHeight);
+            float rack_avail_h = float((py + ph - 24) - (py + 62));
             auto& proj = engine_.session().project();
-            int visible_channels = std::max(1, static_cast<int>(rack_avail_h / row_h));
+            int visible_channels = std::max(1, static_cast<int>(rack_avail_h / 48.0f));
             int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels + 1);
 
             if (max_ch_scroll > 0) {
@@ -4748,10 +5724,12 @@ private:
 
         if (dragging_seq_scrollbar_) {
             int max_bars = get_max_sequencer_bars();
-            int bars_per_view = get_bars_per_view();
+            int px = static_cast<int>(win_playlist_.x);
+            int pw = static_cast<int>(win_playlist_.w);
+            int start_x = px + 245;
+            int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+            int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
             float max_scroll = std::max(1.0f, float(max_bars - bars_per_view));
-            int start_x = 265;
-            int total_seq_w = (get_effective_workspace_w() - 25) - start_x;
             float thumb_w = std::max(35.0f, (float(bars_per_view) / float(max_bars)) * float(total_seq_w));
             float available_w = float(total_seq_w) - thumb_w;
 
@@ -4769,7 +5747,7 @@ private:
 
         if (dragging_piano_v_scrollbar_) {
             PianoRollLayout lay;
-            lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+            lay.init(win_pianoroll_, PianoRollNumPitches, piano_roll_steps_);
             int max_base_pitch = 128 - PianoRollNumPitches;
             float thumb_h = std::max(28.0f, (float(PianoRollNumPitches) / 128.0f) * lay.grid_h);
             float avail_h = lay.grid_h - thumb_h;
@@ -4789,7 +5767,7 @@ private:
 
         if (dragging_piano_h_scrollbar_) {
             PianoRollLayout lay;
-            lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+            lay.init(win_pianoroll_, PianoRollNumPitches, piano_roll_steps_);
             int max_steps = get_max_piano_roll_steps();
             int max_scroll_step = std::max(0, max_steps - piano_roll_steps_);
             float thumb_w = std::max(35.0f, (float(piano_roll_steps_) / float(max_steps)) * lay.grid_w);
@@ -4814,8 +5792,11 @@ private:
                     auto& clip = track.clips_mut()[drag_clip_idx_];
                     auto ppq = engine_.session().project().time_map().ppq();
                     auto bar_ticks = 4 * ppq;
-                    int bars_per_view = get_bars_per_view();
-                    int total_seq_w = (get_effective_workspace_w() - 25) - 265;
+                    int px = static_cast<int>(win_playlist_.x);
+                    int pw = static_cast<int>(win_playlist_.w);
+                    int start_x = px + 245;
+                    int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+                    int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
                     domain::Tick view_duration = bars_per_view * bar_ticks;
 
                     int dx = x - drag_clip_start_mouse_x_;
@@ -4846,8 +5827,11 @@ private:
                     auto& clip = track.clips_mut()[drag_clip_idx_];
                     auto ppq = engine_.session().project().time_map().ppq();
                     auto bar_ticks = 4 * ppq;
-                    int bars_per_view = get_bars_per_view();
-                    int total_seq_w = (get_effective_workspace_w() - 25) - 265;
+                    int px = static_cast<int>(win_playlist_.x);
+                    int pw = static_cast<int>(win_playlist_.w);
+                    int start_x = px + 245;
+                    int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+                    int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
                     domain::Tick view_duration = bars_per_view * bar_ticks;
 
                     int dx = x - drag_clip_start_mouse_x_;
@@ -4874,7 +5858,7 @@ private:
 
         if (note_drag_mode_ == NoteDragMode::Resize) {
             PianoRollLayout lay;
-            lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+            lay.init(win_pianoroll_, PianoRollNumPitches, piano_roll_steps_);
             auto ppq = engine_.session().project().time_map().ppq();
             auto step_ticks = ppq / 4;
 
@@ -4898,7 +5882,7 @@ private:
 
         if (note_drag_mode_ == NoteDragMode::Move) {
             PianoRollLayout lay;
-            lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
+            lay.init(win_pianoroll_, PianoRollNumPitches, piano_roll_steps_);
             auto ppq = engine_.session().project().time_map().ppq();
             auto step_ticks = ppq / 4;
 
@@ -4936,9 +5920,19 @@ private:
             auto bar_ticks = 4 * ppq;
             auto step_ticks = ppq / 4;
 
-            if (view_mode_ == ViewMode::ChannelRack) {
-                int bars_per_view = get_bars_per_view();
-                int total_seq_w = (get_effective_workspace_w() - 25) - 265;
+            if (active_window_ == WindowId::PianoRoll || view_mode_ == ViewMode::PianoRoll) {
+                PianoRollLayout lay;
+                lay.init(win_pianoroll_, PianoRollNumPitches, piano_roll_steps_);
+                int rel_s = std::clamp(static_cast<int>((float(x) - lay.grid_x) / lay.step_w), 0, piano_roll_steps_ - 1);
+                int abs_s = piano_roll_scroll_step_ + rel_s;
+                song_position_marker_ = abs_s * step_ticks;
+                status_message_ = "SPM dragged to Step " + std::to_string(abs_s + 1);
+            } else {
+                int px = static_cast<int>(win_playlist_.x);
+                int pw = static_cast<int>(win_playlist_.w);
+                int start_x = px + 245;
+                int total_seq_w = std::max(60, (px + pw - 12) - start_x);
+                int bars_per_view = (total_seq_w > 900) ? 16 : ((total_seq_w > 550) ? 12 : 8);
                 domain::Tick view_duration = bars_per_view * bar_ticks;
                 domain::Tick view_start_tick = sequencer_scroll_bar_ * bar_ticks;
 
@@ -4950,13 +5944,6 @@ private:
                 int b_num = static_cast<int>(song_position_marker_ / bar_ticks) + 1;
                 int bt_num = static_cast<int>((song_position_marker_ % bar_ticks) / beat_ticks) + 1;
                 status_message_ = "SPM dragged to Bar " + std::to_string(b_num) + " Beat " + std::to_string(bt_num);
-            } else {
-                PianoRollLayout lay;
-                lay.init(get_effective_workspace_w(), client_h_, PianoRollNumPitches, piano_roll_steps_);
-                int rel_s = std::clamp(static_cast<int>((float(x) - lay.grid_x) / lay.step_w), 0, piano_roll_steps_ - 1);
-                int abs_s = piano_roll_scroll_step_ + rel_s;
-                song_position_marker_ = abs_s * step_ticks;
-                status_message_ = "SPM dragged to Step " + std::to_string(abs_s + 1);
             }
 
             engine_.transport().seek(song_position_marker_);
@@ -4986,16 +5973,22 @@ private:
         }
 
         if (dragging_mixer_track_ >= 0) {
+            float mx = win_mixer_.x;
+            float my = win_mixer_.y + DawWindow::kTitleBarHeight;
+            float mh = win_mixer_.h - DawWindow::kTitleBarHeight;
             float track_w = 96.0f;
-            float gap = 12.0f;
-            float ty = static_cast<float>(client_h_ - 234);
-            float insert_start_x = 25.0f + track_w + gap;
+            float gap = 10.0f;
+            float ty = my + 30.0f;
+            float strip_h = std::max(120.0f, mh - 36.0f);
+            float master_x = mx + 12.0f;
+            float insert_start_x = master_x + track_w + gap;
             float tx = (dragging_mixer_track_ == 0)
-                ? 25.0f
+                ? master_x
                 : (insert_start_x + static_cast<float>(dragging_mixer_track_ - 1 - mixer_scroll_track_) * (track_w + gap));
 
+            float fader_bot = ty + strip_h - 52.0f;
             RECT fader_rc{static_cast<int>(tx + 33.0f), static_cast<int>(ty + 46.0f),
-                          static_cast<int>(tx + 88.0f), static_cast<int>(ty + 144.0f)};
+                          static_cast<int>(tx + 88.0f), static_cast<int>(fader_bot)};
             update_mixer_volume_from_mouse(dragging_mixer_track_, y, fader_rc);
             return;
         }
@@ -5152,6 +6145,7 @@ private:
         std::string filename = engine_.session().project().name() + ".odp";
         auto res = engine_.session().save_project(filename);
         if (res.is_ok()) {
+            update_window_title();
             status_message_ = "Project successfully saved to: " + filename;
         } else {
             status_message_ = "Save failed: " + std::string(res.error().message());

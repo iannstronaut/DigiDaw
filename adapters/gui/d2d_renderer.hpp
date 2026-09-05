@@ -1,5 +1,6 @@
 #pragma once
 
+#include "theme.hpp"
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -54,8 +55,8 @@ struct D2DTheme {
     D2D1_COLOR_F accent_deep   {0.4863f, 0.2275f, 0.9294f, 1.0f}; // #7c3aed
 
     // Compatibility accent aliases
-    D2D1_COLOR_F accent_orange {0.6588f, 0.3333f, 0.9686f, 1.0f}; // mapped to signature violet
-    D2D1_COLOR_F accent_cyan   {0.7176f, 0.4000f, 1.0000f, 1.0f}; // mapped to bright violet
+    D2D1_COLOR_F accent_orange {0.6588f, 0.3333f, 0.9686f, 1.0f}; // signature violet
+    D2D1_COLOR_F accent_cyan   {0.7176f, 0.4000f, 1.0000f, 1.0f}; // bright violet
     D2D1_COLOR_F accent_amber  {0.9020f, 0.7216f, 0.2902f, 1.0f}; // #e6b84a (warning)
     D2D1_COLOR_F accent_lime   {0.6588f, 0.3333f, 0.9686f, 1.0f}; // signature violet playhead
     D2D1_COLOR_F accent_green  {0.4824f, 0.8902f, 0.4157f, 1.0f}; // #7be36a (success)
@@ -152,6 +153,7 @@ public:
         std::wstring wtext = to_wide(text);
         format->SetTextAlignment(align_h);
         format->SetParagraphAlignment(align_v);
+        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
         // Snap text layout bounds to physical pixel coordinates to eliminate fractional stem blur
         D2D1_RECT_F snapped_rc = D2D1::RectF(
@@ -182,6 +184,235 @@ public:
 
         draw_rounded_box(rt, rc, bg, border, radius);
         draw_text(rt, format, text, rc, txt_col, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+
+    // 3b. High-Precision Vector SVG Icon Renderer (Direct2D hardware-accelerated paths)
+    static void draw_svg_icon(ID2D1RenderTarget* rt, SvgIconType icon,
+                              const D2D1_RECT_F& rc, D2D1_COLOR_F color, float size = 16.0f) {
+        if (!rt) return;
+
+        float cx = (rc.left + rc.right) * 0.5f;
+        float cy = (rc.top + rc.bottom) * 0.5f;
+        float s = size / 24.0f;
+        float ox = cx - 12.0f * s;
+        float oy = cy - 12.0f * s;
+
+        auto P = [&](float x, float y) -> D2D1_POINT_2F {
+            return D2D1::Point2F(ox + x * s, oy + y * s);
+        };
+        auto R = [&](float x, float y, float w, float h) -> D2D1_RECT_F {
+            return D2D1::RectF(ox + x * s, oy + y * s, ox + (x + w) * s, oy + (y + h) * s);
+        };
+
+        ID2D1SolidColorBrush* br = nullptr;
+        rt->CreateSolidColorBrush(color, &br);
+        if (!br) return;
+
+        ID2D1Factory* factory = nullptr;
+        rt->GetFactory(&factory);
+
+        switch (icon) {
+        case SvgIconType::Play: {
+            if (factory) {
+                ID2D1PathGeometry* path = nullptr;
+                if (SUCCEEDED(factory->CreatePathGeometry(&path))) {
+                    ID2D1GeometrySink* sink = nullptr;
+                    if (SUCCEEDED(path->Open(&sink))) {
+                        sink->BeginFigure(P(7.0f, 4.5f), D2D1_FIGURE_BEGIN_FILLED);
+                        sink->AddLine(P(19.5f, 12.0f));
+                        sink->AddLine(P(7.0f, 19.5f));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        sink->Close();
+                        sink->Release();
+                        rt->FillGeometry(path, br);
+                    }
+                    path->Release();
+                }
+            }
+            break;
+        }
+        case SvgIconType::Pause: {
+            D2D1_ROUNDED_RECT bar1 = D2D1::RoundedRect(R(6.0f, 4.0f, 4.0f, 16.0f), 1.5f * s, 1.5f * s);
+            D2D1_ROUNDED_RECT bar2 = D2D1::RoundedRect(R(14.0f, 4.0f, 4.0f, 16.0f), 1.5f * s, 1.5f * s);
+            rt->FillRoundedRectangle(bar1, br);
+            rt->FillRoundedRectangle(bar2, br);
+            break;
+        }
+        case SvgIconType::Stop: {
+            D2D1_ROUNDED_RECT sq = D2D1::RoundedRect(R(4.5f, 4.5f, 15.0f, 15.0f), 2.5f * s, 2.5f * s);
+            rt->FillRoundedRectangle(sq, br);
+            break;
+        }
+        case SvgIconType::Playlist: {
+            ID2D1SolidColorBrush* br_dim = nullptr;
+            D2D1_COLOR_F dim_col = color;
+            dim_col.a *= 0.35f;
+            rt->CreateSolidColorBrush(dim_col, &br_dim);
+            if (br_dim) {
+                rt->DrawLine(P(3.0f, 5.5f), P(21.0f, 5.5f), br_dim, 1.0f * s);
+                rt->DrawLine(P(3.0f, 12.0f), P(21.0f, 12.0f), br_dim, 1.0f * s);
+                rt->DrawLine(P(3.0f, 18.5f), P(21.0f, 18.5f), br_dim, 1.0f * s);
+                br_dim->Release();
+            }
+            D2D1_ROUNDED_RECT r1 = D2D1::RoundedRect(R(4.0f, 3.5f, 8.0f, 4.0f), 1.2f * s, 1.2f * s);
+            D2D1_ROUNDED_RECT r2 = D2D1::RoundedRect(R(9.0f, 10.0f, 11.0f, 4.0f), 1.2f * s, 1.2f * s);
+            D2D1_ROUNDED_RECT r3 = D2D1::RoundedRect(R(4.0f, 16.5f, 9.0f, 4.0f), 1.2f * s, 1.2f * s);
+            rt->FillRoundedRectangle(r1, br);
+            rt->FillRoundedRectangle(r2, br);
+            rt->FillRoundedRectangle(r3, br);
+            break;
+        }
+        case SvgIconType::PianoRoll: {
+            D2D1_ROUNDED_RECT outer = D2D1::RoundedRect(R(3.0f, 3.0f, 18.0f, 18.0f), 2.0f * s, 2.0f * s);
+            rt->DrawRoundedRectangle(outer, br, 1.3f * s);
+
+            rt->DrawLine(P(8.5f, 3.0f), P(8.5f, 21.0f), br, 1.2f * s);
+            rt->DrawLine(P(3.0f, 9.0f), P(8.5f, 9.0f), br, 1.0f * s);
+            rt->DrawLine(P(3.0f, 15.0f), P(8.5f, 15.0f), br, 1.0f * s);
+
+            // Black keys
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(5.5f, 5.5f, 3.0f, 2.5f), 0.5f * s, 0.5f * s), br);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(5.5f, 12.0f, 3.0f, 2.5f), 0.5f * s, 0.5f * s), br);
+
+            // Note bars
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(11.0f, 5.5f, 5.5f, 2.5f), 0.75f * s, 0.75f * s), br);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(14.0f, 9.5f, 5.0f, 2.5f), 0.75f * s, 0.75f * s), br);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(11.5f, 13.5f, 6.0f, 2.5f), 0.75f * s, 0.75f * s), br);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(13.0f, 17.0f, 4.5f, 2.5f), 0.75f * s, 0.75f * s), br);
+            break;
+        }
+        case SvgIconType::Inspector: {
+            D2D1_ROUNDED_RECT outer = D2D1::RoundedRect(R(3.0f, 3.0f, 18.0f, 18.0f), 2.0f * s, 2.0f * s);
+            rt->DrawRoundedRectangle(outer, br, 1.3f * s);
+
+            // Right inspector sidebar divider
+            rt->DrawLine(P(14.0f, 3.0f), P(14.0f, 21.0f), br, 1.2f * s);
+
+            // Left track lines (semi-transparent preview)
+            ID2D1SolidColorBrush* br_dim = nullptr;
+            D2D1_COLOR_F dim_col = color;
+            dim_col.a *= 0.4f;
+            rt->CreateSolidColorBrush(dim_col, &br_dim);
+            if (br_dim) {
+                rt->DrawLine(P(5.5f, 7.5f), P(11.5f, 7.5f), br_dim, 1.0f * s);
+                rt->DrawLine(P(5.5f, 12.0f), P(11.5f, 12.0f), br_dim, 1.0f * s);
+                rt->DrawLine(P(5.5f, 16.5f), P(11.5f, 16.5f), br_dim, 1.0f * s);
+                br_dim->Release();
+            }
+
+            // Right inspector fader line & thumb
+            rt->DrawLine(P(17.5f, 6.0f), P(17.5f, 18.0f), br, 1.4f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(15.5f, 9.5f, 4.0f, 3.0f), 0.75f * s, 0.75f * s), br);
+            break;
+        }
+        case SvgIconType::TrackFx: {
+            // Channel 1 Fader
+            rt->DrawLine(P(6.0f, 4.0f), P(6.0f, 20.0f), br, 1.4f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(4.0f, 7.0f, 4.0f, 3.0f), 0.75f * s, 0.75f * s), br);
+
+            // Channel 2 Fader
+            rt->DrawLine(P(12.0f, 4.0f), P(12.0f, 20.0f), br, 1.4f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(10.0f, 14.0f, 4.0f, 3.0f), 0.75f * s, 0.75f * s), br);
+
+            // Channel 3 Fader
+            rt->DrawLine(P(18.0f, 4.0f), P(18.0f, 20.0f), br, 1.4f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(16.0f, 9.0f, 4.0f, 3.0f), 0.75f * s, 0.75f * s), br);
+            break;
+        }
+        case SvgIconType::Mixer: {
+            // Track 1
+            rt->DrawLine(P(5.0f, 3.0f), P(5.0f, 21.0f), br, 1.2f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(3.0f, 11.0f, 4.0f, 5.0f), 1.0f * s, 1.0f * s), br);
+
+            // Track 2
+            rt->DrawLine(P(12.0f, 3.0f), P(12.0f, 21.0f), br, 1.2f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(10.0f, 6.0f, 4.0f, 5.0f), 1.0f * s, 1.0f * s), br);
+
+            // Track 3 (Master)
+            rt->DrawLine(P(19.0f, 3.0f), P(19.0f, 21.0f), br, 1.2f * s);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(R(17.0f, 14.0f, 4.0f, 5.0f), 1.0f * s, 1.0f * s), br);
+            break;
+        }
+        case SvgIconType::Magnet: {
+            if (factory) {
+                ID2D1PathGeometry* path = nullptr;
+                if (SUCCEEDED(factory->CreatePathGeometry(&path))) {
+                    ID2D1GeometrySink* sink = nullptr;
+                    if (SUCCEEDED(path->Open(&sink))) {
+                        sink->BeginFigure(P(4.0f, 11.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddLine(P(4.0f, 5.0f));
+                        sink->AddLine(P(8.0f, 5.0f));
+                        sink->AddLine(P(8.0f, 11.0f));
+                        sink->AddArc(D2D1::ArcSegment(P(16.0f, 11.0f), D2D1::SizeF(4.0f * s, 4.0f * s), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                        sink->AddLine(P(16.0f, 5.0f));
+                        sink->AddLine(P(20.0f, 5.0f));
+                        sink->AddLine(P(20.0f, 11.0f));
+                        sink->AddArc(D2D1::ArcSegment(P(4.0f, 11.0f), D2D1::SizeF(8.0f * s, 8.0f * s), 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        sink->Close();
+                        sink->Release();
+                        rt->DrawGeometry(path, br, 1.4f * s);
+                    }
+                    path->Release();
+                }
+            }
+            rt->DrawLine(P(4.0f, 8.0f), P(8.0f, 8.0f), br, 1.2f * s);
+            rt->DrawLine(P(16.0f, 8.0f), P(20.0f, 8.0f), br, 1.2f * s);
+            break;
+        }
+        case SvgIconType::Save: {
+            if (factory) {
+                ID2D1PathGeometry* path = nullptr;
+                if (SUCCEEDED(factory->CreatePathGeometry(&path))) {
+                    ID2D1GeometrySink* sink = nullptr;
+                    if (SUCCEEDED(path->Open(&sink))) {
+                        sink->BeginFigure(P(5.0f, 20.0f), D2D1_FIGURE_BEGIN_HOLLOW);
+                        sink->AddLine(P(5.0f, 4.0f));
+                        sink->AddLine(P(16.0f, 4.0f));
+                        sink->AddLine(P(20.0f, 8.0f));
+                        sink->AddLine(P(20.0f, 20.0f));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        sink->Close();
+                        sink->Release();
+                        rt->DrawGeometry(path, br, 1.4f * s);
+                    }
+                    path->Release();
+                }
+            }
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(R(7.5f, 4.0f, 8.0f, 5.0f), 0.5f * s, 0.5f * s), br, 1.2f * s);
+            rt->FillRectangle(R(12.0f, 5.0f, 2.0f, 3.0f), br);
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(R(7.5f, 12.0f, 9.0f, 8.0f), 0.5f * s, 0.5f * s), br, 1.2f * s);
+            break;
+        }
+        case SvgIconType::Export: {
+            D2D1_ELLIPSE disc = D2D1::Ellipse(P(11.0f, 13.0f), 7.5f * s, 7.5f * s);
+            rt->DrawEllipse(disc, br, 1.4f * s);
+            D2D1_ELLIPSE hole = D2D1::Ellipse(P(11.0f, 13.0f), 2.2f * s, 2.2f * s);
+            rt->DrawEllipse(hole, br, 1.2f * s);
+
+            // Export arrow
+            rt->DrawLine(P(13.0f, 11.0f), P(20.5f, 3.5f), br, 1.5f * s);
+            rt->DrawLine(P(16.0f, 3.5f), P(20.5f, 3.5f), br, 1.5f * s);
+            rt->DrawLine(P(20.5f, 3.5f), P(20.5f, 8.0f), br, 1.5f * s);
+            break;
+        }
+        }
+
+        if (factory) factory->Release();
+        br->Release();
+    }
+
+    // 3c. Modern Vector Icon Button
+    static void draw_icon_button(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc, SvgIconType icon,
+                                 bool active, D2D1_COLOR_F active_col, D2D1_COLOR_F normal_col,
+                                 float radius = 3.5f, float icon_size = 16.0f) {
+        const auto& t = theme();
+        D2D1_COLOR_F bg = active ? active_col : normal_col;
+        D2D1_COLOR_F border = active ? t.accent_bright : t.border_subtle;
+        D2D1_COLOR_F icon_col = active ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f) : t.text_primary;
+
+        draw_rounded_box(rt, rc, bg, border, radius);
+        draw_svg_icon(rt, icon, rc, icon_col, icon_size);
     }
 
     // 4. Modern Precision Mixer Fader (DESIGN.md: compact, dark slot, purple active fill, metallic thumb)

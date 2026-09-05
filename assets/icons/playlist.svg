@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- DigiDAW Playlist Arranger Icon (DESIGN.md Premium Vector) -->
+  <!-- Track horizontal lane divider lines -->
+  <line x1="3" y1="5.5" x2="21" y2="5.5" stroke-opacity="0.3" />
+  <line x1="3" y1="12" x2="21" y2="12" stroke-opacity="0.3" />
+  <line x1="3" y1="18.5" x2="21" y2="18.5" stroke-opacity="0.3" />
+
+  <!-- Arranged timeline audio/MIDI clip blocks -->
+  <rect x="4" y="3.5" width="8" height="4" rx="1.5" fill="currentColor" fill-opacity="0.25" stroke="currentColor" />
+  <rect x="9" y="10" width="11" height="4" rx="1.5" fill="currentColor" fill-opacity="0.25" stroke="currentColor" />
+  <rect x="4" y="16.5" width="9" height="4" rx="1.5" fill="currentColor" fill-opacity="0.25" stroke="currentColor" />
+</svg>
