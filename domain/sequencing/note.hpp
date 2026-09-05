@@ -60,6 +60,21 @@ public:
         return false;
     }
 
+    bool move_note(Tick old_start, uint8_t old_pitch, Tick new_start, uint8_t new_pitch) {
+        auto it = std::find_if(notes_.begin(), notes_.end(), [old_start, old_pitch](const Note& n) {
+            return n.start == old_start && n.pitch == old_pitch;
+        });
+        if (it != notes_.end()) {
+            Note n = *it;
+            notes_.erase(it);
+            n.start = new_start;
+            n.pitch = (new_pitch > 127) ? 127 : new_pitch;
+            add_note(n);
+            return true;
+        }
+        return false;
+    }
+
     void clear() noexcept {
         notes_.clear();
     }
@@ -79,7 +94,7 @@ public:
     }
 
     [[nodiscard]] bool has_note_at_step(size_t step, Tick ppq = DefaultPPQ, uint8_t pitch = 60) const noexcept {
-        const Tick step_ticks = ppq / 4; // 16th note
+        const Tick step_ticks = std::max<Tick>(1, ppq / 4); // 16th note
         const Tick target_tick = static_cast<Tick>(step) * step_ticks;
         for (const auto& n : notes_) {
             if (n.pitch == pitch && n.start == target_tick) {
@@ -90,7 +105,7 @@ public:
     }
 
     void toggle_step(size_t step, Tick ppq = DefaultPPQ, uint8_t pitch = 60, uint8_t vel = 100) {
-        const Tick step_ticks = ppq / 4;
+        const Tick step_ticks = std::max<Tick>(1, ppq / 4);
         const Tick target_tick = static_cast<Tick>(step) * step_ticks;
         if (!remove_note(target_tick, pitch)) {
             add_note(Note{target_tick, step_ticks, pitch, vel, 0, 0});

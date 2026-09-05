@@ -4,6 +4,7 @@
 #include "../adapters/gui/win32_window.hpp"
 #include "../adapters/desktop/file_association.hpp"
 #include "../adapters/desktop/crash_handler.hpp"
+#include "../adapters/gui/dpi_awareness.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -30,37 +31,115 @@ void print_usage(const char* exe_name) {
 void setup_default_template(digidaw::app::Engine& engine) {
     auto& proj = engine.session().project();
     proj.time_map().set_tempo(128.0);
+    const auto ppq = proj.time_map().ppq();
+    const auto bar_ticks = 4 * ppq;
 
-    // 1. Add default 3xOsc synth channel
-    digidaw::domain::ChannelSettings s;
-    s.name = "3xOsc Synth";
-    s.volume = 0.85f;
-    s.pan = 0.0f;
-    s.mixer_track = 1;
-    auto ch_id = proj.add_channel("core.generator.3xosc", s);
+    // 1. Add default channels matching FL Studio screenshot (default volume 80% with +20% headroom)
+    digidaw::domain::ChannelSettings s1;
+    s1.name = "Osc";
+    s1.volume = digidaw::domain::kDefaultChannelVolume;
+    s1.pan = 0.0f;
+    s1.mixer_track = 1;
+    auto ch1_id = proj.add_channel("core.generator.3xosc", s1);
 
-    // 2. Add Master limiter to track 0
+    digidaw::domain::ChannelSettings s2;
+    s2.name = "808 Clap";
+    s2.volume = digidaw::domain::kDefaultChannelVolume;
+    s2.pan = 0.0f;
+    s2.mixer_track = 2;
+    auto ch2_id = proj.add_channel("core.generator.3xosc", s2);
+
+    digidaw::domain::ChannelSettings s3;
+    s3.name = "808 HiHat";
+    s3.volume = digidaw::domain::kDefaultChannelVolume;
+    s3.pan = 0.0f;
+    s3.mixer_track = 3;
+    auto ch3_id = proj.add_channel("core.generator.3xosc", s3);
+
+    digidaw::domain::ChannelSettings s4;
+    s4.name = "808 Snare";
+    s4.volume = digidaw::domain::kDefaultChannelVolume;
+    s4.pan = 0.0f;
+    s4.mixer_track = 4;
+    auto ch4_id = proj.add_channel("core.generator.3xosc", s4);
+
+    digidaw::domain::ChannelSettings s5;
+    s5.name = "FLEX Bass";
+    s5.volume = digidaw::domain::kDefaultChannelVolume;
+    s5.pan = 0.0f;
+    s5.mixer_track = 5;
+    auto ch5_id = proj.add_channel("core.generator.3xosc", s5);
+
+    // 2. Setup Mixer routing for tracks 1..5
     auto* master = proj.mixer_graph().get_track(digidaw::domain::MasterTrackId);
     if (master) {
         master->add_insert(std::make_shared<digidaw::adapters::plugins::LimiterDevice>());
     }
+    proj.mixer_graph().add_track(1, "Osc");
+    proj.mixer_graph().add_track(2, "808 Clap");
+    proj.mixer_graph().add_track(3, "808 HiHat");
+    proj.mixer_graph().add_track(4, "808 Snare");
+    proj.mixer_graph().add_track(5, "FLEX Bass");
 
-    // 3. Add default 4-step note pattern (C5 arpeggio: C, E, G, B)
-    auto* pat = proj.get_pattern(1);
-    if (pat) {
-        pat->set_name("Default Beat");
-        auto& notes = pat->get_or_create_channel_notes(ch_id);
-        const auto ppq = proj.time_map().ppq();
-        notes.add_note({0, ppq, 60, 100, 0, 0});             // C5
-        notes.add_note({ppq, ppq, 64, 100, 0, 0});         // E5
-        notes.add_note({ppq * 2, ppq, 67, 100, 0, 0});     // G5
-        notes.add_note({ppq * 3, ppq, 71, 100, 0, 0});     // B5
+    // 3. Pattern 1: Melody on Osc (mini piano roll) + Beat steps on drums & bass
+    auto* pat1 = proj.get_pattern(1);
+    if (pat1) {
+        pat1->set_name("Pattern 1");
+        // Melodic notes across 4 bars for Osc -> triggers mini piano roll view
+        auto& osc_notes = pat1->get_or_create_channel_notes(ch1_id);
+        osc_notes.add_note({bar_ticks, bar_ticks, 64, 100, 0, 0});         // Bar 2: E5
+        osc_notes.add_note({bar_ticks * 2, bar_ticks, 60, 100, 0, 0});     // Bar 3: C5
+        osc_notes.add_note({bar_ticks * 3, bar_ticks, 67, 100, 0, 0});     // Bar 4: G5
+
+        // Step Sequencer notes for 808 Clap (matching row 2 in Screenshot 1)
+        auto& clap_notes = pat1->get_or_create_channel_notes(ch2_id);
+        clap_notes.toggle_step(0, ppq, 60, 100);
+        clap_notes.toggle_step(2, ppq, 60, 100);
+        clap_notes.toggle_step(6, ppq, 60, 100);
+        clap_notes.toggle_step(10, ppq, 60, 100);
+        clap_notes.toggle_step(12, ppq, 60, 100);
+        clap_notes.toggle_step(14, ppq, 60, 100);
+
+        // HiHat 8th notes
+        auto& hihat_notes = pat1->get_or_create_channel_notes(ch3_id);
+        hihat_notes.toggle_step(2, ppq, 60, 90);
+        hihat_notes.toggle_step(6, ppq, 60, 90);
+        hihat_notes.toggle_step(10, ppq, 60, 90);
+        hihat_notes.toggle_step(14, ppq, 60, 90);
+
+        // Snare on 2 and 4
+        auto& snare_notes = pat1->get_or_create_channel_notes(ch4_id);
+        snare_notes.toggle_step(4, ppq, 60, 100);
+        snare_notes.toggle_step(12, ppq, 60, 100);
+
+        // Bass root notes
+        auto& bass_notes = pat1->get_or_create_channel_notes(ch5_id);
+        bass_notes.toggle_step(0, ppq, 60, 100);
+        bass_notes.toggle_step(8, ppq, 60, 100);
     }
 
-    // 4. Place clip in playlist track 1
-    if (!proj.tracks().empty()) {
-        proj.tracks()[0].add_clip({1, 0, digidaw::domain::DefaultPPQ * 4, false});
+    // 4. Pattern 2: Secondary variation pattern
+    auto pat2_id = proj.add_pattern("Pattern 2");
+    auto* pat2 = proj.get_pattern(pat2_id);
+    if (pat2) {
+        auto& drum_notes = pat2->get_or_create_channel_notes(ch2_id);
+        drum_notes.toggle_step(4, ppq, 60, 100);
+        drum_notes.toggle_step(12, ppq, 60, 100);
     }
+
+    // 5. Ensure arrangement tracks 1..20 in Playlist
+    proj.tracks().clear();
+    for (int i = 1; i <= 20; ++i) {
+        proj.add_track("Track " + std::to_string(i));
+    }
+
+    // 6. Place pattern clips across playlist lanes matching Screenshot 2:
+    // Track 1: Pattern 1 at Bar 1..5
+    proj.tracks()[0].add_clip({1, 0, bar_ticks * 4, false});
+    // Track 2: Pattern 1 at Bar 2..6
+    proj.tracks()[1].add_clip({1, bar_ticks, bar_ticks * 4, false});
+    // Track 3: Pattern 1 at Bar 3..7
+    proj.tracks()[2].add_clip({1, bar_ticks * 2, bar_ticks * 4, false});
 }
 
 void run_interactive_repl(digidaw::app::Engine& engine) {
@@ -200,7 +279,10 @@ void run_interactive_repl(digidaw::app::Engine& engine) {
 }
 
 int main(int argc, char* argv[]) {
-    // 0. Initialize Desktop Crash Handler (DESKTOP-FR-007)
+    // 0. Initialize Per-Monitor V2 High-DPI Awareness (Crisp, native HD on all Windows displays)
+    digidaw::adapters::gui::DpiAwareness::enable_high_dpi_awareness();
+
+    // Initialize Desktop Crash Handler (DESKTOP-FR-007)
     digidaw::adapters::desktop::CrashHandler::init("DigiDawUserData/Logs");
 
     print_banner();

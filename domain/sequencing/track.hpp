@@ -34,6 +34,7 @@ public:
     void set_name(std::string name) { name_ = std::move(name); }
 
     [[nodiscard]] bool muted() const noexcept { return muted_; }
+    [[nodiscard]] bool is_muted() const noexcept { return muted_; }
     void set_muted(bool m) noexcept { muted_ = m; }
 
     [[nodiscard]] bool solo() const noexcept { return solo_; }
@@ -63,6 +64,17 @@ public:
         return false;
     }
 
+    bool remove_clip_containing(Tick t) {
+        auto it = std::find_if(clips_.begin(), clips_.end(), [t](const Clip& c) {
+            return c.contains_tick(t);
+        });
+        if (it != clips_.end()) {
+            clips_.erase(it);
+            return true;
+        }
+        return false;
+    }
+
     [[nodiscard]] bool has_clip_at(Tick start_tick) const noexcept {
         for (const auto& c : clips_) {
             if (c.start == start_tick) return true;
@@ -75,6 +87,30 @@ public:
             if (c.contains_tick(t)) return &c;
         }
         return nullptr;
+    }
+
+    [[nodiscard]] Clip* get_clip_at_tick_mut(Tick t) noexcept {
+        for (auto& c : clips_) {
+            if (c.contains_tick(t)) return &c;
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] Clip* get_clip_at_start_mut(Tick start_tick) noexcept {
+        for (auto& c : clips_) {
+            if (c.start == start_tick) return &c;
+        }
+        return nullptr;
+    }
+
+    void sort_clips() {
+        std::sort(clips_.begin(), clips_.end(), [](const Clip& a, const Clip& b) {
+            return a.start < b.start;
+        });
+    }
+
+    [[nodiscard]] std::vector<Clip>& clips_mut() noexcept {
+        return clips_;
     }
 
     void clear_clips() noexcept {

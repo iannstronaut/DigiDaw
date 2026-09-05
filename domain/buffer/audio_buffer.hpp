@@ -40,6 +40,16 @@ struct AudioBufferView {
         }
     }
 
+    void apply_pan(float pan) noexcept {
+        const float p = std::clamp(pan, -1.0f, 1.0f);
+        const float gain_l = (p <= 0.0f) ? 1.0f : (1.0f - p);
+        const float gain_r = (p >= 0.0f) ? 1.0f : (1.0f + p);
+        for (size_t i = 0; i < frames; ++i) {
+            if (left) left[i] *= gain_l;
+            if (right) right[i] *= gain_r;
+        }
+    }
+
     [[nodiscard]] std::pair<float, float> compute_peak() const noexcept {
         float peak_l = 0.0f;
         float peak_r = 0.0f;

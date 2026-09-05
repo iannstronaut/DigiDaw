@@ -6,6 +6,7 @@
 #include "../../adapters/audio/wave_file_writer.hpp"
 #include "../../domain/common/result.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 
@@ -57,10 +58,38 @@ public:
             track_inputs[track_id] = domain::OwningAudioBuffer(block_size);
         }
 
-        // Channel output scratch buffers
+        // Resource optimization: identify active channels from non-empty, unmuted arrangement tracks.
+        // Empty arrangement tracks (clips().empty() or is_muted()) are early-skipped, requiring zero buffer allocation.
+        bool any_solo = false;
+        for (const auto& trk : project.tracks()) {
+            if (trk.solo()) { any_solo = true; break; }
+        }
+
+        std::unordered_set<domain::ChannelId> active_arrangement_channels;
+        for (const auto& trk : project.tracks()) {
+            if (trk.clips().empty()) continue;
+            if (any_solo ? !trk.solo() : trk.is_muted()) continue;
+            for (const auto& clip : trk.clips()) {
+                if (clip.muted) continue;
+                if (const auto* pat = project.get_pattern(clip.pattern_id)) {
+                    for (const auto& [cid, nset] : pat->all_notes()) {
+                        for (const auto& note : nset.notes()) {
+                            if (note.start < clip.length) {
+                                active_arrangement_channels.insert(cid);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Channel output scratch buffers: allocate only for channels present in active arrangement tracks
         std::unordered_map<domain::ChannelId, domain::OwningAudioBuffer> channel_buffers;
         for (const auto& ch : project.channels()) {
-            channel_buffers[ch.id()] = domain::OwningAudioBuffer(block_size);
+            if (active_arrangement_channels.contains(ch.id())) {
+                channel_buffers[ch.id()] = domain::OwningAudioBuffer(block_size);
+            }
         }
 
         size_t frames_rendered = 0;
@@ -79,9 +108,10 @@ public:
             // 1. Advance transport and get MIDI events for channels
             auto scheduled_events = transport.advance_block(current_block_frames, sample_rate);
 
-            // 2. Synthesize audio from each channel device
+            // 2. Synthesize audio from each active channel device
             for (const auto& ch : project.channels()) {
                 if (ch.settings().muted) continue;
+                if (!active_arrangement_channels.contains(ch.id())) continue;
 
                 auto dev_it = channel_devices.find(ch.id());
                 if (dev_it == channel_devices.end() || !dev_it->second) continue;
@@ -105,13 +135,20 @@ public:
 
                 // Apply channel volume & pan
                 ch_view.apply_gain(ch.settings().volume);
+                ch_view.apply_pan(ch.settings().pan);
 
-                // Sum into targeted mixer track
+                // Sum into targeted mixer track (with fallback to Master)
                 const domain::MixerTrackId target_track = ch.settings().mixer_track;
                 auto track_in_it = track_inputs.find(target_track);
                 if (track_in_it != track_inputs.end()) {
                     auto target_view = track_in_it->second.view();
                     target_view.add_from(ch_view, 1.0f);
+                } else {
+                    auto master_it = track_inputs.find(domain::MasterTrackId);
+                    if (master_it != track_inputs.end()) {
+                        auto target_view = master_it->second.view();
+                        target_view.add_from(ch_view, 1.0f);
+                    }
                 }
             }
 

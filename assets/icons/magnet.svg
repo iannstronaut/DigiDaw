@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none"
+     stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+  <!-- DigiDAW Magnet Snapping Icon (DESIGN.md Premium Vector) -->
+  <path d="M4 11V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6a3 3 0 0 0 6 0V5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v6a8 8 0 0 1-16 0z" />
+  <line x1="4" y1="8" x2="9" y2="8" />
+  <line x1="15" y1="8" x2="20" y2="8" />
+</svg>

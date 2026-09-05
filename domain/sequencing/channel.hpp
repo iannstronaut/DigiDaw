@@ -7,8 +7,11 @@ namespace digidaw::domain {
 
 using ChannelId = uint32_t;
 
+inline constexpr float kDefaultChannelVolume = 0.8f;
+inline constexpr float kMaxChannelVolume = 1.0f;
+
 struct ChannelSettings {
-    float volume{0.8f};
+    float volume{kDefaultChannelVolume};
     float pan{0.0f};          // -1.0 (Left) to +1.0 (Right)
     uint8_t mixer_track{1};   // 0 = Master, 1..N = Insert tracks
     bool muted{false};

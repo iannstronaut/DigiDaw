@@ -127,6 +127,14 @@ struct AutoRegisterTest {
         } \
     } while (0)
 
+#define ASSERT_NE(a, b) \
+    do { \
+        if ((a) == (b)) { \
+            ::digidaw::test::TestRunner::instance().fail(std::string("Assertion failed: ") + #a + " != " + #b + " at " + __FILE__ + ":" + std::to_string(__LINE__)); \
+            return; \
+        } \
+    } while (0)
+
 #define ASSERT_NEAR(a, b, eps) \
     do { \
         if (std::abs((a) - (b)) > (eps)) { \
