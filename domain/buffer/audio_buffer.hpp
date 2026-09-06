@@ -135,6 +135,14 @@ struct MidiEvent {
     static constexpr MidiEvent make_note_off(int64_t t, uint8_t ch, uint8_t note) noexcept {
         return MidiEvent{t, static_cast<uint8_t>(0x80 | (ch & 0x0F)), note, 0};
     }
+
+    static constexpr MidiEvent make_control_change(int64_t t, uint8_t ch, uint8_t ctrl, uint8_t val) noexcept {
+        return MidiEvent{t, static_cast<uint8_t>(0xB0 | (ch & 0x0F)), ctrl, val};
+    }
+
+    static constexpr MidiEvent make_cc(int64_t t, uint8_t ch, uint8_t ctrl, uint8_t val) noexcept {
+        return MidiEvent{t, static_cast<uint8_t>(0xB0 | (ch & 0x0F)), ctrl, val};
+    }
 };
 
 } // namespace digidaw::domain

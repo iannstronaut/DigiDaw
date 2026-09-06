@@ -8,7 +8,9 @@
 #include "d3d_shader_visualizer.hpp"
 #include "dpi_awareness.hpp"
 #include "audioclip_editor.hpp"
+#include "xaudio_editor.hpp"
 #include "../plugins/audioclip_device.hpp"
+#include "../plugins/xaudio_devices.hpp"
 #include "../../app/usecases/sample_library.hpp"
 #include "../../app/ports/config_store.hpp"
 #include <windows.h>
@@ -1293,6 +1295,8 @@ private:
                 dragging_channel_vol_idx_ = -1;
                 dragging_channel_target_track_idx_ = -1;
                 dragging_clipper_knob_ = ClipperKnobId::None;
+                dragging_xsynth_param_idx_ = -1;
+                dragging_effect_param_idx_ = -1;
                 note_drag_mode_ = NoteDragMode::None;
                 if (clip_drag_mode_ != ClipDragMode::None) {
                     if (drag_clip_track_idx_ < engine_.session().project().tracks().size()) {
@@ -1333,6 +1337,22 @@ private:
                 POINT mouse_pt;
                 GetCursorPos(&mouse_pt);
                 ScreenToClient(hwnd, &mouse_pt);
+
+                if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
+                    if (mouse_pt.x >= effect_editor_bounds_.left && mouse_pt.x <= effect_editor_bounds_.right &&
+                        mouse_pt.y >= effect_editor_bounds_.top && mouse_pt.y <= effect_editor_bounds_.bottom) {
+                        auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
+                        if (track && static_cast<size_t>(active_editor_effect_slot_) < track->inserts().size()) {
+                            auto& ins = track->inserts()[active_editor_effect_slot_];
+                            if (ins.device) {
+                                XAudioEditor::handle_effect_wheel(ins.device.get(), effect_editor_bounds_, mouse_pt.x, mouse_pt.y, steps, status_message_);
+                            }
+                        }
+                        effect_editor_scroll_idx_ = std::max(0, effect_editor_scroll_idx_ - steps);
+                        InvalidateRect(hwnd, &effect_editor_bounds_, FALSE);
+                        break;
+                    }
+                }
 
                 for (auto it = z_order_.rbegin(); it != z_order_.rend(); ++it) {
                     auto* win = get_window(*it);
@@ -1936,6 +1956,9 @@ private:
 
         if (active_editor_channel_ != 0) {
             render_plugin_editor_d2d();
+        }
+        if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
+            render_effect_editor_d2d();
         }
 
         if (is_dragging_sample_) {
@@ -3504,6 +3527,17 @@ private:
             return;
         }
 
+        auto* xsynth = dynamic_cast<plugins::XSynthDevice*>(dev);
+        if (xsynth) {
+            float mw = 700.0f;
+            float mh = 480.0f;
+            float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+            float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+            editor_bounds_ = {static_cast<LONG>(mx), static_cast<LONG>(my), static_cast<LONG>(mx + mw), static_cast<LONG>(my + mh)};
+            XAudioEditor::render_xsynth_d2d(d2d_target_, dwrite_bold_, dwrite_small_, xsynth, editor_bounds_);
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -3610,6 +3644,25 @@ private:
         D2D1_RECT_F hint_rc = D2D1::RectF(mx + 240.0f, my + 380.0f, mx + mw - 20.0f, my + 420.0f);
         D2DRenderer::draw_text(d2d_target_, dwrite_small_, "Adjust waveforms, detune, or filter sliders to reshape timbre in real time.",
                               hint_rc, t.text_muted, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+
+    void render_effect_editor_d2d() {
+        if (active_editor_effect_track_ < 0 || active_editor_effect_slot_ < 0) return;
+        auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
+        if (!track || static_cast<size_t>(active_editor_effect_slot_) >= track->inserts().size()) return;
+        auto& ins = track->inserts()[active_editor_effect_slot_];
+        if (!ins.device) return;
+
+        float mw = std::clamp(static_cast<float>(client_w_) - 60.0f, 840.0f, 1100.0f);
+        float mh = std::clamp(static_cast<float>(client_h_) - 60.0f, 640.0f, 780.0f);
+        float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+        float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+        effect_editor_bounds_ = {static_cast<LONG>(mx), static_cast<LONG>(my), static_cast<LONG>(mx + mw), static_cast<LONG>(my + mh)};
+
+        XAudioEditor::render_effect_d2d(d2d_target_, dwrite_bold_, dwrite_small_,
+                                       ins.device.get(), effect_editor_bounds_,
+                                       ins.enabled, ins.wet_mix, active_editor_effect_track_,
+                                       active_editor_effect_slot_, effect_editor_scroll_idx_);
     }
 
     void resize_backbuffer(int w, int h) {
@@ -3730,6 +3783,9 @@ private:
         // 5. Render Floating Plugin Editor Modal if open
         if (active_editor_channel_ != 0) {
             render_plugin_editor();
+        }
+        if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
+            render_effect_editor_gdi();
         }
 
         if (is_dragging_sample_) {
@@ -5100,6 +5156,17 @@ private:
             return;
         }
 
+        auto* xsynth = dynamic_cast<plugins::XSynthDevice*>(dev);
+        if (xsynth) {
+            int mw = 700;
+            int mh = 480;
+            int mx = (client_w_ - mw) / 2;
+            int my = (client_h_ - mh) / 2;
+            editor_bounds_ = RECT{mx, my, mx + mw, my + mh};
+            XAudioEditor::render_xsynth_gdi(mem_dc_, font_bold_, font_small_, xsynth, editor_bounds_);
+            return;
+        }
+
         const auto& t = get_theme();
 
         int mw = 680;
@@ -5211,8 +5278,69 @@ private:
         GuiRenderer::draw_slider_horizontal(mem_dc_, vol_rc, vol_norm, vol_str);
     }
 
+    void render_effect_editor_gdi() {
+        if (active_editor_effect_track_ < 0 || active_editor_effect_slot_ < 0) return;
+        auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
+        if (!track || static_cast<size_t>(active_editor_effect_slot_) >= track->inserts().size()) return;
+        auto& ins = track->inserts()[active_editor_effect_slot_];
+        if (!ins.device) return;
+
+        int mw = std::clamp(client_w_ - 60, 840, 1100);
+        int mh = std::clamp(client_h_ - 60, 640, 780);
+        int mx = (client_w_ - mw) / 2;
+        int my = (client_h_ - mh) / 2;
+        effect_editor_bounds_ = RECT{mx, my, mx + mw, my + mh};
+
+        XAudioEditor::render_effect_gdi(mem_dc_, font_bold_, font_small_,
+                                       ins.device.get(), effect_editor_bounds_,
+                                       ins.enabled, ins.wet_mix, active_editor_effect_track_,
+                                       active_editor_effect_slot_, effect_editor_scroll_idx_);
+    }
+
+    void open_effect_editor(uint32_t tid, int slot_idx) {
+        auto* track = engine_.session().project().mixer_graph().get_track(tid);
+        if (!track || static_cast<size_t>(slot_idx) >= track->inserts().size()) return;
+        if (!track->inserts()[slot_idx].device) return;
+        active_editor_effect_track_ = static_cast<int>(tid);
+        active_editor_effect_slot_ = slot_idx;
+        active_editor_channel_ = 0;
+        status_message_ = "Opened editor for " + track->inserts()[slot_idx].device->name();
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
+    void handle_effect_editor_click(int x, int y) {
+        if (active_editor_effect_track_ < 0 || active_editor_effect_slot_ < 0) return;
+        auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
+        if (!track || static_cast<size_t>(active_editor_effect_slot_) >= track->inserts().size()) {
+            active_editor_effect_track_ = -1;
+            active_editor_effect_slot_ = -1;
+            return;
+        }
+        auto& ins = track->inserts()[active_editor_effect_slot_];
+        if (!ins.device) {
+            active_editor_effect_track_ = -1;
+            active_editor_effect_slot_ = -1;
+            return;
+        }
+
+        bool should_close = XAudioEditor::handle_effect_click(
+            ins.device.get(), effect_editor_bounds_, x, y, ins.enabled, ins.wet_mix,
+            effect_editor_scroll_idx_, dragging_effect_param_idx_, drag_effect_start_x_,
+            drag_effect_start_y_, drag_effect_orig_val_, status_message_);
+
+        if (should_close) {
+            active_editor_effect_track_ = -1;
+            active_editor_effect_slot_ = -1;
+            dragging_effect_param_idx_ = -1;
+        }
+    }
+
     void on_mouse_down(int x, int y) {
-        // A. If plugin editor modal is open, handle modal clicks
+        // A. If plugin editor or effect editor modal is open, handle modal clicks
+        if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
+            handle_effect_editor_click(x, y);
+            return;
+        }
         if (active_editor_channel_ != 0) {
             handle_editor_click(x, y);
             return;
@@ -5434,6 +5562,13 @@ private:
                         AppendMenuA(hMenu, MF_STRING, 1003, "3. Algorithmic Reverb");
                         AppendMenuA(hMenu, MF_STRING, 1004, "4. Stereo Compressor");
                         AppendMenuA(hMenu, MF_STRING, 1005, "5. Master Limiter");
+                        AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+                        AppendMenuA(hMenu, MF_STRING, 1010, "6. X-Eq (6-Band Equalizer)");
+                        AppendMenuA(hMenu, MF_STRING, 1011, "7. X-Compressor");
+                        AppendMenuA(hMenu, MF_STRING, 1012, "8. X-Multiband Dynamics");
+                        AppendMenuA(hMenu, MF_STRING, 1013, "9. X-Reverb (Algorithmic)");
+                        AppendMenuA(hMenu, MF_STRING, 1014, "10. X-Distortion (Waveshaper)");
+                        AppendMenuA(hMenu, MF_STRING, 1015, "11. X-Limiter (Master Limiter)");
 
                         POINT pt{x, y};
                         ClientToScreen(hwnd_, &pt);
@@ -5445,6 +5580,12 @@ private:
                         else if (cmd == 1003) insert_effect_to_track(tid, "core.fx.reverb");
                         else if (cmd == 1004) insert_effect_to_track(tid, "core.fx.compressor");
                         else if (cmd == 1005) insert_effect_to_track(tid, "core.fx.limiter");
+                        else if (cmd == 1010) insert_effect_to_track(tid, "core.fx.x_eq");
+                        else if (cmd == 1011) insert_effect_to_track(tid, "core.fx.x_compressor");
+                        else if (cmd == 1012) insert_effect_to_track(tid, "core.fx.x_multiband");
+                        else if (cmd == 1013) insert_effect_to_track(tid, "core.fx.x_reverb");
+                        else if (cmd == 1014) insert_effect_to_track(tid, "core.fx.x_distortion");
+                        else if (cmd == 1015) insert_effect_to_track(tid, "core.fx.x_limiter");
                         return;
                     }
                 }
@@ -5541,11 +5682,14 @@ private:
                 return;
             }
 
-            // Effect Name / row body click: show detailed status info
+            // Effect Name / row body click: show detailed status info & open editor
             if (x >= insp_x + 40 && x <= insp_r - (right_margin + 84) && y >= sy + 2 && y <= sy + slot_h - 2) {
                 std::string name = track->inserts()[i].device ? track->inserts()[i].device->name() : "Effect";
                 int pct = static_cast<int>(std::round(track->inserts()[i].wet_mix * 100.0f));
                 status_message_ = "Insert " + std::to_string(i + 1) + ": " + name + " (" + (track->inserts()[i].enabled ? "Active" : "Bypassed") + ", Wet Mix: " + std::to_string(pct) + "%)";
+                if (track->inserts()[i].device) {
+                    open_effect_editor(tid, i);
+                }
                 return;
             }
 
@@ -5834,12 +5978,15 @@ private:
                 AppendMenuA(hMenu, MF_STRING, 2002, "2. 3xOsc Synthesizer");
                 AppendMenuA(hMenu, MF_STRING, 2003, "3. DirectWave Sampler");
                 AppendMenuA(hMenu, MF_STRING, 2004, "4. FPC Drum Machine");
+                AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuA(hMenu, MF_STRING, 2010, "5. X-Synth Synthesizer");
                 int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, nullptr);
                 DestroyMenu(hMenu);
                 if (cmd == 2001) add_channel_with_uid("core.generator.audioclip", "Clipper");
                 else if (cmd == 2002) add_channel_with_uid("core.generator.3xosc", "3xOsc Synth");
                 else if (cmd == 2003) add_channel_with_uid("core.generator.sampler", "DirectWave Sampler");
                 else if (cmd == 2004) add_channel_with_uid("core.generator.drum_sampler", "FPC Drum Machine");
+                else if (cmd == 2010) add_channel_with_uid("core.generator.x_synth", "X-Synth");
                 return;
             }
             return;
@@ -7519,6 +7666,28 @@ private:
             }
         }
 
+        if (active_editor_channel_ != 0 && dragging_xsynth_param_idx_ >= 0) {
+            auto* dev = get_active_channel_synth();
+            auto* xsynth = dynamic_cast<plugins::XSynthDevice*>(dev);
+            if (xsynth) {
+                XAudioEditor::handle_xsynth_drag(xsynth, dragging_xsynth_param_idx_,
+                                                drag_xsynth_start_y_, drag_xsynth_orig_val_, y, status_message_);
+                return;
+            }
+        }
+
+        if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0 && dragging_effect_param_idx_ >= 0) {
+            auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
+            if (track && static_cast<size_t>(active_editor_effect_slot_) < track->inserts().size()) {
+                auto& ins = track->inserts()[active_editor_effect_slot_];
+                if (ins.device) {
+                    XAudioEditor::handle_effect_drag(ins.device.get(), effect_editor_bounds_,
+                                                    dragging_effect_param_idx_, x, y, status_message_);
+                    return;
+                }
+            }
+        }
+
         if (dragging_inspector_vol_) {
             std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
             int insp_x = static_cast<int>(win_inspector_.x);
@@ -7995,6 +8164,19 @@ private:
             return;
         }
 
+        auto* xsynth = dynamic_cast<plugins::XSynthDevice*>(dev);
+        if (xsynth) {
+            bool should_close = XAudioEditor::handle_xsynth_click(
+                xsynth, editor_bounds_, x, y,
+                dragging_xsynth_param_idx_, drag_xsynth_start_y_, drag_xsynth_orig_val_,
+                status_message_, [this](uint8_t pitch) { audition_note(pitch); });
+            if (should_close) {
+                active_editor_channel_ = 0;
+                dragging_xsynth_param_idx_ = -1;
+            }
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -8270,6 +8452,17 @@ private:
     domain::ChannelId active_editor_channel_{0}; // Channel currently being edited in VST GUI
     std::shared_ptr<domain::IDevice> active_synth_instance_{nullptr};
     RECT editor_bounds_{0, 0, 0, 0};
+    int active_editor_effect_track_{-1};
+    int active_editor_effect_slot_{-1};
+    RECT effect_editor_bounds_{0, 0, 0, 0};
+    int dragging_effect_param_idx_{-1};
+    int drag_effect_start_x_{0};
+    int drag_effect_start_y_{0};
+    float drag_effect_orig_val_{0.0f};
+    int effect_editor_scroll_idx_{0};
+    int dragging_xsynth_param_idx_{-1};
+    int drag_xsynth_start_y_{0};
+    float drag_xsynth_orig_val_{0.0f};
     int clipper_active_tab_{0}; // 0 = Sample, 1 = Env/Inst, 2 = Misc
     int clipper_env_subtab_{1}; // 0=Pan, 1=Vol (Default!), 2=ModX, 3=ModY, 4=Pitch
     ClipperKnobId dragging_clipper_knob_{ClipperKnobId::None};
