@@ -1293,11 +1293,11 @@ public:
 
         float gr = dev->gain_reduction_db(0);
 
-        // 1. Soft Mint / Sage Green Background (matching user reference #D4ECD7)
+        // 1. Dark Theme Background harmonious with VST editor (Deep Charcoal 0x12151c)
         ID2D1SolidColorBrush* br_bg = nullptr;
         ID2D1SolidColorBrush* br_border = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0xd4 / 255.f, 0xec / 255.f, 0xd7 / 255.f), &br_bg);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0x20 / 255.f, 0x2e / 255.f, 0x39 / 255.f, 0.40f), &br_border);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x12 / 255.f, 0x15 / 255.f, 0x1c / 255.f, 1.0f), &br_bg);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2a / 255.f, 0x35 / 255.f, 0.85f), &br_border);
 
         if (br_bg) {
             D2D1_ROUNDED_RECT r_rc = D2D1::RoundedRect(p, 4.0f, 4.0f);
@@ -1317,9 +1317,9 @@ public:
             return y_base - t * (ph - 24.0f);
         };
 
-        // Subtle horizontal guide grids in soft sage with dB labels
+        // Subtle horizontal guide grids harmonious with VST dark theme
         ID2D1SolidColorBrush* br_faint_grid = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0xb9 / 255.f, 0xde / 255.f, 0xbe / 255.f, 0.90f), &br_faint_grid);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x25 / 255.f, 0x2c / 255.f, 0x38 / 255.f, 0.85f), &br_faint_grid);
 
         if (br_faint_grid) {
             for (float ref_db : {0.0f, -12.0f, -24.0f, -36.0f}) {
@@ -1328,7 +1328,7 @@ public:
                 if (font_small) {
                     std::string lbl = std::to_string(static_cast<int>(ref_db)) + " dB";
                     D2D1_RECT_F lbl_rc = D2D1::RectF(p.left + 8.0f, y_ref - 13.0f, p.left + 70.0f, y_ref + 1.0f);
-                    D2DRenderer::draw_text(rt, font_small, lbl, lbl_rc, D2D1::ColorF(0x52 / 255.f, 0x7a / 255.f, 0x5a / 255.f, 0.95f));
+                    D2DRenderer::draw_text(rt, font_small, lbl, lbl_rc, D2D1::ColorF(0x76 / 255.f, 0x84 / 255.f, 0x98 / 255.f, 0.90f));
                 }
             }
             br_faint_grid->Release();
@@ -1339,15 +1339,19 @@ public:
         y_guide = std::clamp(y_guide, p.top + 10.0f, p.bottom - 10.0f);
 
         // Brushes
-        ID2D1SolidColorBrush* br_body = nullptr;   // Dark Charcoal waveform body #232B2D
-        ID2D1SolidColorBrush* br_purple = nullptr; // Purple/Violet overshoot #A86BEF
-        ID2D1SolidColorBrush* br_white = nullptr;  // White peak crest outline & GR envelope #FFFFFF
-        ID2D1SolidColorBrush* br_green = nullptr;  // Vibrant Lime-Green guide line #64D82C
+        ID2D1SolidColorBrush* br_body = nullptr;     // Sleek Slate-Blue waveform body #3A4759
+        ID2D1SolidColorBrush* br_crest = nullptr;    // Waveform crest highlight #5B6F8A
+        ID2D1SolidColorBrush* br_purple = nullptr;   // Purple/Violet overshoot #A86BEF
+        ID2D1SolidColorBrush* br_white = nullptr;    // White peak crest outline & GR envelope #FFFFFF
+        ID2D1SolidColorBrush* br_green = nullptr;    // Vibrant Lime-Green guide line #64D82C
+        ID2D1SolidColorBrush* br_gr_shade = nullptr; // Translucent Gain Reduction shading
 
-        rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f), &br_body);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x3a / 255.f, 0x47 / 255.f, 0x59 / 255.f), &br_body);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x5b / 255.f, 0x6f / 255.f, 0x8a / 255.f), &br_crest);
         rt->CreateSolidColorBrush(D2D1::ColorF(0xa8 / 255.f, 0x6b / 255.f, 0xef / 255.f), &br_purple);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &br_white);
         rt->CreateSolidColorBrush(D2D1::ColorF(0x64 / 255.f, 0xd8 / 255.f, 0x2c / 255.f), &br_green);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x66 / 255.f, 0x28 / 255.f, 0x48 / 255.f, 0.35f), &br_gr_shade);
 
         // Read rolling history from dev
         const float* in_hist = dev->hist_in_data();
@@ -1374,9 +1378,12 @@ public:
                 float y_out = db_to_y(out_db);
                 float y_in = db_to_y(in_db);
 
-                // Live waveform body rising from baseline (Dark Charcoal)
+                // Live waveform body rising from baseline (Deep Slate-Blue)
                 if (out_db > -46.0f) {
                     rt->DrawLine(D2D1::Point2F(x, y_base), D2D1::Point2F(x, y_out), br_body, col_w);
+                    if (br_crest) {
+                        rt->DrawLine(D2D1::Point2F(x, y_out), D2D1::Point2F(x, y_out + 1.5f), br_crest, col_w);
+                    }
                 }
 
                 // Purple overshoot spike (Above the threshold/ceiling)
@@ -1390,7 +1397,27 @@ public:
             }
         }
 
-        // 2. White Gain Reduction Envelope Line (Dipping down from guide line)
+        // 2. Gain Reduction Shading & White Envelope Line (Dipping down from guide line)
+        if (br_gr_shade) {
+            for (size_t i = 0; i < M; ++i) {
+                size_t idx = (wp + N - M + i) % N;
+                float s_in = in_hist[idx];
+                float s_out = out_hist[idx];
+                float pt_gr = gr_hist[idx];
+
+                float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+                float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+                float eff_gr = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
+
+                if (eff_gr > 0.1f) {
+                    float x = p.left + (static_cast<float>(i) / static_cast<float>(M - 1)) * pw;
+                    float y_gr = y_guide + eff_gr * 3.2f;
+                    y_gr = std::min(y_gr, y_base);
+                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_gr), br_gr_shade, col_w);
+                }
+            }
+        }
+
         if (br_white) {
             float prev_x = p.left;
             float prev_y = y_guide;
@@ -1426,13 +1453,16 @@ public:
 
         rt->PopAxisAlignedClip();
 
-        // 4. Badges & Readouts (Clean HUD in top-right)
+        // 4. Badges & Readouts (Clean dark HUD in top-right)
         ID2D1SolidColorBrush* br_hud_bg = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f, 0.92f), &br_hud_bg);
+        ID2D1SolidColorBrush* br_hud_border = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x1a / 255.f, 0x1e / 255.f, 0x26 / 255.f, 0.95f), &br_hud_bg);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x2d / 255.f, 0x35 / 255.f, 0x42 / 255.f, 0.90f), &br_hud_border);
         if (br_hud_bg && br_green && font_small) {
             D2D1_ROUNDED_RECT hud_rc = D2D1::RoundedRect(
                 D2D1::RectF(p.right - 210.0f, p.top + 6.0f, p.right - 8.0f, p.top + 26.0f), 3.0f, 3.0f);
             rt->FillRoundedRectangle(hud_rc, br_hud_bg);
+            if (br_hud_border) rt->DrawRoundedRectangle(hud_rc, br_hud_border, 1.0f);
 
             std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
             std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   " + gr_str;
@@ -1440,12 +1470,15 @@ public:
             D2DRenderer::draw_text(rt, font_small, st_str, text_rc, D2D1::ColorF(0x64 / 255.f, 0xd8 / 255.f, 0x2c / 255.f, 0.98f));
 
             br_hud_bg->Release();
+            if (br_hud_border) br_hud_border->Release();
         }
 
         if (br_body) br_body->Release();
+        if (br_crest) br_crest->Release();
         if (br_purple) br_purple->Release();
         if (br_white) br_white->Release();
         if (br_green) br_green->Release();
+        if (br_gr_shade) br_gr_shade->Release();
     }
 
     static void render_analysis_history_display_gdi(
@@ -1462,8 +1495,8 @@ public:
 
         float gr = dev->gain_reduction_db(0);
 
-        // 1. Sage Green Background
-        HBRUSH br_bg = CreateSolidBrush(RGB(212, 236, 215));
+        // 1. Dark Theme Background harmonious with VST editor
+        HBRUSH br_bg = CreateSolidBrush(RGB(18, 21, 28));
         FillRect(hdc, &p, br_bg);
         DeleteObject(br_bg);
 
@@ -1478,7 +1511,7 @@ public:
         };
 
         // Faint grid
-        HPEN pen_grid = CreatePen(PS_SOLID, 1, RGB(185, 222, 190));
+        HPEN pen_grid = CreatePen(PS_SOLID, 1, RGB(37, 44, 56));
         HGDIOBJ old_pen = SelectObject(hdc, pen_grid);
         for (float ref_db : {0.0f, -12.0f, -24.0f, -36.0f}) {
             int y_ref = db_to_y(ref_db);
@@ -1486,7 +1519,7 @@ public:
             if (font_small) {
                 SelectObject(hdc, font_small);
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(82, 122, 90));
+                SetTextColor(hdc, RGB(118, 132, 152));
                 std::string lbl = std::to_string(static_cast<int>(ref_db)) + " dB";
                 TextOutA(hdc, p.left + 8, y_ref - 13, lbl.c_str(), static_cast<int>(lbl.size()));
             }
@@ -1506,7 +1539,8 @@ public:
         size_t M = std::min(static_cast<size_t>(pw), N);
         if (M < 2) M = 2;
 
-        HPEN pen_body = CreatePen(PS_SOLID, 1, RGB(35, 43, 45));
+        HPEN pen_body = CreatePen(PS_SOLID, 1, RGB(58, 71, 89));
+        HPEN pen_gr_shade = CreatePen(PS_SOLID, 1, RGB(90, 45, 65));
         HPEN pen_purple = CreatePen(PS_SOLID, 1, RGB(168, 107, 239));
         HPEN pen_white = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
 
@@ -1537,7 +1571,27 @@ public:
             }
         }
 
-        // 2. White Gain Reduction Curve
+        // 2. Gain Reduction Shading
+        SelectObject(hdc, pen_gr_shade);
+        for (size_t i = 0; i < M; ++i) {
+            size_t idx = (wp + N - M + i) % N;
+            float s_in = in_hist[idx];
+            float s_out = out_hist[idx];
+            float pt_gr = gr_hist[idx];
+
+            float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+            float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+            float eff_gr = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
+
+            if (eff_gr > 0.1f) {
+                int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(M - 1)) * pw);
+                int y_gr = y_guide + static_cast<int>(eff_gr * 3.2f);
+                y_gr = std::min(y_gr, y_base);
+                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_gr);
+            }
+        }
+
+        // 3. White Gain Reduction Curve
         SelectObject(hdc, pen_white);
         for (size_t i = 0; i < M; ++i) {
             size_t idx = (wp + N - M + i) % N;
@@ -1557,13 +1611,14 @@ public:
             else LineTo(hdc, x, y_gr);
         }
 
-        // 3. Lime-Green Guideline
+        // 4. Lime-Green Guideline
         HPEN pen_green = CreatePen(PS_SOLID, 2, RGB(100, 216, 44));
         SelectObject(hdc, pen_green);
         MoveToEx(hdc, p.left, y_guide, NULL); LineTo(hdc, p.right, y_guide);
 
         SelectObject(hdc, old_pen);
         DeleteObject(pen_body);
+        DeleteObject(pen_gr_shade);
         DeleteObject(pen_purple);
         DeleteObject(pen_white);
         DeleteObject(pen_green);
@@ -1571,8 +1626,8 @@ public:
         SelectClipRgn(hdc, NULL);
         DeleteObject(rgn);
 
-        // 4. HUD Badge
-        HBRUSH br_hud = CreateSolidBrush(RGB(35, 43, 45));
+        // 5. Dark HUD Badge
+        HBRUSH br_hud = CreateSolidBrush(RGB(26, 30, 38));
         RECT hud_rc{p.right - 210, p.top + 6, p.right - 8, p.top + 26};
         FillRect(hdc, &hud_rc, br_hud);
         DeleteObject(br_hud);
