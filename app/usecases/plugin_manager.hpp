@@ -5,10 +5,7 @@
 #include "../../adapters/plugins/synth_3xosc.hpp"
 #include "../../adapters/plugins/sampler_device.hpp"
 #include "../../adapters/plugins/drum_sampler_device.hpp"
-#include "../../adapters/plugins/compressor_device.hpp"
-#include "../../adapters/plugins/delay_device.hpp"
 #include "../../adapters/plugins/audioclip_device.hpp"
-#include "../../adapters/plugins/reverb_device.hpp"
 #include "../../adapters/plugins/limiter_device.hpp"
 #include "../../adapters/plugins/xaudio_devices.hpp"
 #include <unordered_map>
@@ -95,18 +92,6 @@ private:
         register_factory(
             "core.fx.parametric_eq", "X-Eq (Default EQ)", domain::DeviceCategory::Effect,
             []() { return std::make_shared<adapters::plugins::XEqDevice>(); });
-
-        register_factory(
-            "core.fx.compressor", "Stereo Compressor", domain::DeviceCategory::Effect,
-            []() { return std::make_shared<adapters::plugins::CompressorDevice>(); });
-
-        register_factory(
-            "core.fx.delay", "Stereo Delay", domain::DeviceCategory::Effect,
-            []() { return std::make_shared<adapters::plugins::DelayDevice>(); });
-
-        register_factory(
-            "core.fx.reverb", "Algorithmic Reverb", domain::DeviceCategory::Effect,
-            []() { return std::make_shared<adapters::plugins::ReverbDevice>(); });
 
         register_factory(
             "core.fx.limiter", "Master Limiter", domain::DeviceCategory::Effect,

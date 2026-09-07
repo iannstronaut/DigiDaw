@@ -265,6 +265,109 @@ TEST_CASE(UnitXAudio, XReverbPredelayAndTailDecay) {
     ASSERT_TRUE(late_energy < early_energy * 0.05f); // Naturally decayed
 }
 
+TEST_CASE(UnitXAudio, XReverbDiffusionAndStereoDecay) {
+    XReverbDevice rev;
+    rev.prepare(48000.0, 512);
+    rev.set_parameter(3, 1.0f); // 100% wet
+    rev.set_predelay_ms(0.0);
+    rev.set_decay_s(2.0);
+    rev.set_diffusion_pct(85.0);
+    rev.set_width_pct(100.0);
+
+    // Send impulse at sample 0 in a 16384-sample buffer
+    OwningAudioBuffer buf(16384);
+    buf.view().clear();
+    buf.view().left[0] = 1.0f;
+    buf.view().right[0] = 1.0f;
+
+    std::span<const MidiEvent> empty_midi{};
+    auto view = buf.view();
+    rev.process(view, empty_midi);
+
+    // Check tail energy in the FDN active reflection window (samples 1500 to 8000)
+    float tail_energy_l = 0.0f;
+    float tail_energy_r = 0.0f;
+    float diff_lr = 0.0f;
+    for (size_t i = 1500; i < 8000; ++i) {
+        tail_energy_l += view.left[i] * view.left[i];
+        tail_energy_r += view.right[i] * view.right[i];
+        diff_lr += std::abs(view.left[i] - view.right[i]);
+        ASSERT_FALSE(std::isnan(view.left[i]));
+        ASSERT_FALSE(std::isnan(view.right[i]));
+        ASSERT_FALSE(std::isinf(view.left[i]));
+        ASSERT_FALSE(std::isinf(view.right[i]));
+    }
+    ASSERT_TRUE(tail_energy_l > 0.01f);
+    ASSERT_TRUE(tail_energy_r > 0.01f);
+    ASSERT_TRUE(diff_lr > 0.1f); // Rich stereo spread from Hadamard matrix and decorrelated diffusers
+
+    // Late decay check (samples 12000 to 16000 must be decayed)
+    float late_energy = 0.0f;
+    for (size_t i = 12000; i < 16000; ++i) {
+        late_energy += view.left[i] * view.left[i];
+    }
+    ASSERT_TRUE(late_energy < tail_energy_l * 0.5f);
+}
+
+TEST_CASE(UnitXAudio, XReverbStressAndParameterExtremes) {
+    XReverbDevice rev;
+    rev.prepare(48000.0, 512);
+
+    // 1. Test 0% width (mono check)
+    rev.set_parameter(3, 1.0f); // 100% wet
+    rev.set_predelay_ms(10.0);
+    rev.set_decay_s(1.0);
+    rev.set_width_pct(0.0); // 0% width -> must produce identical L and R channels
+    rev.set_diffusion_pct(50.0);
+
+    OwningAudioBuffer buf(2048);
+    buf.view().clear();
+    buf.view().left[0] = 0.8f;
+    buf.view().right[0] = -0.4f;
+
+    std::span<const MidiEvent> empty_midi{};
+    auto view = buf.view();
+    rev.process(view, empty_midi);
+
+    // Across active wet output, left and right channels must match exactly for 0% width
+    for (size_t i = 600; i < 1500; ++i) {
+        ASSERT_NEAR(view.left[i], view.right[i], 1e-5f);
+        ASSERT_FALSE(std::isnan(view.left[i]));
+        ASSERT_FALSE(std::isinf(view.left[i]));
+    }
+
+    // 2. Test parameter extremes without NaN or instability
+    rev.set_predelay_ms(200.0); // Maximum predelay
+    rev.set_decay_s(12.0);      // Maximum decay RT60
+    rev.set_width_pct(150.0);   // Maximum width
+    rev.set_diffusion_pct(100.0); // Maximum diffusion
+    rev.set_damping_hz(18000.0);
+    rev.set_lowcut_hz(20.0);
+
+    buf.view().clear();
+    buf.view().left[0] = 1.0f;
+    buf.view().right[0] = 1.0f;
+    view = buf.view();
+    rev.process(view, empty_midi);
+    for (size_t i = 0; i < 2048; ++i) {
+        ASSERT_FALSE(std::isnan(view.left[i]));
+        ASSERT_FALSE(std::isnan(view.right[i]));
+        ASSERT_FALSE(std::isinf(view.left[i]));
+        ASSERT_FALSE(std::isinf(view.right[i]));
+    }
+
+    // 3. Verify reset() cleanly flushes all internal delay lines & FDN states
+    rev.reset();
+    buf.view().clear();
+    view = buf.view();
+    rev.process(view, empty_midi);
+    float post_reset_energy = 0.0f;
+    for (size_t i = 0; i < 2048; ++i) {
+        post_reset_energy += std::abs(view.left[i]) + std::abs(view.right[i]);
+    }
+    ASSERT_NEAR(post_reset_energy, 0.0f, 1e-6f);
+}
+
 // ============================================================================
 // 5. X-Distortion Unit Tests
 // ============================================================================
@@ -613,6 +716,16 @@ TEST_CASE(UnitXAudio, PluginManagerRegistersAllXAudioDevices) {
     auto res_alias_syn = mgr.instantiate("xaudio.generator.synth");
     ASSERT_TRUE(res_alias_syn.is_ok());
     ASSERT_EQ(res_alias_syn.value()->name(), "X-Synth");
+
+    // Verify removed legacy effects are no longer registered
+    auto res_legacy_verb = mgr.instantiate("core.fx.reverb");
+    ASSERT_TRUE(!res_legacy_verb.is_ok());
+
+    auto res_legacy_delay = mgr.instantiate("core.fx.delay");
+    ASSERT_TRUE(!res_legacy_delay.is_ok());
+
+    auto res_legacy_comp = mgr.instantiate("core.fx.compressor");
+    ASSERT_TRUE(!res_legacy_comp.is_ok());
 }
 
 TEST_CASE(UnitXAudio, XAudioSignalVisualizationBuffers) {

@@ -243,32 +243,47 @@ struct Compressor {
 
 struct Delay {
     std::vector<double> data{};
+    size_t mask{0};
     size_t pos{0};
+    size_t delay_len{0};
 
     void prepare(size_t n) {
-        data.assign(std::max(size_t(2), n), 0.0);
+        delay_len = n;
+        size_t cap = 2;
+        while (cap < std::max(size_t(2), n + 4)) {
+            cap <<= 1;
+        }
+        data.assign(cap, 0.0);
+        mask = cap - 1;
         pos = 0;
     }
 
-    [[nodiscard]] double read(size_t n) const noexcept {
-        if (data.empty()) return 0.0;
-        n = std::min(n, data.size() - 1);
-        size_t idx = pos + data.size() - n;
-        if (idx >= data.size()) idx -= data.size();
-        return data[idx];
+    void reset() noexcept {
+        std::fill(data.begin(), data.end(), 0.0);
+        pos = 0;
     }
 
-    void push(double x) noexcept {
-        if (data.empty()) return;
+    [[nodiscard]] inline double read(size_t n) const noexcept {
+        return data[(pos - n) & mask];
+    }
+
+    [[nodiscard]] inline double read_delayed() const noexcept {
+        return data[(pos - delay_len) & mask];
+    }
+
+    inline void push(double x) noexcept {
         data[pos] = x;
-        if (++pos >= data.size()) pos = 0;
+        pos = (pos + 1) & mask;
     }
 
-    double allpass(double x, double g) noexcept {
-        if (data.empty()) return x;
-        double z = read(data.size() - 1);
-        double y = z - g * x;
-        push(x + g * y);
+    inline double allpass(double x, double g) noexcept {
+        const size_t r_idx = (pos - delay_len) & mask;
+        const double z = data[r_idx];
+        const double y = z - g * x;
+        double next_val = x + g * y;
+        if (std::abs(next_val) < 1e-25) next_val = 0.0;
+        data[pos] = next_val;
+        pos = (pos + 1) & mask;
         return y;
     }
 };
@@ -307,18 +322,18 @@ public:
         limiterGain = 1.0;
 
         for (auto& d : pre) {
-            d.prepare(static_cast<size_t>(fs * 0.21) + 2);
+            d.prepare(static_cast<size_t>(fs * 0.21) + 4);
         }
 
         const double times[]{0.0297, 0.0371, 0.0411, 0.0437, 0.0531, 0.0617, 0.0719, 0.0793};
         for (size_t j = 0; j < 8; ++j) {
             length[j] = static_cast<size_t>(times[j] * fs);
-            lines[j].prepare(length[j] + 1);
+            lines[j].prepare(length[j]);
         }
 
         for (int c = 0; c < 2; ++c) {
             for (int j = 0; j < 2; ++j) {
-                diff[c][j].prepare(static_cast<size_t>(fs * (0.0031 + 0.0017 * j + 0.00031 * c)) + 1);
+                diff[c][j].prepare(static_cast<size_t>(fs * (0.0031 + 0.0017 * j + 0.00031 * c)));
             }
         }
         update();
@@ -407,44 +422,112 @@ public:
             }
         } else if (kind == 3) { // X-Reverb
             double input[2]{};
-            double n = value[4] * 0.001 * fs;
-            size_t a = static_cast<size_t>(n);
-            double frac = n - static_cast<double>(a);
-            for (int c = 0; c < 2; ++c) {
-                double v = (a == 0) ? x[c] : pre[c].read(a);
-                double w = pre[c].read(a + 1);
-                input[c] = v + (w - v) * frac;
-                pre[c].push(x[c]);
-                for (auto& d : diff[c]) {
-                    input[c] = d.allpass(input[c], rev_diff_g_);
-                }
+            const double n = value[4] * 0.001 * fs;
+            const size_t a = static_cast<size_t>(n);
+            const double frac = n - static_cast<double>(a);
+
+            // Series 4-stage allpass diffuser across stereo channels
+            // Channel 0
+            {
+                const double v = (a == 0) ? x[0] : pre[0].read(a);
+                const double w = pre[0].read(a + 1);
+                double in0 = v + (w - v) * frac;
+                pre[0].push(x[0]);
+                in0 = diff[0][0].allpass(in0, rev_diff_g_);
+                in0 = diff[0][1].allpass(in0, rev_diff_g_);
+                input[0] = in0;
             }
-            std::array<double, 8> v{}, h{};
-            for (int j = 0; j < 8; ++j) {
-                double z = lines[j].read(length[j]);
-                damp[j] = (1.0 - rev_dc_) * z + rev_dc_ * damp[j];
-                if (std::abs(damp[j]) < 1e-25) damp[j] = 0.0;
-                v[j] = damp[j];
-                h[j] = v[j];
+            // Channel 1
+            {
+                const double v = (a == 0) ? x[1] : pre[1].read(a);
+                const double w = pre[1].read(a + 1);
+                double in1 = v + (w - v) * frac;
+                pre[1].push(x[1]);
+                in1 = diff[1][0].allpass(in1, rev_diff_g_);
+                in1 = diff[1][1].allpass(in1, rev_diff_g_);
+                input[1] = in1;
             }
-            for (int stride = 1; stride < 8; stride *= 2) {
-                for (int base = 0; base < 8; base += 2 * stride) {
-                    for (int k = 0; k < stride; ++k) {
-                        double ah = h[base + k];
-                        double bh = h[base + k + stride];
-                        h[base + k] = ah + bh;
-                        h[base + k + stride] = ah - bh;
-                    }
-                }
-            }
-            for (int j = 0; j < 8; ++j) {
-                double injection = (input[0] + ((j % 2) ? -input[1] : input[1])) * 0.25;
-                lines[j].push(injection + h[j] * 0.3535533905932738 * rev_feedback_[j]);
-            }
-            double l = (v[0] + v[1] - v[2] - v[3] + v[4] + v[5] - v[6] - v[7]) * 0.5;
-            double r = (v[0] - v[1] - v[2] + v[3] + v[4] - v[5] - v[6] + v[7]) * 0.5;
-            double mid = (l + r) * 0.5;
-            double side = (l - r) * rev_side_gain_;
+
+            // 8-channel Feedback Delay Network (FDN)
+            // Parallel Comb / FDN Delay lines read & damping
+            const double one_minus_dc = 1.0 - rev_dc_;
+
+            const double z0 = lines[0].read_delayed();
+            const double z1 = lines[1].read_delayed();
+            const double z2 = lines[2].read_delayed();
+            const double z3 = lines[3].read_delayed();
+            const double z4 = lines[4].read_delayed();
+            const double z5 = lines[5].read_delayed();
+            const double z6 = lines[6].read_delayed();
+            const double z7 = lines[7].read_delayed();
+
+            damp[0] = one_minus_dc * z0 + rev_dc_ * damp[0];
+            if (std::abs(damp[0]) < 1e-25) damp[0] = 0.0;
+            damp[1] = one_minus_dc * z1 + rev_dc_ * damp[1];
+            if (std::abs(damp[1]) < 1e-25) damp[1] = 0.0;
+            damp[2] = one_minus_dc * z2 + rev_dc_ * damp[2];
+            if (std::abs(damp[2]) < 1e-25) damp[2] = 0.0;
+            damp[3] = one_minus_dc * z3 + rev_dc_ * damp[3];
+            if (std::abs(damp[3]) < 1e-25) damp[3] = 0.0;
+            damp[4] = one_minus_dc * z4 + rev_dc_ * damp[4];
+            if (std::abs(damp[4]) < 1e-25) damp[4] = 0.0;
+            damp[5] = one_minus_dc * z5 + rev_dc_ * damp[5];
+            if (std::abs(damp[5]) < 1e-25) damp[5] = 0.0;
+            damp[6] = one_minus_dc * z6 + rev_dc_ * damp[6];
+            if (std::abs(damp[6]) < 1e-25) damp[6] = 0.0;
+            damp[7] = one_minus_dc * z7 + rev_dc_ * damp[7];
+            if (std::abs(damp[7]) < 1e-25) damp[7] = 0.0;
+
+            // Unrolled 8-point Walsh-Hadamard Transform (WHT-8) using direct butterfly additions/subtractions
+            // (24 additions/subtractions total, auto-vectorizes cleanly)
+            // Stage 1 (stride 1)
+            const double a0 = damp[0] + damp[1];
+            const double a1 = damp[0] - damp[1];
+            const double a2 = damp[2] + damp[3];
+            const double a3 = damp[2] - damp[3];
+            const double a4 = damp[4] + damp[5];
+            const double a5 = damp[4] - damp[5];
+            const double a6 = damp[6] + damp[7];
+            const double a7 = damp[6] - damp[7];
+
+            // Stage 2 (stride 2)
+            const double b0 = a0 + a2;
+            const double b1 = a1 + a3;
+            const double b2 = a0 - a2;
+            const double b3 = a1 - a3;
+            const double b4 = a4 + a6;
+            const double b5 = a5 + a7;
+            const double b6 = a4 - a6;
+            const double b7 = a5 - a7;
+
+            // Stage 3 (stride 4)
+            const double h0 = b0 + b4;
+            const double h1 = b1 + b5;
+            const double h2 = b2 + b6;
+            const double h3 = b3 + b7;
+            const double h4 = b0 - b4;
+            const double h5 = b1 - b5;
+            const double h6 = b2 - b6;
+            const double h7 = b3 - b7;
+
+            // Parallel Comb / FDN feedback updates with Hadamard normalization & RT60 decay
+            const double inj_even = (input[0] + input[1]) * 0.25;
+            const double inj_odd  = (input[0] - input[1]) * 0.25;
+
+            lines[0].push(inj_even + h0 * rev_feedback_[0]);
+            lines[1].push(inj_odd  + h1 * rev_feedback_[1]);
+            lines[2].push(inj_even + h2 * rev_feedback_[2]);
+            lines[3].push(inj_odd  + h3 * rev_feedback_[3]);
+            lines[4].push(inj_even + h4 * rev_feedback_[4]);
+            lines[5].push(inj_odd  + h5 * rev_feedback_[5]);
+            lines[6].push(inj_even + h6 * rev_feedback_[6]);
+            lines[7].push(inj_odd  + h7 * rev_feedback_[7]);
+
+            // Output stage: lush stereo spread (l = h2 * 0.5, r = h3 * 0.5)
+            const double l = h2 * 0.5;
+            const double r = h3 * 0.5;
+            const double mid = (l + r) * 0.5;
+            const double side = (l - r) * rev_side_gain_;
             x[0] = wetHP[0].tick(mid + side);
             x[1] = wetHP[1].tick(mid - side);
         } else if (kind == 4) { // X-Distortion
@@ -529,8 +612,9 @@ private:
             }
             rev_diff_g_ = value[9] * 0.007;
             rev_dc_ = std::exp(-2.0 * pi * std::min(value[6], fs * 0.45) / fs);
+            constexpr double kHadamardNorm = 0.35355339059327376220; // 1.0 / sqrt(8)
             for (int j = 0; j < 8; ++j) {
-                rev_feedback_[j] = std::pow(10.0, -3.0 * static_cast<double>(length[j]) / (fs * value[5]));
+                rev_feedback_[j] = std::pow(10.0, -3.0 * static_cast<double>(length[j]) / (fs * value[5])) * kHadamardNorm;
             }
             rev_side_gain_ = value[8] * 0.01 * 0.5;
         } else if (kind == 4) {

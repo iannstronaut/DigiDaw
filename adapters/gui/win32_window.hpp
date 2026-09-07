@@ -5563,11 +5563,6 @@ private:
                         AppendMenuA(hMenu, MF_STRING, 1004, "4. X-Reverb (Algorithmic)");
                         AppendMenuA(hMenu, MF_STRING, 1005, "5. X-Distortion (Waveshaper)");
                         AppendMenuA(hMenu, MF_STRING, 1006, "6. X-Limiter (Master Limiter)");
-                        AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
-                        AppendMenuA(hMenu, MF_STRING, 1007, "7. Stereo Delay");
-                        AppendMenuA(hMenu, MF_STRING, 1008, "8. Algorithmic Reverb (Legacy)");
-                        AppendMenuA(hMenu, MF_STRING, 1009, "9. Stereo Compressor (Legacy)");
-                        AppendMenuA(hMenu, MF_STRING, 1010, "10. Master Limiter (Legacy)");
 
                         POINT pt{x, y};
                         ClientToScreen(hwnd_, &pt);
@@ -5580,10 +5575,6 @@ private:
                         else if (cmd == 1004) insert_effect_to_track(tid, "core.fx.x_reverb");
                         else if (cmd == 1005) insert_effect_to_track(tid, "core.fx.x_distortion");
                         else if (cmd == 1006) insert_effect_to_track(tid, "core.fx.x_limiter");
-                        else if (cmd == 1007) insert_effect_to_track(tid, "core.fx.delay");
-                        else if (cmd == 1008) insert_effect_to_track(tid, "core.fx.reverb");
-                        else if (cmd == 1009) insert_effect_to_track(tid, "core.fx.compressor");
-                        else if (cmd == 1010) insert_effect_to_track(tid, "core.fx.limiter");
                         return;
                     }
                 }
@@ -7274,7 +7265,7 @@ private:
                         if (add_btn_y + 30 <= fx_area_bot && add_btn_y >= slot_y_start) {
                             if (x >= insp_x + 8 && x <= insp_r - right_margin && y >= add_btn_y + 2 && y <= add_btn_y + 30) {
                                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                                status_message_ = "Add Insert Effect (EQ, Delay, Reverb, Compressor, Limiter)";
+                                status_message_ = "Add Insert Effect (X-EQ, X-Compressor, X-Multiband, X-Reverb, X-Distortion, X-Limiter)";
                                 return;
                             }
                         }

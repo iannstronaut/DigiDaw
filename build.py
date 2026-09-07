@@ -52,8 +52,6 @@ def main():
         os.path.join(root_dir, "tests", "unit", "test_domain_mixer.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_domain_sequencing.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_domain_dsp.cpp"),
-        os.path.join(root_dir, "tests", "unit", "test_compressor.cpp"),
-        os.path.join(root_dir, "tests", "unit", "test_reverb.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_sampler.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_drum_sampler.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_audioclip.cpp"),

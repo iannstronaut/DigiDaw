@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../domain/devices/device.hpp"
+#include "../../domain/dsp/denormal.hpp"
 #include "xaudio_dsp.hpp"
 #include <algorithm>
 #include <array>
@@ -96,6 +97,7 @@ public:
 
     void process(domain::AudioBufferView& buffer, std::span<const domain::MidiEvent> /*midi*/) override {
         if (buffer.frames == 0) return;
+        domain::dsp::enable_ftz_daz();
         float in_peak_l = 0.0f, in_peak_r = 0.0f;
         float out_peak_l = 0.0f, out_peak_r = 0.0f;
 
@@ -577,6 +579,7 @@ public:
 
     void process(domain::AudioBufferView& buffer, std::span<const domain::MidiEvent> midi) override {
         if (buffer.frames == 0) return;
+        domain::dsp::enable_ftz_daz();
 
         // Process MIDI events
         for (const auto& ev : midi) {
