@@ -228,11 +228,11 @@ public:
     static const char* get_graph_title(int kind) {
         const char* t[] = {
             "SPECTRUM & FREQUENCY RESPONSE",
-            "COMPRESSION DYNAMICS & ANALYSIS DISPLAY",
+            "COMPRESSOR DYNAMICS & WAVE SIGNAL",
             "4-BAND DYNAMICS HISTOGRAM",
             "3D ROOM SIZE SIMULATION",
             "SHAPING CURVE (BEFORE TONE / DC FILTER)",
-            "PEAK LIMITER & ANALYSIS DISPLAY"
+            "LIMITER PEAK & WAVE SIGNAL"
         };
         return (kind >= 0 && kind < 6) ? t[kind] : "AUDIO RESPONSE";
     }
@@ -606,7 +606,8 @@ public:
                 if (br_grid_norm) rt->DrawLine(D2D1::Point2F(x, p.top), D2D1::Point2F(x, p.bottom), br_grid_norm, 1.0f);
                 std::string x_str = (kind == 4 ? format_1dec(-1.0 + i * 0.5)
                                     : kind == 3 ? std::to_string(i * 3) + " s"
-                                                : std::to_string(-60 + i * 15) + " dB");
+                                    : (kind == 1 || kind == 5) ? (i == 4 ? "NOW" : format_1dec(-3.0 + i * 0.75) + "s")
+                                    : std::to_string(-60 + i * 15) + " dB");
                 D2D1_RECT_F x_rc = D2D1::RectF(x - 26.0f, p.bottom + 9.0f, x + 26.0f, p.bottom + 27.0f);
                 D2DRenderer::draw_text(rt, font_small, x_str, x_rc, D2D1::ColorF(0x92 / 255.f, 0x9c / 255.f, 0xac / 255.f));
             }
@@ -950,7 +951,8 @@ public:
 
                 std::string x_str = (kind == 4 ? format_1dec(-1.0 + i * 0.5)
                                     : kind == 3 ? std::to_string(i * 3) + " s"
-                                                : std::to_string(-60 + i * 15) + " dB");
+                                    : (kind == 1 || kind == 5) ? (i == 4 ? "NOW" : format_1dec(-3.0 + i * 0.75) + "s")
+                                    : std::to_string(-60 + i * 15) + " dB");
                 RECT x_rc{x - 26, p.bottom + 9, x + 26, p.bottom + 27};
                 GuiRenderer::draw_text(hdc, x_str, x_rc, RGB(146, 156, 172), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
@@ -1282,8 +1284,8 @@ public:
         const char* guide_label, D2D1_COLOR_F accent,
         IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
         if (!rt || !dev) return;
-        (void)font_bold;
         (void)accent;
+        (void)font_bold;
 
         float pw = p.right - p.left;
         float ph = p.bottom - p.top;
@@ -1291,7 +1293,7 @@ public:
 
         float gr = dev->gain_reduction_db(0);
 
-        // 1. Soft Mint / Sage Green Background (#D4ECD7)
+        // 1. Soft Mint / Sage Green Background (matching user reference #D4ECD7)
         ID2D1SolidColorBrush* br_bg = nullptr;
         ID2D1SolidColorBrush* br_border = nullptr;
         rt->CreateSolidColorBrush(D2D1::ColorF(0xd4 / 255.f, 0xec / 255.f, 0xd7 / 255.f), &br_bg);
@@ -1308,36 +1310,38 @@ public:
         // Clip all drawings within p
         rt->PushAxisAlignedClip(p, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-        // Subtle horizontal guide grids in soft sage
-        ID2D1SolidColorBrush* br_faint_grid = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0xbc / 255.f, 0xdf / 255.f, 0xc1 / 255.f, 0.45f), &br_faint_grid);
-
+        // dB to Y mapping: -48 dB at bottom, +6 dB at top
+        float y_base = p.bottom - 4.0f;
         auto db_to_y = [&](float db) -> float {
-            if (db >= 0.0f) {
-                float t = std::clamp(db / 6.0f, 0.0f, 1.0f);
-                return (p.top + ph * 0.10f) - t * (ph * 0.09f);
-            } else {
-                float t = std::clamp((db - (-48.0f)) / 48.0f, 0.0f, 1.0f);
-                return p.bottom - t * (ph * 0.90f);
-            }
+            float t = std::clamp((db - (-48.0f)) / 54.0f, 0.0f, 1.0f);
+            return y_base - t * (ph - 24.0f);
         };
 
+        // Subtle horizontal guide grids in soft sage with dB labels
+        ID2D1SolidColorBrush* br_faint_grid = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0xb9 / 255.f, 0xde / 255.f, 0xbe / 255.f, 0.90f), &br_faint_grid);
+
         if (br_faint_grid) {
-            for (float ref_db : {-12.0f, -24.0f, -36.0f}) {
+            for (float ref_db : {0.0f, -12.0f, -24.0f, -36.0f}) {
                 float y_ref = db_to_y(ref_db);
                 rt->DrawLine(D2D1::Point2F(p.left, y_ref), D2D1::Point2F(p.right, y_ref), br_faint_grid, 0.8f);
+                if (font_small) {
+                    std::string lbl = std::to_string(static_cast<int>(ref_db)) + " dB";
+                    D2D1_RECT_F lbl_rc = D2D1::RectF(p.left + 8.0f, y_ref - 13.0f, p.left + 70.0f, y_ref + 1.0f);
+                    D2DRenderer::draw_text(rt, font_small, lbl, lbl_rc, D2D1::ColorF(0x52 / 255.f, 0x7a / 255.f, 0x5a / 255.f, 0.95f));
+                }
             }
             br_faint_grid->Release();
         }
 
         // Lime-Green Guideline Y Position (Threshold or Ceiling)
         float y_guide = db_to_y(static_cast<float>(guide_db));
-        y_guide = std::clamp(y_guide, p.top + 6.0f, p.bottom - 6.0f);
+        y_guide = std::clamp(y_guide, p.top + 10.0f, p.bottom - 10.0f);
 
         // Brushes
-        ID2D1SolidColorBrush* br_body = nullptr;   // Dark Charcoal silhouette #232B2D
+        ID2D1SolidColorBrush* br_body = nullptr;   // Dark Charcoal waveform body #232B2D
         ID2D1SolidColorBrush* br_purple = nullptr; // Purple/Violet overshoot #A86BEF
-        ID2D1SolidColorBrush* br_white = nullptr;  // White peak crest outline #FFFFFF
+        ID2D1SolidColorBrush* br_white = nullptr;  // White peak crest outline & GR envelope #FFFFFF
         ID2D1SolidColorBrush* br_green = nullptr;  // Vibrant Lime-Green guide line #64D82C
 
         rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f), &br_body);
@@ -1356,7 +1360,42 @@ public:
         if (M < 2) M = 2;
         float col_w = std::max(1.0f, pw / static_cast<float>(M));
 
+        // 1. Draw Live Audio Waveform Body & Purple Overshoot Spikes
         if (br_body && br_purple) {
+            for (size_t i = 0; i < M; ++i) {
+                size_t idx = (wp + N - M + i) % N;
+                float s_in = in_hist[idx];
+                float s_out = out_hist[idx];
+
+                float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+                float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+
+                float x = p.left + (static_cast<float>(i) / static_cast<float>(M - 1)) * pw;
+                float y_out = db_to_y(out_db);
+                float y_in = db_to_y(in_db);
+
+                // Live waveform body rising from baseline (Dark Charcoal)
+                if (out_db > -46.0f) {
+                    rt->DrawLine(D2D1::Point2F(x, y_base), D2D1::Point2F(x, y_out), br_body, col_w);
+                }
+
+                // Purple overshoot spike (Above the threshold/ceiling)
+                if (in_db > static_cast<float>(guide_db) && in_db > out_db + 0.1f) {
+                    float y_top = std::min(y_in, y_guide - 1.0f);
+                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_top), br_purple, col_w);
+                    if (br_white) {
+                        rt->DrawLine(D2D1::Point2F(x - 1.0f, y_top), D2D1::Point2F(x + 1.0f, y_top), br_white, 1.5f);
+                    }
+                }
+            }
+        }
+
+        // 2. White Gain Reduction Envelope Line (Dipping down from guide line)
+        if (br_white) {
+            float prev_x = p.left;
+            float prev_y = y_guide;
+            bool first = true;
+
             for (size_t i = 0; i < M; ++i) {
                 size_t idx = (wp + N - M + i) % N;
                 float s_in = in_hist[idx];
@@ -1365,49 +1404,42 @@ public:
 
                 float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
                 float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+                float eff_gr = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
 
                 float x = p.left + (static_cast<float>(i) / static_cast<float>(M - 1)) * pw;
+                float y_gr = y_guide + eff_gr * 3.2f;
+                y_gr = std::min(y_gr, y_base);
 
-                // 1. Purple overshoot spike (Above the green line)
-                if (in_db > guide_db) {
-                    float y_top = db_to_y(in_db);
-                    y_top = std::min(y_top, y_guide - 1.0f);
-                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_top), br_purple, col_w);
-                    if (br_white) {
-                        rt->DrawLine(D2D1::Point2F(x - col_w * 0.5f, y_top), D2D1::Point2F(x + col_w * 0.5f, y_top), br_white, 1.5f);
-                    }
+                if (!first) {
+                    rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y_gr), br_white, 2.0f);
                 }
-
-                // 2. Dark charcoal silhouette hanging downwards (Gain reduction / limited body)
-                float drop_db = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
-                if (drop_db > 0.05f || (in_db > guide_db - 3.0f && s_in > 0.01f)) {
-                    float eff_gr = std::max(drop_db, std::max(0.0f, in_db - static_cast<float>(guide_db)));
-                    float depth_px = std::clamp(eff_gr * 4.2f + 4.0f, 2.0f, ph * 0.70f);
-                    float ripple = 1.0f + 0.12f * std::sin(static_cast<float>(i) * 1.5f);
-                    float y_bot = std::min(y_guide + depth_px * ripple, p.bottom - 2.0f);
-                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_bot), br_body, col_w);
-                }
+                prev_x = x;
+                prev_y = y_gr;
+                first = false;
             }
         }
 
-        // 3. Lime-green guideline on top
+        // 3. Lime-Green Guideline (Threshold or Ceiling)
         if (br_green) {
-            rt->DrawLine(D2D1::Point2F(p.left, y_guide), D2D1::Point2F(p.right, y_guide), br_green, 1.5f);
+            rt->DrawLine(D2D1::Point2F(p.left, y_guide), D2D1::Point2F(p.right, y_guide), br_green, 2.0f);
         }
 
         rt->PopAxisAlignedClip();
 
-        // 4. Badges & Readouts
-        if (font_small) {
-            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
-            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   |   " + gr_str;
-            D2D1_RECT_F st_rc = D2D1::RectF(p.left + 10.0f, p.top + 6.0f, p.left + 260.0f, p.top + 24.0f);
-            D2DRenderer::draw_text(rt, font_small, st_str, st_rc,
-                                   (gr > 0.1f) ? D2D1::ColorF(0.85f, 0.20f, 0.15f, 0.95f) : D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f, 0.90f));
+        // 4. Badges & Readouts (Clean HUD in top-right)
+        ID2D1SolidColorBrush* br_hud_bg = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f, 0.92f), &br_hud_bg);
+        if (br_hud_bg && br_green && font_small) {
+            D2D1_ROUNDED_RECT hud_rc = D2D1::RoundedRect(
+                D2D1::RectF(p.right - 210.0f, p.top + 6.0f, p.right - 8.0f, p.top + 26.0f), 3.0f, 3.0f);
+            rt->FillRoundedRectangle(hud_rc, br_hud_bg);
 
-            D2D1_RECT_F leg_rc = D2D1::RectF(p.right - 280.0f, p.top + 6.0f, p.right - 10.0f, p.top + 24.0f);
-            D2DRenderer::draw_text(rt, font_small, "■ INPUT (OVERSHOOT)   ■ GAIN REDUCTION", leg_rc,
-                                   D2D1::ColorF(0x35 / 255.f, 0x43 / 255.f, 0x45 / 255.f, 0.85f));
+            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
+            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   " + gr_str;
+            D2D1_RECT_F text_rc = D2D1::RectF(p.right - 204.0f, p.top + 8.0f, p.right - 14.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, st_str, text_rc, D2D1::ColorF(0x64 / 255.f, 0xd8 / 255.f, 0x2c / 255.f, 0.98f));
+
+            br_hud_bg->Release();
         }
 
         if (br_body) br_body->Release();
@@ -1439,28 +1471,31 @@ public:
         HRGN rgn = CreateRectRgn(p.left, p.top, p.right, p.bottom);
         SelectClipRgn(hdc, rgn);
 
+        int y_base = p.bottom - 4;
         auto db_to_y = [&](float db) -> int {
-            if (db >= 0.0f) {
-                float t = std::clamp(db / 6.0f, 0.0f, 1.0f);
-                return static_cast<int>((p.top + ph * 0.10f) - t * (ph * 0.09f));
-            } else {
-                float t = std::clamp((db - (-48.0f)) / 48.0f, 0.0f, 1.0f);
-                return static_cast<int>(p.bottom - t * (ph * 0.90f));
-            }
+            float t = std::clamp((db - (-48.0f)) / 54.0f, 0.0f, 1.0f);
+            return y_base - static_cast<int>(t * (ph - 24));
         };
 
         // Faint grid
-        HPEN pen_grid = CreatePen(PS_SOLID, 1, RGB(188, 223, 193));
+        HPEN pen_grid = CreatePen(PS_SOLID, 1, RGB(185, 222, 190));
         HGDIOBJ old_pen = SelectObject(hdc, pen_grid);
-        for (float ref_db : {-12.0f, -24.0f, -36.0f}) {
+        for (float ref_db : {0.0f, -12.0f, -24.0f, -36.0f}) {
             int y_ref = db_to_y(ref_db);
             MoveToEx(hdc, p.left, y_ref, NULL); LineTo(hdc, p.right, y_ref);
+            if (font_small) {
+                SelectObject(hdc, font_small);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(82, 122, 90));
+                std::string lbl = std::to_string(static_cast<int>(ref_db)) + " dB";
+                TextOutA(hdc, p.left + 8, y_ref - 13, lbl.c_str(), static_cast<int>(lbl.size()));
+            }
         }
         SelectObject(hdc, old_pen);
         DeleteObject(pen_grid);
 
         int y_guide = db_to_y(static_cast<float>(guide_db));
-        y_guide = std::clamp(y_guide, static_cast<int>(p.top + 6), static_cast<int>(p.bottom - 6));
+        y_guide = std::clamp(y_guide, static_cast<int>(p.top + 10), static_cast<int>(p.bottom - 10));
 
         const float* in_hist = dev->hist_in_data();
         const float* out_hist = dev->hist_out_data();
@@ -1475,6 +1510,35 @@ public:
         HPEN pen_purple = CreatePen(PS_SOLID, 1, RGB(168, 107, 239));
         HPEN pen_white = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
 
+        // 1. Draw Waveform Body & Purple Overshoots
+        for (size_t i = 0; i < M; ++i) {
+            size_t idx = (wp + N - M + i) % N;
+            float s_in = in_hist[idx];
+            float s_out = out_hist[idx];
+
+            float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+            float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+
+            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(M - 1)) * pw);
+            int y_out = db_to_y(out_db);
+            int y_in = db_to_y(in_db);
+
+            if (out_db > -46.0f) {
+                SelectObject(hdc, pen_body);
+                MoveToEx(hdc, x, y_base, NULL); LineTo(hdc, x, y_out);
+            }
+
+            if (in_db > static_cast<float>(guide_db) && in_db > out_db + 0.1f) {
+                int y_top = std::min(y_in, y_guide - 1);
+                SelectObject(hdc, pen_purple);
+                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_top);
+                SelectObject(hdc, pen_white);
+                MoveToEx(hdc, x - 1, y_top, NULL); LineTo(hdc, x + 2, y_top);
+            }
+        }
+
+        // 2. White Gain Reduction Curve
+        SelectObject(hdc, pen_white);
         for (size_t i = 0; i < M; ++i) {
             size_t idx = (wp + N - M + i) % N;
             float s_in = in_hist[idx];
@@ -1483,30 +1547,17 @@ public:
 
             float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
             float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+            float eff_gr = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
 
             int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(M - 1)) * pw);
+            int y_gr = y_guide + static_cast<int>(eff_gr * 3.2f);
+            y_gr = std::min(y_gr, y_base);
 
-            if (in_db > guide_db) {
-                int y_top = db_to_y(in_db);
-                y_top = std::min(y_top, y_guide - 1);
-                SelectObject(hdc, pen_purple);
-                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_top);
-                SelectObject(hdc, pen_white);
-                MoveToEx(hdc, x - 1, y_top, NULL); LineTo(hdc, x + 2, y_top);
-            }
-
-            float drop_db = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
-            if (drop_db > 0.05f || (in_db > guide_db - 3.0f && s_in > 0.01f)) {
-                float eff_gr = std::max(drop_db, std::max(0.0f, in_db - static_cast<float>(guide_db)));
-                float depth_px = std::clamp(eff_gr * 4.2f + 4.0f, 2.0f, ph * 0.70f);
-                float ripple = 1.0f + 0.12f * std::sin(static_cast<float>(i) * 1.5f);
-                int y_bot = std::min(static_cast<int>(y_guide + depth_px * ripple), static_cast<int>(p.bottom - 2));
-                SelectObject(hdc, pen_body);
-                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_bot);
-            }
+            if (i == 0) MoveToEx(hdc, x, y_gr, NULL);
+            else LineTo(hdc, x, y_gr);
         }
 
-        // Lime-Green line
+        // 3. Lime-Green Guideline
         HPEN pen_green = CreatePen(PS_SOLID, 2, RGB(100, 216, 44));
         SelectObject(hdc, pen_green);
         MoveToEx(hdc, p.left, y_guide, NULL); LineTo(hdc, p.right, y_guide);
@@ -1520,11 +1571,20 @@ public:
         SelectClipRgn(hdc, NULL);
         DeleteObject(rgn);
 
+        // 4. HUD Badge
+        HBRUSH br_hud = CreateSolidBrush(RGB(35, 43, 45));
+        RECT hud_rc{p.right - 210, p.top + 6, p.right - 8, p.top + 26};
+        FillRect(hdc, &hud_rc, br_hud);
+        DeleteObject(br_hud);
+
         if (font_small) {
+            SelectObject(hdc, font_small);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(100, 216, 44));
             std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
-            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   |   " + gr_str;
-            RECT st_rc{p.left + 10, p.top + 6, p.left + 260, p.top + 24};
-            GuiRenderer::draw_text(hdc, st_str, st_rc, RGB(35, 43, 45), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   " + gr_str;
+            RECT text_rc{p.right - 204, p.top + 8, p.right - 14, p.top + 24};
+            DrawTextA(hdc, st_str.c_str(), -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
     }
 
