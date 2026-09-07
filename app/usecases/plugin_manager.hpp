@@ -5,7 +5,6 @@
 #include "../../adapters/plugins/synth_3xosc.hpp"
 #include "../../adapters/plugins/sampler_device.hpp"
 #include "../../adapters/plugins/drum_sampler_device.hpp"
-#include "../../adapters/plugins/parametric_eq.hpp"
 #include "../../adapters/plugins/compressor_device.hpp"
 #include "../../adapters/plugins/delay_device.hpp"
 #include "../../adapters/plugins/audioclip_device.hpp"
@@ -92,9 +91,10 @@ private:
             "core.generator.audioclip", "Clipper", domain::DeviceCategory::Generator,
             []() { return std::make_shared<adapters::plugins::AudioClipDevice>(); });
 
+        // Backward compatibility mapping for projects requesting legacy EQ
         register_factory(
-            "core.fx.parametric_eq", "Parametric EQ", domain::DeviceCategory::Effect,
-            []() { return std::make_shared<adapters::plugins::ParametricEQ>(); });
+            "core.fx.parametric_eq", "X-Eq (Default EQ)", domain::DeviceCategory::Effect,
+            []() { return std::make_shared<adapters::plugins::XEqDevice>(); });
 
         register_factory(
             "core.fx.compressor", "Stereo Compressor", domain::DeviceCategory::Effect,

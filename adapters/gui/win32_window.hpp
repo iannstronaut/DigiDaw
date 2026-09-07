@@ -5557,35 +5557,33 @@ private:
                 if (add_btn_y + 30 <= fx_area_bot && add_btn_y >= slot_y_start) {
                     if (x >= insp_x + 8 && x <= insp_r - right_margin && y >= add_btn_y + 2 && y <= add_btn_y + 30) {
                         HMENU hMenu = CreatePopupMenu();
-                        AppendMenuA(hMenu, MF_STRING, 1001, "1. Parametric EQ");
-                        AppendMenuA(hMenu, MF_STRING, 1002, "2. Stereo Delay");
-                        AppendMenuA(hMenu, MF_STRING, 1003, "3. Algorithmic Reverb");
-                        AppendMenuA(hMenu, MF_STRING, 1004, "4. Stereo Compressor");
-                        AppendMenuA(hMenu, MF_STRING, 1005, "5. Master Limiter");
+                        AppendMenuA(hMenu, MF_STRING, 1001, "1. X-Eq (Parametric Equalizer)");
+                        AppendMenuA(hMenu, MF_STRING, 1002, "2. X-Compressor");
+                        AppendMenuA(hMenu, MF_STRING, 1003, "3. X-Multiband Dynamics");
+                        AppendMenuA(hMenu, MF_STRING, 1004, "4. X-Reverb (Algorithmic)");
+                        AppendMenuA(hMenu, MF_STRING, 1005, "5. X-Distortion (Waveshaper)");
+                        AppendMenuA(hMenu, MF_STRING, 1006, "6. X-Limiter (Master Limiter)");
                         AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
-                        AppendMenuA(hMenu, MF_STRING, 1010, "6. X-Eq (6-Band Equalizer)");
-                        AppendMenuA(hMenu, MF_STRING, 1011, "7. X-Compressor");
-                        AppendMenuA(hMenu, MF_STRING, 1012, "8. X-Multiband Dynamics");
-                        AppendMenuA(hMenu, MF_STRING, 1013, "9. X-Reverb (Algorithmic)");
-                        AppendMenuA(hMenu, MF_STRING, 1014, "10. X-Distortion (Waveshaper)");
-                        AppendMenuA(hMenu, MF_STRING, 1015, "11. X-Limiter (Master Limiter)");
+                        AppendMenuA(hMenu, MF_STRING, 1007, "7. Stereo Delay");
+                        AppendMenuA(hMenu, MF_STRING, 1008, "8. Algorithmic Reverb (Legacy)");
+                        AppendMenuA(hMenu, MF_STRING, 1009, "9. Stereo Compressor (Legacy)");
+                        AppendMenuA(hMenu, MF_STRING, 1010, "10. Master Limiter (Legacy)");
 
                         POINT pt{x, y};
                         ClientToScreen(hwnd_, &pt);
                         int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, NULL);
                         DestroyMenu(hMenu);
 
-                        if (cmd == 1001) insert_effect_to_track(tid, "core.fx.parametric_eq");
-                        else if (cmd == 1002) insert_effect_to_track(tid, "core.fx.delay");
-                        else if (cmd == 1003) insert_effect_to_track(tid, "core.fx.reverb");
-                        else if (cmd == 1004) insert_effect_to_track(tid, "core.fx.compressor");
-                        else if (cmd == 1005) insert_effect_to_track(tid, "core.fx.limiter");
-                        else if (cmd == 1010) insert_effect_to_track(tid, "core.fx.x_eq");
-                        else if (cmd == 1011) insert_effect_to_track(tid, "core.fx.x_compressor");
-                        else if (cmd == 1012) insert_effect_to_track(tid, "core.fx.x_multiband");
-                        else if (cmd == 1013) insert_effect_to_track(tid, "core.fx.x_reverb");
-                        else if (cmd == 1014) insert_effect_to_track(tid, "core.fx.x_distortion");
-                        else if (cmd == 1015) insert_effect_to_track(tid, "core.fx.x_limiter");
+                        if (cmd == 1001) insert_effect_to_track(tid, "core.fx.x_eq");
+                        else if (cmd == 1002) insert_effect_to_track(tid, "core.fx.x_compressor");
+                        else if (cmd == 1003) insert_effect_to_track(tid, "core.fx.x_multiband");
+                        else if (cmd == 1004) insert_effect_to_track(tid, "core.fx.x_reverb");
+                        else if (cmd == 1005) insert_effect_to_track(tid, "core.fx.x_distortion");
+                        else if (cmd == 1006) insert_effect_to_track(tid, "core.fx.x_limiter");
+                        else if (cmd == 1007) insert_effect_to_track(tid, "core.fx.delay");
+                        else if (cmd == 1008) insert_effect_to_track(tid, "core.fx.reverb");
+                        else if (cmd == 1009) insert_effect_to_track(tid, "core.fx.compressor");
+                        else if (cmd == 1010) insert_effect_to_track(tid, "core.fx.limiter");
                         return;
                     }
                 }
@@ -7682,7 +7680,9 @@ private:
                 auto& ins = track->inserts()[active_editor_effect_slot_];
                 if (ins.device) {
                     XAudioEditor::handle_effect_drag(ins.device.get(), effect_editor_bounds_,
-                                                    dragging_effect_param_idx_, x, y, status_message_);
+                                                    dragging_effect_param_idx_,
+                                                    drag_effect_start_x_, drag_effect_start_y_, drag_effect_orig_val_,
+                                                    x, y, status_message_);
                     return;
                 }
             }

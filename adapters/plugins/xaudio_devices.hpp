@@ -75,7 +75,6 @@ public:
         vis_buf_in_.fill(0.0f);
         vis_buf_out_.fill(0.0f);
         vis_write_pos_.store(0, std::memory_order_relaxed);
-        vis_decimate_counter_ = 0;
     }
 
     void reset() override {
@@ -85,7 +84,6 @@ public:
         vis_buf_in_.fill(0.0f);
         vis_buf_out_.fill(0.0f);
         vis_write_pos_.store(0, std::memory_order_relaxed);
-        vis_decimate_counter_ = 0;
     }
 
     void process(domain::AudioBufferView& buffer, std::span<const domain::MidiEvent> /*midi*/) override {
@@ -102,7 +100,6 @@ public:
             in_peak_l = std::max(in_peak_l, static_cast<float>(std::abs(l)));
             in_peak_r = std::max(in_peak_r, static_cast<float>(std::abs(r)));
 
-            // Store pre-processed mono signal (decimated: every 4th sample)
             float in_mono = static_cast<float>((l + r) * 0.5);
 
             engine_.tick(l, r);
@@ -110,14 +107,10 @@ public:
             out_peak_l = std::max(out_peak_l, static_cast<float>(std::abs(l)));
             out_peak_r = std::max(out_peak_r, static_cast<float>(std::abs(r)));
 
-            // Store post-processed mono signal (decimated)
-            if (++vis_decimate_counter_ >= 4) {
-                vis_decimate_counter_ = 0;
-                float out_mono = static_cast<float>((l + r) * 0.5);
-                vis_buf_in_[wp] = in_mono;
-                vis_buf_out_[wp] = out_mono;
-                wp = (wp + 1) % kVisBufSize;
-            }
+            float out_mono = static_cast<float>((l + r) * 0.5);
+            vis_buf_in_[wp] = in_mono;
+            vis_buf_out_[wp] = out_mono;
+            wp = (wp + 1) % kVisBufSize;
 
             if (buffer.left) buffer.left[f] = static_cast<float>(l);
             if (buffer.right) buffer.right[f] = static_cast<float>(r);
@@ -185,9 +178,12 @@ public:
     [[nodiscard]] float gain_reduction_db(size_t band = 0) const noexcept {
         return (band < engine_.gr.size()) ? engine_.gr[band] : 0.0f;
     }
+    [[nodiscard]] float band_level(size_t band = 0) const noexcept {
+        return (band < engine_.band_levels.size()) ? engine_.band_levels[band] : 0.0f;
+    }
 
-    // Signal visualization buffers (lock-free ring buffer for GUI waveform display)
-    static constexpr size_t kVisBufSize = 512;
+    // Signal visualization buffers (lock-free ring buffer for GUI spectrum and waveform display)
+    static constexpr size_t kVisBufSize = 1024;
     [[nodiscard]] const float* vis_in_data() const noexcept { return vis_buf_in_.data(); }
     [[nodiscard]] const float* vis_out_data() const noexcept { return vis_buf_out_.data(); }
     [[nodiscard]] size_t vis_write_pos() const noexcept { return vis_write_pos_.load(std::memory_order_relaxed); }
@@ -300,7 +296,6 @@ protected:
     std::array<float, kVisBufSize> vis_buf_in_{};
     std::array<float, kVisBufSize> vis_buf_out_{};
     std::atomic<size_t> vis_write_pos_{0};
-    int vis_decimate_counter_{0};
 };
 
 // ============================================================================

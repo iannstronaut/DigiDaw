@@ -207,6 +207,17 @@ TEST_CASE(UnitXAudio, XMultibandSoloAndMute) {
 
     auto [peak_l, peak_r] = view.compute_peak();
     ASSERT_TRUE(peak_l < 0.05f); // High frequencies blocked by Low Band solo
+
+    // Verify real-time band_level tracking used for 4-band histogram
+    mb.reset();
+    OwningAudioBuffer low_buf(1024);
+    for (size_t i = 0; i < 1024; ++i) {
+        low_buf.view().left[i] = 0.5f * std::sin(2.0 * xaudio::pi * 60.0 * i / 48000.0);
+        low_buf.view().right[i] = low_buf.view().left[i];
+    }
+    auto low_view = low_buf.view();
+    mb.process(low_view, empty_midi);
+    ASSERT_TRUE(mb.band_level(0) > 0.1f); // Low band registers the bass energy
 }
 
 // ============================================================================
@@ -591,6 +602,10 @@ TEST_CASE(UnitXAudio, PluginManagerRegistersAllXAudioDevices) {
     ASSERT_TRUE(res_alias_eq.is_ok());
     ASSERT_EQ(res_alias_eq.value()->name(), "X-Eq");
 
+    auto res_legacy_eq = mgr.instantiate("core.fx.parametric_eq");
+    ASSERT_TRUE(res_legacy_eq.is_ok());
+    ASSERT_TRUE(dynamic_cast<XEqDevice*>(res_legacy_eq.value().get()) != nullptr);
+
     auto res_alias_lim = mgr.instantiate("xaudio.fx.limiter");
     ASSERT_TRUE(res_alias_lim.is_ok());
     ASSERT_EQ(res_alias_lim.value()->name(), "X-Limiter");
@@ -599,3 +614,45 @@ TEST_CASE(UnitXAudio, PluginManagerRegistersAllXAudioDevices) {
     ASSERT_TRUE(res_alias_syn.is_ok());
     ASSERT_EQ(res_alias_syn.value()->name(), "X-Synth");
 }
+
+TEST_CASE(UnitXAudio, XAudioSignalVisualizationBuffers) {
+    XEqDevice eq;
+    eq.prepare(48000.0, 512);
+
+    ASSERT_EQ(eq.vis_buf_size(), 1024);
+    ASSERT_TRUE(eq.vis_in_data() != nullptr);
+    ASSERT_TRUE(eq.vis_out_data() != nullptr);
+
+    // Initial state after prepare should be clean
+    ASSERT_EQ(eq.vis_write_pos(), 0);
+
+    // Process audio buffer
+    OwningAudioBuffer buf(512);
+    for (size_t i = 0; i < 512; ++i) {
+        float sig = 0.5f * std::sin(static_cast<float>(i) * 0.1f);
+        buf.view().left[i] = sig;
+        buf.view().right[i] = sig;
+    }
+
+    std::span<const MidiEvent> empty_midi{};
+    auto view = buf.view();
+    eq.process(view, empty_midi);
+
+    // After processing 512 samples, write pos should have advanced to 512
+    ASSERT_EQ(eq.vis_write_pos(), 512);
+
+    // Check that samples were recorded
+    bool found_nonzero = false;
+    for (size_t i = 0; i < 512; ++i) {
+        if (std::abs(eq.vis_in_data()[i]) > 0.01f) {
+            found_nonzero = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(found_nonzero);
+
+    // Reset should zero write pos
+    eq.reset();
+    ASSERT_EQ(eq.vis_write_pos(), 0);
+}
+

@@ -227,12 +227,12 @@ public:
 
     static const char* get_graph_title(int kind) {
         const char* t[] = {
-            "EQ RESPONSE",
-            "TRANSFER CURVE",
-            "GAIN REDUCTION",
-            "DECAY ENVELOPE (SCHEMATIC)",
+            "SPECTRUM & FREQUENCY RESPONSE",
+            "WAVEFORM SIGNAL & COMPRESSION",
+            "4-BAND DYNAMICS HISTOGRAM",
+            "3D ROOM SIZE SIMULATION",
             "SHAPING CURVE (BEFORE TONE / DC FILTER)",
-            "LIMITING CURVE / ZERO LATENCY"
+            "WAVEFORM SIGNAL & PEAK CEILING"
         };
         return (kind >= 0 && kind < 6) ? t[kind] : "AUDIO RESPONSE";
     }
@@ -270,6 +270,16 @@ public:
         int drag_start_x{0};
         int drag_start_y{0};
         float drag_orig_val{0.0f};
+
+        // Real-time spectrum analyzer state for EQ (64 log-spaced bands)
+        static constexpr size_t kSpecBands = 64;
+        std::array<float, kSpecBands> spec_in_db{};
+        std::array<float, kSpecBands> spec_out_db{};
+        bool spec_initialized{false};
+
+        // Reverb animation & Multiband histogram level smoothing
+        float reverb_anim_phase{0.0f};
+        std::array<float, 4> mb_smooth_level{};
     };
 
     static inline std::unordered_map<void*, PluginUiState> ui_states_;
@@ -605,26 +615,30 @@ public:
         if (br_grid_norm) br_grid_norm->Release();
         if (br_grid_zero) br_grid_zero->Release();
 
-        // Specific Curves per Plugin Kind
+        // Specific Curves and Live Visualizations per Plugin Kind
         if (kind == 0) {
             auto* eq = dynamic_cast<plugins::XEqDevice*>(dev);
+            // 1. Real-time frequency spectrum analyzer (FFT) in background of EQ graph
+            render_eq_spectrum_d2d(rt, p, xfx, state, accent, font_small);
+            // 2. Static EQ response curve & interactive band nodes on top
             if (eq) {
                 render_eq_curve_d2d(rt, p, eq, state.selected_band, font_bold);
             }
         } else if (kind == 1) {
-            render_comp_curve_d2d(rt, p, xfx, accent);
+            render_comp_curve_d2d(rt, p, xfx, accent, font_bold, font_small);
+            render_comp_signal_d2d(rt, p, xfx, accent);
         } else if (kind == 2) {
-            render_multiband_graph_d2d(rt, p, xfx, font_bold, font_small, accent);
+            render_multiband_graph_d2d(rt, p, xfx, state, font_bold, font_small, accent);
         } else if (kind == 3) {
-            render_reverb_curve_d2d(rt, p, xfx, accent);
+            render_reverb_room_d2d(rt, p, xfx, state, font_bold, font_small, accent);
+            render_reverb_signal_d2d(rt, p, xfx, accent);
         } else if (kind == 4) {
             render_distortion_curve_d2d(rt, p, xfx, accent);
+            render_distortion_signal_d2d(rt, p, xfx, accent);
         } else if (kind == 5) {
-            render_limiter_curve_d2d(rt, p, xfx, accent);
+            render_limiter_curve_d2d(rt, p, xfx, accent, font_bold, font_small);
+            render_limiter_signal_d2d(rt, p, xfx, accent);
         }
-
-        // Live signal waveform overlay (input dim, output accent-colored)
-        render_signal_waveform_d2d(rt, p, xfx, accent, font_small);
 
         // Peak Meters (IN and OUT) on the right
         float m_in = xfx ? xfx->meter_in() : 0.0f;
@@ -944,26 +958,28 @@ public:
         DeleteObject(pen_grid_norm);
         DeleteObject(pen_grid_zero);
 
-        // Render Specific Graph Visualizer Curves
+        // Render Specific Graph Visualizer Curves and Live Feedback
         if (kind == 0) {
             auto* eq = dynamic_cast<plugins::XEqDevice*>(dev);
+            render_eq_spectrum_gdi(hdc, p, xfx, state, accent);
             if (eq) {
                 render_eq_curve_gdi(hdc, p, eq, state.selected_band, font_bold);
             }
         } else if (kind == 1) {
-            render_comp_curve_gdi(hdc, p, xfx, accent);
+            render_comp_curve_gdi(hdc, p, xfx, accent, font_small);
+            render_comp_signal_gdi(hdc, p, xfx, accent);
         } else if (kind == 2) {
-            render_multiband_graph_gdi(hdc, p, xfx, font_bold, font_small, accent);
+            render_multiband_graph_gdi(hdc, p, xfx, state, font_bold, font_small, accent);
         } else if (kind == 3) {
-            render_reverb_curve_gdi(hdc, p, xfx, accent);
+            render_reverb_room_gdi(hdc, p, xfx, state, font_bold, font_small, accent);
+            render_reverb_signal_gdi(hdc, p, xfx, accent);
         } else if (kind == 4) {
             render_distortion_curve_gdi(hdc, p, xfx, accent);
+            render_distortion_signal_gdi(hdc, p, xfx, accent);
         } else if (kind == 5) {
-            render_limiter_curve_gdi(hdc, p, xfx, accent);
+            render_limiter_curve_gdi(hdc, p, xfx, accent, font_small);
+            render_limiter_signal_gdi(hdc, p, xfx, accent);
         }
-
-        // Live signal waveform overlay
-        render_signal_waveform_gdi(hdc, p, xfx, accent);
 
         // Peak Meters (IN and OUT)
         float m_in = xfx ? xfx->meter_in() : 0.0f;
@@ -1254,209 +1270,622 @@ public:
         }
     }
 
+    // ------------------------------------------------------------------------
+    // 1. Compressor Waveform Signal & Transfer Curve Visualizer
+    // ------------------------------------------------------------------------
     static void render_comp_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
-                                      plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+                                      plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent,
+                                      IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
         if (!rt || !dev) return;
+        (void)font_bold;
         double thresh = dev->get_plain(4);
         double ratio = dev->get_plain(5);
         double knee = dev->get_plain(8);
         double makeup = dev->get_plain(9);
+        float gr = dev->gain_reduction_db(0);
 
-        ID2D1SolidColorBrush* br = nullptr;
-        rt->CreateSolidColorBrush(accent, &br);
-        if (!br) return;
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        float mid_y = (p.top + p.bottom) * 0.5f;
+        float half_h = ph * 0.44f;
 
-        float prev_x = p.left, prev_y = p.bottom;
-        bool first = true;
-        const int steps = 160;
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double db = -60.0 + 60.0 * t;
-            double red = xaudio::reduction(db, thresh, ratio, knee);
-            double v = 1.0 - std::clamp((db - red + makeup + 60.0) / 60.0, 0.0, 1.0);
-            float x = p.left + (p.right - p.left) * static_cast<float>(t);
-            float y = p.top + (p.bottom - p.top) * static_cast<float>(v);
-            if (!first) {
-                rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), br, 2.5f);
+        // Subtle Background Transfer Curve
+        ID2D1SolidColorBrush* br_curve = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.20f), &br_curve);
+        if (br_curve) {
+            float prev_x = p.left, prev_y = p.bottom;
+            bool first = true;
+            for (int i = 0; i <= 100; ++i) {
+                double t = static_cast<double>(i) / 100.0;
+                double db = -60.0 + 60.0 * t;
+                double red = xaudio::reduction(db, thresh, ratio, knee);
+                double v = 1.0 - std::clamp((db - red + makeup + 60.0) / 60.0, 0.0, 1.0);
+                float cx = p.left + pw * static_cast<float>(t);
+                float cy = p.top + ph * static_cast<float>(v);
+                if (!first) rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(cx, cy), br_curve, 1.2f);
+                prev_x = cx; prev_y = cy; first = false;
             }
-            prev_x = x;
-            prev_y = y;
-            first = false;
+            br_curve->Release();
         }
-        br->Release();
+
+        // Threshold Horizontal Guidelines
+        float thresh_amp = static_cast<float>(xaudio::dbGain(thresh));
+        float y_th_top = mid_y - std::clamp(thresh_amp, 0.0f, 1.0f) * half_h;
+        float y_th_bot = mid_y + std::clamp(thresh_amp, 0.0f, 1.0f) * half_h;
+
+        ID2D1SolidColorBrush* br_thresh = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.88f, 0.92f, 0.28f), &br_thresh);
+        if (br_thresh) {
+            rt->DrawLine(D2D1::Point2F(p.left, y_th_top), D2D1::Point2F(p.right, y_th_top), br_thresh, 1.0f);
+            rt->DrawLine(D2D1::Point2F(p.left, y_th_bot), D2D1::Point2F(p.right, y_th_bot), br_thresh, 1.0f);
+            br_thresh->Release();
+        }
+
+        // Live Audio Waveform Signal (Input uncompressed + Output compressed)
+        const float* in_data = dev->vis_in_data();
+        const float* out_data = dev->vis_out_data();
+        size_t wp = dev->vis_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
+        constexpr size_t wave_pts = 256;
+
+        ID2D1SolidColorBrush* br_in = nullptr;
+        ID2D1SolidColorBrush* br_out = nullptr;
+        ID2D1SolidColorBrush* br_gr = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.42f, 0.50f, 0.58f, 0.35f), &br_in);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f), &br_out);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.40f, 0.32f, 0.55f), &br_gr);
+
+        if (br_in && br_out) {
+            float prev_in_x = p.left, prev_in_y = mid_y;
+            float prev_out_x = p.left, prev_out_y = mid_y;
+            bool first = true;
+
+            for (size_t i = 0; i < wave_pts; ++i) {
+                size_t idx = (wp + N - wave_pts + i) % N;
+                float s_in = in_data[idx];
+                float s_out = out_data[idx];
+
+                float x = p.left + (static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw;
+                float y_in = mid_y - std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h;
+                float y_out = mid_y - std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h;
+
+                if (!first) {
+                    rt->DrawLine(D2D1::Point2F(prev_in_x, prev_in_y), D2D1::Point2F(x, y_in), br_in, 1.0f);
+                    rt->DrawLine(D2D1::Point2F(prev_out_x, prev_out_y), D2D1::Point2F(x, y_out), br_out, 2.0f);
+
+                    if (br_gr && std::abs(s_in) > std::abs(s_out) + 0.03f) {
+                        rt->DrawLine(D2D1::Point2F(x, y_in), D2D1::Point2F(x, y_out), br_gr, 1.5f);
+                    }
+                }
+                prev_in_x = x; prev_in_y = y_in;
+                prev_out_x = x; prev_out_y = y_out;
+                first = false;
+            }
+        }
+        if (br_in) br_in->Release();
+        if (br_out) br_out->Release();
+        if (br_gr) br_gr->Release();
+
+        // Badges & Readouts
+        if (font_small) {
+            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
+            D2D1_RECT_F gr_rc = D2D1::RectF(p.left + 12.0f, p.top + 6.0f, p.left + 230.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, "WAVEFORM SIGNAL   |   " + gr_str, gr_rc,
+                                   (gr > 0.1f) ? D2D1::ColorF(1.0f, 0.45f, 0.35f, 0.95f) : D2D1::ColorF(accent.r, accent.g, accent.b, 0.85f));
+
+            D2D1_RECT_F leg_rc = D2D1::RectF(p.right - 230.0f, p.top + 6.0f, p.right - 10.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, "▬ IN SIGNAL   ▬ OUT (COMPRESSED)", leg_rc,
+                                   D2D1::ColorF(0xab / 255.f, 0xb3 / 255.f, 0xc0 / 255.f));
+        }
+    }
+
+    static void render_comp_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                      plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+        render_comp_curve_d2d(rt, p, dev, accent, nullptr, nullptr);
     }
 
     static void render_comp_curve_gdi(HDC hdc, const RECT& p,
-                                      plugins::XAudioEffectDevice* dev, COLORREF accent) {
+                                      plugins::XAudioEffectDevice* dev, COLORREF accent,
+                                      HFONT font_small = NULL) {
         if (!hdc || !dev) return;
         double thresh = dev->get_plain(4);
-        double ratio = dev->get_plain(5);
-        double knee = dev->get_plain(8);
-        double makeup = dev->get_plain(9);
+        float gr = dev->gain_reduction_db(0);
 
-        HPEN pen = CreatePen(PS_SOLID, 2, accent);
-        HGDIOBJ old_pen = SelectObject(hdc, pen);
-
-        int prev_x = p.left, prev_y = p.bottom;
-        bool first = true;
-        const int steps = 160;
         int pw = p.right - p.left;
         int ph = p.bottom - p.top;
+        int mid_y = (p.top + p.bottom) / 2;
+        int half_h = static_cast<int>(ph * 0.44f);
 
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double db = -60.0 + 60.0 * t;
-            double red = xaudio::reduction(db, thresh, ratio, knee);
-            double v = 1.0 - std::clamp((db - red + makeup + 60.0) / 60.0, 0.0, 1.0);
-            int x = p.left + static_cast<int>(pw * t);
-            int y = p.top + static_cast<int>(ph * v);
-            if (!first) {
-                MoveToEx(hdc, prev_x, prev_y, NULL);
-                LineTo(hdc, x, y);
-            }
-            prev_x = x;
-            prev_y = y;
-            first = false;
+        float thresh_amp = static_cast<float>(xaudio::dbGain(thresh));
+        int y_th_top = mid_y - static_cast<int>(std::clamp(thresh_amp, 0.0f, 1.0f) * half_h);
+        int y_th_bot = mid_y + static_cast<int>(std::clamp(thresh_amp, 0.0f, 1.0f) * half_h);
+
+        HPEN pen_th = CreatePen(PS_DOT, 1, RGB(90, 105, 120));
+        HGDIOBJ old_pen = SelectObject(hdc, pen_th);
+        MoveToEx(hdc, p.left, y_th_top, NULL); LineTo(hdc, p.right, y_th_top);
+        MoveToEx(hdc, p.left, y_th_bot, NULL); LineTo(hdc, p.right, y_th_bot);
+        DeleteObject(pen_th);
+
+        const float* in_data = dev->vis_in_data();
+        const float* out_data = dev->vis_out_data();
+        size_t wp = dev->vis_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
+        constexpr size_t wave_pts = 200;
+
+        HPEN pen_in = CreatePen(PS_SOLID, 1, RGB(80, 95, 110));
+        HPEN pen_out = CreatePen(PS_SOLID, 2, accent);
+
+        SelectObject(hdc, pen_in);
+        for (size_t i = 0; i < wave_pts; ++i) {
+            size_t idx = (wp + N - wave_pts + i) % N;
+            float s_in = in_data[idx];
+            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
+            int y = mid_y - static_cast<int>(std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h);
+            if (i == 0) MoveToEx(hdc, x, y, NULL);
+            else LineTo(hdc, x, y);
         }
+
+        SelectObject(hdc, pen_out);
+        for (size_t i = 0; i < wave_pts; ++i) {
+            size_t idx = (wp + N - wave_pts + i) % N;
+            float s_out = out_data[idx];
+            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
+            int y = mid_y - static_cast<int>(std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h);
+            if (i == 0) MoveToEx(hdc, x, y, NULL);
+            else LineTo(hdc, x, y);
+        }
+
         SelectObject(hdc, old_pen);
-        DeleteObject(pen);
+        DeleteObject(pen_in);
+        DeleteObject(pen_out);
+
+        if (font_small) {
+            SelectObject(hdc, font_small);
+            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
+            RECT gr_rc{p.left + 12, p.top + 6, p.left + 230, p.top + 24};
+            GuiRenderer::draw_text(hdc, "WAVEFORM SIGNAL   |   " + gr_str, gr_rc,
+                                   (gr > 0.1f) ? RGB(255, 115, 90) : accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. Multiband Dynamics: 4-Band Histogram Visualizer
+    // ------------------------------------------------------------------------
+    static void render_multiband_graph_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                          plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                          IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small,
+                                          D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        (void)accent;
+        const char* band_names[] = {"LOW", "LOW MID", "HIGH MID", "HIGH"};
+        float pw = p.right - p.left;
+        float col_w = pw / 4.0f;
+
+        double cross1 = dev->get_plain(4);
+        double cross2 = dev->get_plain(5);
+        double cross3 = dev->get_plain(6);
+
+        ID2D1SolidColorBrush* br_slot = nullptr;
+        ID2D1SolidColorBrush* br_gr = nullptr;
+        ID2D1SolidColorBrush* br_div = nullptr;
+        ID2D1SolidColorBrush* br_line = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x16 / 255.f, 0x1a / 255.f, 0x22 / 255.f), &br_slot);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.40f, 0.32f, 0.85f), &br_gr);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x2d / 255.f, 0x37 / 255.f, 0x46 / 255.f), &br_div);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.18f), &br_line);
+
+        for (int b = 0; b < 4; ++b) {
+            float bx = p.left + static_cast<float>(b) * col_w;
+            D2D1_RECT_F col_rc = D2D1::RectF(bx + 4.0f, p.top + 4.0f, bx + col_w - 4.0f, p.bottom - 4.0f);
+
+            if (br_slot) rt->FillRoundedRectangle(D2D1::RoundedRect(col_rc, 4.0f, 4.0f), br_slot);
+
+            float raw_lvl = dev->band_level(b);
+            state.mb_smooth_level[b] = (raw_lvl > state.mb_smooth_level[b])
+                ? (state.mb_smooth_level[b] * 0.25f + raw_lvl * 0.75f)
+                : (state.mb_smooth_level[b] * 0.90f + raw_lvl * 0.10f);
+
+            float db_in = 20.0f * std::log10(std::max(state.mb_smooth_level[b], 1e-4f));
+            float h_norm = std::clamp((db_in + 48.0f) / 54.0f, 0.0f, 1.0f);
+
+            float inner_h = col_rc.bottom - col_rc.top - 46.0f;
+            float bar_h = h_norm * inner_h;
+
+            D2D1_COLOR_F bc = get_band_color_d2d(b);
+            ID2D1SolidColorBrush* br_band = nullptr;
+            ID2D1SolidColorBrush* br_peak = nullptr;
+            rt->CreateSolidColorBrush(D2D1::ColorF(bc.r, bc.g, bc.b, 0.65f), &br_band);
+            rt->CreateSolidColorBrush(D2D1::ColorF(bc.r, bc.g, bc.b, 0.95f), &br_peak);
+
+            if (bar_h > 1.0f && br_band) {
+                D2D1_RECT_F bar_rc = D2D1::RectF(col_rc.left + 6.0f, col_rc.bottom - 22.0f - bar_h,
+                                                 col_rc.right - 6.0f, col_rc.bottom - 22.0f);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(bar_rc, 3.0f, 3.0f), br_band);
+                if (br_peak) {
+                    rt->DrawLine(D2D1::Point2F(bar_rc.left, bar_rc.top), D2D1::Point2F(bar_rc.right, bar_rc.top), br_peak, 2.0f);
+                }
+            }
+
+            float gr = dev->gain_reduction_db(b);
+            float gr_norm = std::clamp(gr / 24.0f, 0.0f, 1.0f);
+            float gr_h = gr_norm * inner_h * 0.55f;
+            if (gr_h > 1.0f && br_gr) {
+                D2D1_RECT_F gr_rc = D2D1::RectF(col_rc.left + 8.0f, col_rc.top + 26.0f,
+                                               col_rc.right - 8.0f, col_rc.top + 26.0f + gr_h);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(gr_rc, 2.0f, 2.0f), br_gr);
+            }
+
+            double thresh = dev->get_plain(7 + b * 8);
+            float th_norm = std::clamp(static_cast<float>(thresh + 48.0) / 54.0f, 0.0f, 1.0f);
+            float th_y = col_rc.bottom - 22.0f - th_norm * inner_h;
+            if (br_line) {
+                rt->DrawLine(D2D1::Point2F(col_rc.left + 4.0f, th_y), D2D1::Point2F(col_rc.right - 4.0f, th_y), br_line, 1.2f);
+            }
+
+            D2D1_RECT_F hdr_rc = D2D1::RectF(col_rc.left, col_rc.top + 5.0f, col_rc.right, col_rc.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_bold, band_names[b], hdr_rc, bc);
+
+            std::string gr_text = (gr > 0.1f) ? ("-" + format_1dec(gr) + " dB") : "0 dB";
+            D2D1_RECT_F gr_lbl_rc = D2D1::RectF(col_rc.left, col_rc.top + 26.0f, col_rc.right, col_rc.top + 44.0f);
+            D2DRenderer::draw_text(rt, font_small, gr_text, gr_lbl_rc, (gr > 0.1f) ? D2D1::ColorF(1.0f, 0.45f, 0.35f) : D2D1::ColorF(0.6f, 0.65f, 0.7f));
+
+            std::string lvl_text = (db_in <= -47.0f) ? "-inf" : format_1dec(db_in) + " dB";
+            D2D1_RECT_F lvl_rc = D2D1::RectF(col_rc.left, col_rc.bottom - 20.0f, col_rc.right, col_rc.bottom - 4.0f);
+            D2DRenderer::draw_text(rt, font_small, lvl_text, lvl_rc, D2D1::ColorF(0xab / 255.f, 0xb3 / 255.f, 0xc0 / 255.f));
+
+            if (br_band) br_band->Release();
+            if (br_peak) br_peak->Release();
+
+            if (b < 3 && br_div) {
+                float div_x = bx + col_w;
+                rt->DrawLine(D2D1::Point2F(div_x, p.top + 2.0f), D2D1::Point2F(div_x, p.bottom - 2.0f), br_div, 1.5f);
+
+                double cf = (b == 0) ? cross1 : (b == 1) ? cross2 : cross3;
+                std::string c_str = format_param_display("Hz", cf);
+                D2D1_RECT_F c_rc = D2D1::RectF(div_x - 30.0f, p.bottom - 18.0f, div_x + 30.0f, p.bottom - 2.0f);
+                ID2D1SolidColorBrush* br_c_bg = nullptr;
+                rt->CreateSolidColorBrush(D2D1::ColorF(0x1a / 255.f, 0x22 / 255.f, 0x2e / 255.f), &br_c_bg);
+                if (br_c_bg) {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(c_rc, 2.0f, 2.0f), br_c_bg);
+                    br_c_bg->Release();
+                }
+                D2DRenderer::draw_text(rt, font_small, c_str, c_rc, D2D1::ColorF(0x8a / 255.f, 0x9b / 255.f, 0xac / 255.f));
+            }
+        }
+
+        if (br_slot) br_slot->Release();
+        if (br_gr) br_gr->Release();
+        if (br_div) br_div->Release();
+        if (br_line) br_line->Release();
     }
 
     static void render_multiband_graph_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
                                           plugins::XAudioEffectDevice* dev,
                                           IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small,
                                           D2D1_COLOR_F accent) {
-        if (!rt || !dev) return;
-        const char* area[] = {"Low", "Low mid", "High mid", "High"};
-        float w = (p.right - p.left) / 4.0f;
+        PluginUiState dummy;
+        render_multiband_graph_d2d(rt, p, dev, dummy, font_bold, font_small, accent);
+    }
 
-        ID2D1SolidColorBrush* br_slot = nullptr;
-        ID2D1SolidColorBrush* br_fill = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0x30 / 255.f, 0x42 / 255.f, 0x4e / 255.f), &br_slot);
-        rt->CreateSolidColorBrush(accent, &br_fill);
+    static void render_multiband_graph_gdi(HDC hdc, const RECT& p,
+                                          plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                          HFONT font_bold, HFONT font_small,
+                                          COLORREF accent) {
+        if (!hdc || !dev) return;
+        (void)accent;
+        const char* band_names[] = {"LOW", "LOW MID", "HIGH MID", "HIGH"};
+        int pw = p.right - p.left;
+        int col_w = pw / 4;
 
         for (int b = 0; b < 4; ++b) {
-            float x = p.left + static_cast<float>(b) * w;
-            float gr = dev->gain_reduction_db(b);
+            int bx = p.left + b * col_w;
+            RECT col_rc{bx + 4, p.top + 4, bx + col_w - 4, p.bottom - 4};
+            GuiRenderer::draw_rounded_box(hdc, col_rc, RGB(22, 26, 34), RGB(38, 46, 56), 4);
 
-            // Slot
-            D2D1_RECT_F slot_rc = D2D1::RectF(x + 14.0f, p.top + 25.0f, x + w - 14.0f, p.top + 33.0f);
-            if (br_slot) rt->FillRoundedRectangle(D2D1::RoundedRect(slot_rc, 4.0f, 4.0f), br_slot);
+            COLORREF bc = get_band_color_gdi(b);
 
-            // Fill
-            float fill_w = (w - 28.0f) * std::clamp(gr / 24.0f, 0.0f, 1.0f);
-            if (fill_w > 0.5f && br_fill) {
-                D2D1_RECT_F fill_rc = D2D1::RectF(x + 14.0f, p.top + 25.0f, x + 14.0f + fill_w, p.top + 33.0f);
-                rt->FillRoundedRectangle(D2D1::RoundedRect(fill_rc, 4.0f, 4.0f), br_fill);
+            float raw_lvl = dev->band_level(b);
+            state.mb_smooth_level[b] = (raw_lvl > state.mb_smooth_level[b])
+                ? (state.mb_smooth_level[b] * 0.25f + raw_lvl * 0.75f)
+                : (state.mb_smooth_level[b] * 0.90f + raw_lvl * 0.10f);
+
+            float db_in = 20.0f * std::log10(std::max(state.mb_smooth_level[b], 1e-4f));
+            float h_norm = std::clamp((db_in + 48.0f) / 54.0f, 0.0f, 1.0f);
+
+            int inner_h = col_rc.bottom - col_rc.top - 46;
+            int bar_h = static_cast<int>(h_norm * inner_h);
+
+            if (bar_h > 1) {
+                RECT bar_rc{col_rc.left + 6, col_rc.bottom - 22 - bar_h, col_rc.right - 6, col_rc.bottom - 22};
+                GuiRenderer::fill_rect(hdc, bar_rc, bc);
             }
 
-            // dB text (large bold readout)
-            std::ostringstream ss;
-            ss << std::fixed << std::setprecision(1) << gr << " dB";
-            D2D1_RECT_F db_rc = D2D1::RectF(x, p.top + 46.0f, x + w, p.top + 76.0f);
-            D2DRenderer::draw_text(rt, font_bold, ss.str(), db_rc, D2D1::ColorF(0xe5 / 255.f, 0xec / 255.f, 0xef / 255.f));
+            float gr = dev->gain_reduction_db(b);
+            float gr_norm = std::clamp(gr / 24.0f, 0.0f, 1.0f);
+            int gr_h = static_cast<int>(gr_norm * inner_h * 0.55f);
+            if (gr_h > 1) {
+                RECT gr_rc{col_rc.left + 8, col_rc.top + 26, col_rc.right - 8, col_rc.top + 26 + gr_h};
+                GuiRenderer::fill_rect(hdc, gr_rc, RGB(255, 100, 80));
+            }
 
-            // Area name
-            D2D1_RECT_F area_rc = D2D1::RectF(x, p.top + 85.0f, x + w, p.top + 107.0f);
-            D2DRenderer::draw_text(rt, font_small, area[b], area_rc, D2D1::ColorF(0xa9 / 255.f, 0xba / 255.f, 0xc3 / 255.f));
+            SelectObject(hdc, font_bold);
+            RECT hdr_rc{col_rc.left, col_rc.top + 5, col_rc.right, col_rc.top + 24};
+            GuiRenderer::draw_text(hdc, band_names[b], hdr_rc, bc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            SelectObject(hdc, font_small);
+            std::string gr_text = (gr > 0.1f) ? ("-" + format_1dec(gr) + " dB") : "0 dB";
+            RECT gr_lbl_rc{col_rc.left, col_rc.top + 26, col_rc.right, col_rc.top + 44};
+            GuiRenderer::draw_text(hdc, gr_text, gr_lbl_rc, (gr > 0.1f) ? RGB(255, 115, 90) : RGB(150, 165, 178), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            std::string lvl_text = (db_in <= -47.0f) ? "-inf" : format_1dec(db_in) + " dB";
+            RECT lvl_rc{col_rc.left, col_rc.bottom - 20, col_rc.right, col_rc.bottom - 4};
+            GuiRenderer::draw_text(hdc, lvl_text, lvl_rc, RGB(171, 179, 192), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-
-        if (br_slot) br_slot->Release();
-        if (br_fill) br_fill->Release();
     }
 
     static void render_multiband_graph_gdi(HDC hdc, const RECT& p,
                                           plugins::XAudioEffectDevice* dev,
                                           HFONT font_bold, HFONT font_small,
                                           COLORREF accent) {
-        if (!hdc || !dev) return;
-        const char* area[] = {"Low", "Low mid", "High mid", "High"};
-        int pw = p.right - p.left;
-        int w = pw / 4;
+        PluginUiState dummy;
+        render_multiband_graph_gdi(hdc, p, dev, dummy, font_bold, font_small, accent);
+    }
 
-        for (int b = 0; b < 4; ++b) {
-            int x = p.left + b * w;
-            float gr = dev->gain_reduction_db(b);
+    // ------------------------------------------------------------------------
+    // 3. Reverb 3D Room Size Simulation (Fruity Reeverb 2 Style Perspective Box)
+    // ------------------------------------------------------------------------
+    static void render_reverb_room_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                       plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                       IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small,
+                                       D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        (void)font_bold;
+        double predelay = dev->get_plain(4);
+        double decay = dev->get_plain(5);
+        double width = dev->get_plain(8);
+        float m_out = dev->meter_out();
 
-            RECT slot_rc{x + 14, p.top + 25, x + w - 14, p.top + 33};
-            GuiRenderer::draw_rounded_box(hdc, slot_rc, RGB(48, 66, 78), RGB(32, 36, 43), 4);
+        state.reverb_anim_phase += 0.05f;
+        if (state.reverb_anim_phase > 6.28318f) state.reverb_anim_phase -= 6.28318f;
 
-            int fill_w = static_cast<int>((w - 28) * std::clamp(gr / 24.0f, 0.0f, 1.0f));
-            if (fill_w > 1) {
-                RECT fill_rc{x + 14, p.top + 25, x + 14 + fill_w, p.top + 33};
-                GuiRenderer::fill_rect(hdc, fill_rc, accent);
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        float cx = (p.left + p.right) * 0.5f;
+        float cy = (p.top + p.bottom) * 0.5f + 4.0f;
+
+        float decay_norm = std::clamp(static_cast<float>((decay - 0.2) / 10.0), 0.08f, 1.0f);
+        float width_norm = std::clamp(static_cast<float>(width / 100.0), 0.40f, 1.0f);
+
+        float front_w = (pw * 0.45f + decay_norm * pw * 0.35f) * width_norm;
+        float front_h = ph * 0.40f + decay_norm * ph * 0.30f;
+        float depth_factor = 0.35f + decay_norm * 0.42f;
+        float back_scale = 1.0f - depth_factor * 0.45f;
+        float back_w = front_w * back_scale;
+        float back_h = front_h * back_scale;
+        float back_cy = cy - 20.0f * depth_factor;
+
+        D2D1_POINT_2F F_TL = D2D1::Point2F(cx - front_w * 0.5f, cy - front_h * 0.45f);
+        D2D1_POINT_2F F_TR = D2D1::Point2F(cx + front_w * 0.5f, cy - front_h * 0.45f);
+        D2D1_POINT_2F F_BR = D2D1::Point2F(cx + front_w * 0.5f, cy + front_h * 0.55f);
+        D2D1_POINT_2F F_BL = D2D1::Point2F(cx - front_w * 0.5f, cy + front_h * 0.55f);
+
+        D2D1_POINT_2F B_TL = D2D1::Point2F(cx - back_w * 0.5f, back_cy - back_h * 0.45f);
+        D2D1_POINT_2F B_TR = D2D1::Point2F(cx + back_w * 0.5f, back_cy - back_h * 0.45f);
+        D2D1_POINT_2F B_BR = D2D1::Point2F(cx + back_w * 0.5f, back_cy + back_h * 0.55f);
+        D2D1_POINT_2F B_BL = D2D1::Point2F(cx - back_w * 0.5f, back_cy + back_h * 0.55f);
+
+        ID2D1Factory* factory = nullptr;
+        rt->GetFactory(&factory);
+
+        ID2D1SolidColorBrush* br_back = nullptr;
+        ID2D1SolidColorBrush* br_back_stroke = nullptr;
+        ID2D1SolidColorBrush* br_floor = nullptr;
+        ID2D1SolidColorBrush* br_wire = nullptr;
+        ID2D1SolidColorBrush* br_front = nullptr;
+        ID2D1SolidColorBrush* br_wave = nullptr;
+
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x16 / 255.f, 0x24 / 255.f, 0x36 / 255.f, 0.70f), &br_back);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.35f), &br_back_stroke);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.18f), &br_floor);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.60f), &br_wire);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.95f), &br_front);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.40f), &br_wave);
+
+        // 1. Shaded Back Wall
+        if (factory && br_back && br_back_stroke) {
+            ID2D1PathGeometry* path_back = nullptr;
+            factory->CreatePathGeometry(&path_back);
+            if (path_back) {
+                ID2D1GeometrySink* sink = nullptr;
+                path_back->Open(&sink);
+                if (sink) {
+                    sink->BeginFigure(B_TL, D2D1_FIGURE_BEGIN_FILLED);
+                    sink->AddLine(B_TR);
+                    sink->AddLine(B_BR);
+                    sink->AddLine(B_BL);
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                    sink->Release();
+                }
+                rt->FillGeometry(path_back, br_back);
+                rt->DrawGeometry(path_back, br_back_stroke, 1.0f);
+                path_back->Release();
             }
-
-            SelectObject(hdc, font_bold);
-            std::ostringstream ss;
-            ss << std::fixed << std::setprecision(1) << gr << " dB";
-            RECT db_rc{x, p.top + 46, x + w, p.top + 76};
-            GuiRenderer::draw_text(hdc, ss.str(), db_rc, RGB(229, 236, 239), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(hdc, font_small);
-            RECT area_rc{x, p.top + 85, x + w, p.top + 107};
-            GuiRenderer::draw_text(hdc, area[b], area_rc, RGB(169, 186, 195), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+
+        // 2. Perspective Floor Grid
+        if (br_floor) {
+            for (int fl = 1; fl < 4; ++fl) {
+                float ft = static_cast<float>(fl) / 4.0f;
+                float fx = F_BL.x + (F_BR.x - F_BL.x) * ft;
+                float bx = B_BL.x + (B_BR.x - B_BL.x) * ft;
+                rt->DrawLine(D2D1::Point2F(fx, F_BL.y), D2D1::Point2F(bx, B_BL.y), br_floor, 1.0f);
+            }
+            for (int t = 1; t < 3; ++t) {
+                float tt = static_cast<float>(t) / 3.0f;
+                float ly = F_BL.y + (B_BL.y - F_BL.y) * tt;
+                float lx = F_BL.x + (B_BL.x - F_BL.x) * tt;
+                float rx = F_BR.x + (B_BR.x - F_BR.x) * tt;
+                rt->DrawLine(D2D1::Point2F(lx, ly), D2D1::Point2F(rx, ly), br_floor, 1.0f);
+            }
+        }
+
+        // 3. Perspective Connecting Edges
+        if (br_wire) {
+            rt->DrawLine(F_TL, B_TL, br_wire, 1.5f);
+            rt->DrawLine(F_TR, B_TR, br_wire, 1.5f);
+            rt->DrawLine(F_BR, B_BR, br_wire, 1.5f);
+            rt->DrawLine(F_BL, B_BL, br_wire, 1.5f);
+        }
+
+        // 4. Glowing Front Face Wireframe
+        if (br_front) {
+            rt->DrawLine(F_TL, F_TR, br_front, 2.2f);
+            rt->DrawLine(F_TR, F_BR, br_front, 2.2f);
+            rt->DrawLine(F_BR, F_BL, br_front, 2.2f);
+            rt->DrawLine(F_BL, F_TL, br_front, 2.2f);
+        }
+
+        // 5. Sound Source & Animated Sound Reflection Waves
+        D2D1_POINT_2F floor_center = D2D1::Point2F(cx, (F_BL.y + B_BL.y) * 0.5f);
+        if (br_front) {
+            rt->FillEllipse(D2D1::Ellipse(floor_center, 4.0f, 4.0f), br_front);
+        }
+
+        if (br_wave && m_out > 0.001f) {
+            float max_rx = (front_w * 0.45f);
+            float max_ry = max_rx * 0.35f;
+            for (int w = 0; w < 3; ++w) {
+                float wave_t = std::fmod(state.reverb_anim_phase * 0.5f + static_cast<float>(w) / 3.0f, 1.0f);
+                float rx = wave_t * max_rx;
+                float ry = wave_t * max_ry;
+                float alpha = (1.0f - wave_t) * std::clamp(m_out * 2.0f, 0.15f, 0.85f);
+                ID2D1SolidColorBrush* br_w = nullptr;
+                rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, alpha), &br_w);
+                if (br_w) {
+                    rt->DrawEllipse(D2D1::Ellipse(floor_center, rx, ry), br_w, 1.2f);
+                    br_w->Release();
+                }
+            }
+        }
+
+        // 6. Badges and Room Classification Readout
+        if (font_small) {
+            std::string room_type = (decay < 0.8) ? "Closet / Small Booth"
+                                  : (decay < 1.6) ? "Studio Room"
+                                  : (decay < 2.8) ? "Medium Chamber"
+                                  : (decay < 4.8) ? "Concert Hall"
+                                                  : "Cathedral / Arena";
+
+            D2D1_RECT_F title_rc = D2D1::RectF(p.left + 12.0f, p.top + 6.0f, p.left + 350.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, "3D ROOM SIMULATION   |   " + room_type, title_rc, accent);
+
+            std::string dim_str = "Decay: " + format_1dec(decay) + " s   |   Width: " + std::to_string(static_cast<int>(width)) + "%   |   Predelay: " + format_1dec(predelay) + " ms";
+            D2D1_RECT_F dim_rc = D2D1::RectF(p.left + 12.0f, p.bottom - 22.0f, p.right - 12.0f, p.bottom - 4.0f);
+            D2DRenderer::draw_text(rt, font_small, dim_str, dim_rc, D2D1::ColorF(0xab / 255.f, 0xb3 / 255.f, 0xc0 / 255.f));
+        }
+
+        if (factory) factory->Release();
+        if (br_back) br_back->Release();
+        if (br_back_stroke) br_back_stroke->Release();
+        if (br_floor) br_floor->Release();
+        if (br_wire) br_wire->Release();
+        if (br_front) br_front->Release();
+        if (br_wave) br_wave->Release();
     }
 
     static void render_reverb_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
                                        plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
-        if (!rt || !dev) return;
+        PluginUiState dummy;
+        render_reverb_room_d2d(rt, p, dev, dummy, nullptr, nullptr, accent);
+    }
+
+    static void render_reverb_room_gdi(HDC hdc, const RECT& p,
+                                       plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                       HFONT font_bold, HFONT font_small,
+                                       COLORREF accent) {
+        if (!hdc || !dev) return;
         double predelay = dev->get_plain(4);
         double decay = dev->get_plain(5);
+        double width = dev->get_plain(8);
 
-        ID2D1SolidColorBrush* br = nullptr;
-        rt->CreateSolidColorBrush(accent, &br);
-        if (!br) return;
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+        int cx = (p.left + p.right) / 2;
+        int cy = (p.top + p.bottom) / 2 + 4;
 
-        float prev_x = p.left, prev_y = p.top;
-        bool first = true;
-        const int steps = 160;
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double v = std::clamp(60.0 * std::max(0.0, t * 12.0 - predelay * 0.001) / decay / 80.0, 0.0, 1.0);
-            float x = p.left + (p.right - p.left) * static_cast<float>(t);
-            float y = p.top + static_cast<float>(v) * (p.bottom - p.top);
-            if (!first) {
-                rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), br, 2.5f);
-            }
-            prev_x = x;
-            prev_y = y;
-            first = false;
+        float decay_norm = std::clamp(static_cast<float>((decay - 0.2) / 10.0), 0.08f, 1.0f);
+        float width_norm = std::clamp(static_cast<float>(width / 100.0), 0.40f, 1.0f);
+
+        int front_w = static_cast<int>((pw * 0.45f + decay_norm * pw * 0.35f) * width_norm);
+        int front_h = static_cast<int>(ph * 0.40f + decay_norm * ph * 0.30f);
+        float depth_factor = 0.35f + decay_norm * 0.42f;
+        float back_scale = 1.0f - depth_factor * 0.45f;
+        int back_w = static_cast<int>(front_w * back_scale);
+        int back_h = static_cast<int>(front_h * back_scale);
+        int back_cy = cy - static_cast<int>(20.0f * depth_factor);
+
+        POINT F_TL{cx - front_w / 2, cy - static_cast<int>(front_h * 0.45f)};
+        POINT F_TR{cx + front_w / 2, cy - static_cast<int>(front_h * 0.45f)};
+        POINT F_BR{cx + front_w / 2, cy + static_cast<int>(front_h * 0.55f)};
+        POINT F_BL{cx - front_w / 2, cy + static_cast<int>(front_h * 0.55f)};
+
+        POINT B_TL{cx - back_w / 2, back_cy - static_cast<int>(back_h * 0.45f)};
+        POINT B_TR{cx + back_w / 2, back_cy - static_cast<int>(back_h * 0.45f)};
+        POINT B_BR{cx + back_w / 2, back_cy + static_cast<int>(back_h * 0.55f)};
+        POINT B_BL{cx - back_w / 2, back_cy + static_cast<int>(back_h * 0.55f)};
+
+        POINT back_pts[4]{B_TL, B_TR, B_BR, B_BL};
+        HBRUSH br_back = CreateSolidBrush(RGB(22, 36, 54));
+        HPEN pen_back = CreatePen(PS_SOLID, 1, RGB(55, 90, 130));
+        HGDIOBJ old_br = SelectObject(hdc, br_back);
+        HGDIOBJ old_pen = SelectObject(hdc, pen_back);
+        Polygon(hdc, back_pts, 4);
+
+        HPEN pen_wire = CreatePen(PS_SOLID, 1, RGB(70, 130, 190));
+        SelectObject(hdc, pen_wire);
+        MoveToEx(hdc, F_TL.x, F_TL.y, NULL); LineTo(hdc, B_TL.x, B_TL.y);
+        MoveToEx(hdc, F_TR.x, F_TR.y, NULL); LineTo(hdc, B_TR.x, B_TR.y);
+        MoveToEx(hdc, F_BR.x, F_BR.y, NULL); LineTo(hdc, B_BR.x, B_BR.y);
+        MoveToEx(hdc, F_BL.x, F_BL.y, NULL); LineTo(hdc, B_BL.x, B_BL.y);
+
+        HPEN pen_front = CreatePen(PS_SOLID, 2, accent);
+        SelectObject(hdc, pen_front);
+        MoveToEx(hdc, F_TL.x, F_TL.y, NULL);
+        LineTo(hdc, F_TR.x, F_TR.y);
+        LineTo(hdc, F_BR.x, F_BR.y);
+        LineTo(hdc, F_BL.x, F_BL.y);
+        LineTo(hdc, F_TL.x, F_TL.y);
+
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_br);
+        DeleteObject(br_back);
+        DeleteObject(pen_back);
+        DeleteObject(pen_wire);
+        DeleteObject(pen_front);
+
+        if (font_small) {
+            SelectObject(hdc, font_small);
+            std::string room_type = (decay < 0.8) ? "Closet / Small Booth"
+                                  : (decay < 1.6) ? "Studio Room"
+                                  : (decay < 2.8) ? "Medium Chamber"
+                                  : (decay < 4.8) ? "Concert Hall"
+                                                  : "Cathedral / Arena";
+            RECT title_rc{p.left + 12, p.top + 6, p.left + 350, p.top + 24};
+            GuiRenderer::draw_text(hdc, "3D ROOM SIMULATION   |   " + room_type, title_rc, accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            std::string dim_str = "Decay: " + format_1dec(decay) + " s   |   Predelay: " + format_1dec(predelay) + " ms";
+            RECT dim_rc{p.left + 12, p.bottom - 22, p.right - 12, p.bottom - 4};
+            GuiRenderer::draw_text(hdc, dim_str, dim_rc, RGB(171, 179, 192), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
-        br->Release();
+        (void)state;
+        (void)font_bold;
     }
 
     static void render_reverb_curve_gdi(HDC hdc, const RECT& p,
                                        plugins::XAudioEffectDevice* dev, COLORREF accent) {
-        if (!hdc || !dev) return;
-        double predelay = dev->get_plain(4);
-        double decay = dev->get_plain(5);
-
-        HPEN pen = CreatePen(PS_SOLID, 2, accent);
-        HGDIOBJ old_pen = SelectObject(hdc, pen);
-
-        int prev_x = p.left, prev_y = p.top;
-        bool first = true;
-        const int steps = 160;
-        int pw = p.right - p.left;
-        int ph = p.bottom - p.top;
-
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double v = std::clamp(60.0 * std::max(0.0, t * 12.0 - predelay * 0.001) / decay / 80.0, 0.0, 1.0);
-            int x = p.left + static_cast<int>(pw * t);
-            int y = p.top + static_cast<int>(ph * v);
-            if (!first) {
-                MoveToEx(hdc, prev_x, prev_y, NULL);
-                LineTo(hdc, x, y);
-            }
-            prev_x = x;
-            prev_y = y;
-            first = false;
-        }
-        SelectObject(hdc, old_pen);
-        DeleteObject(pen);
+        PluginUiState dummy;
+        render_reverb_room_gdi(hdc, p, dev, dummy, NULL, NULL, accent);
     }
 
     static void render_distortion_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
@@ -1519,196 +1948,752 @@ public:
         DeleteObject(pen);
     }
 
+    // ------------------------------------------------------------------------
+    // 4. Limiter Waveform Signal & Peak Ceiling Visualizer
+    // ------------------------------------------------------------------------
+    static void render_limiter_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                        plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent,
+                                        IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
+        if (!rt || !dev) return;
+        (void)font_bold;
+        double ceiling = dev->get_plain(5);
+        float gr = dev->gain_reduction_db(0);
+
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        float mid_y = (p.top + p.bottom) * 0.5f;
+        float half_h = ph * 0.44f;
+
+        float ceil_amp = static_cast<float>(xaudio::dbGain(ceiling));
+        float y_ceil_top = mid_y - std::clamp(ceil_amp, 0.0f, 1.0f) * half_h;
+        float y_ceil_bot = mid_y + std::clamp(ceil_amp, 0.0f, 1.0f) * half_h;
+
+        ID2D1SolidColorBrush* br_ceil = nullptr;
+        ID2D1SolidColorBrush* br_wave = nullptr;
+        ID2D1SolidColorBrush* br_clip = nullptr;
+        ID2D1SolidColorBrush* br_atten = nullptr;
+
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.35f, 0.30f, 0.85f), &br_ceil);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f), &br_wave);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.22f, 0.22f, 0.95f), &br_clip);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.40f, 0.35f, 0.40f), &br_atten);
+
+        if (br_ceil) {
+            rt->DrawLine(D2D1::Point2F(p.left, y_ceil_top), D2D1::Point2F(p.right, y_ceil_top), br_ceil, 1.5f);
+            rt->DrawLine(D2D1::Point2F(p.left, y_ceil_bot), D2D1::Point2F(p.right, y_ceil_bot), br_ceil, 1.5f);
+        }
+
+        const float* in_data = dev->vis_in_data();
+        const float* out_data = dev->vis_out_data();
+        size_t wp = dev->vis_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
+        constexpr size_t wave_pts = 256;
+
+        if (br_wave && br_clip) {
+            float prev_x = p.left, prev_y = mid_y;
+            bool first = true;
+
+            for (size_t i = 0; i < wave_pts; ++i) {
+                size_t idx = (wp + N - wave_pts + i) % N;
+                float s_in = in_data[idx];
+                float s_out = out_data[idx];
+
+                float x = p.left + (static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw;
+                float y = mid_y - std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h;
+                float y_raw = mid_y - std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h;
+
+                bool is_clamped = (std::abs(s_in * 1.5f) > ceil_amp || (gr > 0.1f && std::abs(s_in) > std::abs(s_out) + 0.01f));
+
+                if (!first) {
+                    rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), is_clamped ? br_clip : br_wave, is_clamped ? 2.5f : 1.8f);
+                    if (is_clamped && br_atten) {
+                        rt->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x, y_raw), br_atten, 1.5f);
+                    }
+                }
+                prev_x = x; prev_y = y;
+                first = false;
+            }
+        }
+
+        if (font_small) {
+            std::string gr_text = (gr > 0.1f) ? ("LIMITING: -" + format_1dec(gr) + " dB") : "CLEAN (NO LIMITING)";
+            D2D1_RECT_F st_rc = D2D1::RectF(p.left + 12.0f, p.top + 6.0f, p.left + 260.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, "WAVEFORM SIGNAL   |   " + gr_text, st_rc,
+                                   (gr > 0.1f) ? D2D1::ColorF(1.0f, 0.40f, 0.32f) : D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f));
+
+            std::string ceil_str = "CEIL: " + format_1dec(ceiling) + " dB";
+            D2D1_RECT_F ceil_rc = D2D1::RectF(p.right - 140.0f, y_ceil_top - 18.0f, p.right - 8.0f, y_ceil_top);
+            D2DRenderer::draw_text(rt, font_small, ceil_str, ceil_rc, D2D1::ColorF(1.0f, 0.45f, 0.40f, 0.90f));
+        }
+
+        if (br_ceil) br_ceil->Release();
+        if (br_wave) br_wave->Release();
+        if (br_clip) br_clip->Release();
+        if (br_atten) br_atten->Release();
+    }
+
     static void render_limiter_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
                                         plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
-        if (!rt || !dev) return;
-        double thresh = dev->get_plain(4);
-        double ceiling = dev->get_plain(5);
-        double input = dev->get_plain(1);
-        double output = dev->get_plain(2);
-        double mix = dev->get_plain(3);
-
-        ID2D1SolidColorBrush* br = nullptr;
-        rt->CreateSolidColorBrush(accent, &br);
-        if (!br) return;
-
-        float prev_x = p.left, prev_y = p.top;
-        bool first = true;
-        const int steps = 160;
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double boost = (1.0 - mix * 0.01) + mix * 0.01 * xaudio::dbGain(-thresh);
-            double level = std::min(-60.0 + 60.0 * t + input + output + xaudio::gainDb(boost), ceiling);
-            double normalY = 1.0 - (level + 60.0) / 60.0;
-            float x = p.left + (p.right - p.left) * static_cast<float>(t);
-            float y = p.top + (p.bottom - p.top) * static_cast<float>(std::clamp(normalY, 0.0, 1.0));
-            if (!first) {
-                rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), br, 2.5f);
-            }
-            prev_x = x;
-            prev_y = y;
-            first = false;
-        }
-        br->Release();
+        render_limiter_curve_d2d(rt, p, dev, accent, nullptr, nullptr);
     }
 
     static void render_limiter_curve_gdi(HDC hdc, const RECT& p,
-                                        plugins::XAudioEffectDevice* dev, COLORREF accent) {
+                                        plugins::XAudioEffectDevice* dev, COLORREF accent,
+                                        HFONT font_small = NULL) {
         if (!hdc || !dev) return;
-        double thresh = dev->get_plain(4);
         double ceiling = dev->get_plain(5);
-        double input = dev->get_plain(1);
-        double output = dev->get_plain(2);
-        double mix = dev->get_plain(3);
+        float gr = dev->gain_reduction_db(0);
 
-        HPEN pen = CreatePen(PS_SOLID, 2, accent);
-        HGDIOBJ old_pen = SelectObject(hdc, pen);
-
-        int prev_x = p.left, prev_y = p.top;
-        bool first = true;
-        const int steps = 160;
         int pw = p.right - p.left;
         int ph = p.bottom - p.top;
+        int mid_y = (p.top + p.bottom) / 2;
+        int half_h = static_cast<int>(ph * 0.44f);
 
-        for (int i = 0; i <= steps; ++i) {
-            double t = static_cast<double>(i) / static_cast<double>(steps);
-            double boost = (1.0 - mix * 0.01) + mix * 0.01 * xaudio::dbGain(-thresh);
-            double level = std::min(-60.0 + 60.0 * t + input + output + xaudio::gainDb(boost), ceiling);
-            double normalY = 1.0 - (level + 60.0) / 60.0;
-            int x = p.left + static_cast<int>(pw * t);
-            int y = p.top + static_cast<int>(ph * std::clamp(normalY, 0.0, 1.0));
-            if (!first) {
-                MoveToEx(hdc, prev_x, prev_y, NULL);
-                LineTo(hdc, x, y);
-            }
-            prev_x = x;
-            prev_y = y;
-            first = false;
+        float ceil_amp = static_cast<float>(xaudio::dbGain(ceiling));
+        int y_ceil_top = mid_y - static_cast<int>(std::clamp(ceil_amp, 0.0f, 1.0f) * half_h);
+        int y_ceil_bot = mid_y + static_cast<int>(std::clamp(ceil_amp, 0.0f, 1.0f) * half_h);
+
+        HPEN pen_ceil = CreatePen(PS_SOLID, 1, RGB(255, 90, 75));
+        HGDIOBJ old_pen = SelectObject(hdc, pen_ceil);
+        MoveToEx(hdc, p.left, y_ceil_top, NULL); LineTo(hdc, p.right, y_ceil_top);
+        MoveToEx(hdc, p.left, y_ceil_bot, NULL); LineTo(hdc, p.right, y_ceil_bot);
+
+        const float* out_data = dev->vis_out_data();
+        size_t wp = dev->vis_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
+        constexpr size_t wave_pts = 200;
+
+        HPEN pen_wave = CreatePen(PS_SOLID, 2, accent);
+        SelectObject(hdc, pen_wave);
+        for (size_t i = 0; i < wave_pts; ++i) {
+            size_t idx = (wp + N - wave_pts + i) % N;
+            float s_out = out_data[idx];
+            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
+            int y = mid_y - static_cast<int>(std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h);
+            if (i == 0) MoveToEx(hdc, x, y, NULL);
+            else LineTo(hdc, x, y);
         }
+
         SelectObject(hdc, old_pen);
-        DeleteObject(pen);
+        DeleteObject(pen_ceil);
+        DeleteObject(pen_wave);
+
+        if (font_small) {
+            SelectObject(hdc, font_small);
+            std::string gr_text = (gr > 0.1f) ? ("LIMITING: -" + format_1dec(gr) + " dB") : "CLEAN";
+            RECT st_rc{p.left + 12, p.top + 6, p.left + 260, p.top + 24};
+            GuiRenderer::draw_text(hdc, "WAVEFORM SIGNAL   |   " + gr_text, st_rc,
+                                   (gr > 0.1f) ? RGB(255, 115, 90) : accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 
     // ========================================================================
-    // Live Signal Waveform Rendering (overlaid on graph area)
+    // Live Signal Visualizations (FFT Spectrum Analyzer for EQ, Dynamic Indicators)
     // ========================================================================
-    static void render_signal_waveform_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
-                                           plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent,
-                                           IDWriteTextFormat* font_small = nullptr) {
+
+    // Fast in-place radix-2 Cooley-Tukey FFT (size 512)
+    static void compute_fft_512(std::array<float, 512>& re, std::array<float, 512>& im) {
+        constexpr size_t N = 512;
+        size_t j = 0;
+        for (size_t i = 0; i < N - 1; ++i) {
+            if (i < j) {
+                std::swap(re[i], re[j]);
+                std::swap(im[i], im[j]);
+            }
+            size_t k = N >> 1;
+            while (k <= j) {
+                j -= k;
+                k >>= 1;
+            }
+            j += k;
+        }
+        for (size_t len = 2; len <= N; len <<= 1) {
+            float angle = -2.0f * 3.14159265358979323846f / static_cast<float>(len);
+            float wlen_re = std::cos(angle);
+            float wlen_im = std::sin(angle);
+            for (size_t i = 0; i < N; i += len) {
+                float w_re = 1.0f;
+                float w_im = 0.0f;
+                for (size_t j_idx = 0; j_idx < len / 2; ++j_idx) {
+                    size_t u = i + j_idx;
+                    size_t v = u + len / 2;
+                    float v_re = re[v] * w_re - im[v] * w_im;
+                    float v_im = re[v] * w_im + im[v] * w_re;
+                    re[v] = re[u] - v_re;
+                    im[v] = im[u] - v_im;
+                    re[u] += v_re;
+                    im[u] += v_im;
+                    float next_w_re = w_re * wlen_re - w_im * wlen_im;
+                    float next_w_im = w_re * wlen_im + w_im * wlen_re;
+                    w_re = next_w_re;
+                    w_im = next_w_im;
+                }
+            }
+        }
+    }
+
+    // 1. Real-Time Frequency Spectrum Analyzer for X-Eq (Direct2D)
+    static void render_eq_spectrum_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                       plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                       D2D1_COLOR_F accent, IDWriteTextFormat* font_small) {
         if (!rt || !dev) return;
         const float* in_data = dev->vis_in_data();
         const float* out_data = dev->vis_out_data();
         size_t wp = dev->vis_write_pos();
         constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
 
-        // Check if there's any signal at all
-        float max_abs = 0.0f;
-        for (size_t i = 0; i < N; ++i) {
-            max_abs = std::max(max_abs, std::max(std::abs(in_data[i]), std::abs(out_data[i])));
+        constexpr size_t fft_size = 512;
+        std::array<float, fft_size> in_re{}, in_im{};
+        std::array<float, fft_size> out_re{}, out_im{};
+
+        float max_in = 0.0f, max_out = 0.0f;
+        for (size_t i = 0; i < fft_size; ++i) {
+            size_t idx = (wp + N - fft_size + i) % N;
+            float w = 0.5f * (1.0f - std::cos(2.0f * 3.14159265358979323846f * static_cast<float>(i) / (fft_size - 1)));
+            float s_in = in_data[idx];
+            float s_out = out_data[idx];
+            max_in = std::max(max_in, std::abs(s_in));
+            max_out = std::max(max_out, std::abs(s_out));
+            in_re[i] = s_in * w;
+            out_re[i] = s_out * w;
         }
-        if (max_abs < 0.0001f) return; // No signal, don't draw
 
-        // Auto-scale: normalize to peak, with a minimum of 0.05 to avoid division noise
-        float scale = 1.0f / std::max(max_abs, 0.05f);
-        scale = std::min(scale, 4.0f); // Cap amplification at 4x
+        bool has_signal = (max_in > 0.0001f || max_out > 0.0001f);
+        if (has_signal) {
+            compute_fft_512(in_re, in_im);
+            compute_fft_512(out_re, out_im);
+        }
 
-        float graph_w = p.right - p.left;
-        float graph_h = p.bottom - p.top;
-        float mid_y = (p.top + p.bottom) * 0.5f;
+        double fs = dev->sample_rate() > 0.0 ? dev->sample_rate() : 48000.0;
+        constexpr size_t BANDS = PluginUiState::kSpecBands;
+        if (!state.spec_initialized) {
+            state.spec_in_db.fill(-72.0f);
+            state.spec_out_db.fill(-72.0f);
+            state.spec_initialized = true;
+        }
 
-        // Draw input waveform (dim, semi-transparent)
-        ID2D1SolidColorBrush* br_in = nullptr;
-        ID2D1SolidColorBrush* br_out = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.58f, 0.62f, 0.3f), &br_in);
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.55f), &br_out);
+        for (size_t b = 0; b < BANDS; ++b) {
+            float t = static_cast<float>(b) / static_cast<float>(BANDS - 1);
+            double freq = 20.0 * std::pow(1000.0, static_cast<double>(t));
 
-        // We display the last 256 samples (half the buffer) for a clean window
-        constexpr size_t display_count = 256;
-        size_t start = (wp + N - display_count) % N;
+            if (has_signal) {
+                float bin_f = static_cast<float>(freq * fft_size / fs);
+                size_t b0 = std::clamp(static_cast<size_t>(bin_f), size_t(0), size_t(fft_size / 2 - 2));
+                size_t b1 = b0 + 1;
+                float frac = bin_f - static_cast<float>(b0);
 
-        auto draw_waveform = [&](const float* data, ID2D1SolidColorBrush* br, float thickness) {
-            if (!br) return;
-            float prev_x = p.left;
-            float prev_y = mid_y;
-            bool first = true;
-            for (size_t i = 0; i < display_count; ++i) {
-                size_t idx = (start + i) % N;
-                float sample = std::clamp(data[idx] * scale, -1.0f, 1.0f);
-                float x = p.left + graph_w * (static_cast<float>(i) / static_cast<float>(display_count - 1));
-                float y = mid_y - sample * (graph_h * 0.42f);
-                if (!first) {
-                    rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), br, thickness);
+                auto get_mag = [](float r, float im) {
+                    return std::sqrt(r * r + im * im) * (2.0f / static_cast<float>(fft_size));
+                };
+                float m_in0 = get_mag(in_re[b0], in_im[b0]);
+                float m_in1 = get_mag(in_re[b1], in_im[b1]);
+                float m_in = (1.0f - frac) * m_in0 + frac * m_in1;
+
+                float m_out0 = get_mag(out_re[b0], out_im[b0]);
+                float m_out1 = get_mag(out_re[b1], out_im[b1]);
+                float m_out = (1.0f - frac) * m_out0 + frac * m_out1;
+
+                float tilt = std::sqrt(static_cast<float>(freq) / 1000.0f);
+                float db_in = 20.0f * std::log10(std::max(m_in * tilt * 2.8f, 1e-4f));
+                float db_out = 20.0f * std::log10(std::max(m_out * tilt * 2.8f, 1e-4f));
+
+                if (db_in > state.spec_in_db[b]) {
+                    state.spec_in_db[b] = state.spec_in_db[b] * 0.35f + db_in * 0.65f;
+                } else {
+                    state.spec_in_db[b] = state.spec_in_db[b] * 0.82f + (-72.0f) * 0.18f;
                 }
-                prev_x = x;
-                prev_y = y;
-                first = false;
+
+                if (db_out > state.spec_out_db[b]) {
+                    state.spec_out_db[b] = state.spec_out_db[b] * 0.35f + db_out * 0.65f;
+                } else {
+                    state.spec_out_db[b] = state.spec_out_db[b] * 0.82f + (-72.0f) * 0.18f;
+                }
+            } else {
+                state.spec_in_db[b] = state.spec_in_db[b] * 0.85f + (-72.0f) * 0.15f;
+                state.spec_out_db[b] = state.spec_out_db[b] * 0.85f + (-72.0f) * 0.15f;
             }
+        }
+
+        bool any_visible = false;
+        for (size_t b = 0; b < BANDS; ++b) {
+            if (state.spec_in_db[b] > -65.0f || state.spec_out_db[b] > -65.0f) {
+                any_visible = true;
+                break;
+            }
+        }
+        if (!any_visible) return;
+
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+
+        auto db_to_y = [&](float db) {
+            float norm = std::clamp((db - (-60.0f)) / 72.0f, 0.0f, 1.0f);
+            return p.bottom - norm * ph;
         };
 
-        draw_waveform(in_data, br_in, 1.0f);
-        draw_waveform(out_data, br_out, 1.5f);
+        ID2D1Factory* factory = nullptr;
+        rt->GetFactory(&factory);
 
-        if (br_in) br_in->Release();
-        if (br_out) br_out->Release();
+        // Smooth frequency bins using 3-tap filter
+        std::array<float, BANDS> s_in_db{}, s_out_db{};
+        for (size_t b = 0; b < BANDS; ++b) {
+            float prev_in = (b > 0) ? state.spec_in_db[b - 1] : state.spec_in_db[b];
+            float next_in = (b + 1 < BANDS) ? state.spec_in_db[b + 1] : state.spec_in_db[b];
+            s_in_db[b] = 0.2f * prev_in + 0.6f * state.spec_in_db[b] + 0.2f * next_in;
 
-        // Signal label in top-right of graph
+            float prev_out = (b > 0) ? state.spec_out_db[b - 1] : state.spec_out_db[b];
+            float next_out = (b + 1 < BANDS) ? state.spec_out_db[b + 1] : state.spec_out_db[b];
+            s_out_db[b] = 0.2f * prev_out + 0.6f * state.spec_out_db[b] + 0.2f * next_out;
+        }
+
+        auto build_bezier_path = [&](const std::array<float, BANDS>& db_vals, ID2D1PathGeometry** out_path) {
+            if (!factory || !out_path) return;
+            factory->CreatePathGeometry(out_path);
+            if (!*out_path) return;
+            ID2D1GeometrySink* sink = nullptr;
+            (*out_path)->Open(&sink);
+            if (!sink) return;
+
+            std::array<D2D1_POINT_2F, BANDS> pts{};
+            for (size_t b = 0; b < BANDS; ++b) {
+                float t = static_cast<float>(b) / static_cast<float>(BANDS - 1);
+                pts[b] = D2D1::Point2F(p.left + t * pw, db_to_y(db_vals[b]));
+            }
+
+            sink->BeginFigure(D2D1::Point2F(p.left, p.bottom), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(pts[0]);
+            for (size_t b = 0; b + 1 < BANDS; ++b) {
+                D2D1_POINT_2F p0 = (b > 0) ? pts[b - 1] : pts[b];
+                D2D1_POINT_2F p1 = pts[b];
+                D2D1_POINT_2F p2 = pts[b + 1];
+                D2D1_POINT_2F p3 = (b + 2 < BANDS) ? pts[b + 2] : pts[b + 1];
+
+                D2D1_POINT_2F cp1 = D2D1::Point2F(p1.x + (p2.x - p0.x) / 6.0f, p1.y + (p2.y - p0.y) / 6.0f);
+                D2D1_POINT_2F cp2 = D2D1::Point2F(p2.x - (p3.x - p1.x) / 6.0f, p2.y - (p3.y - p1.y) / 6.0f);
+                sink->AddBezier(D2D1::BezierSegment(cp1, cp2, p2));
+            }
+            sink->AddLine(D2D1::Point2F(p.right, p.bottom));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            sink->Release();
+        };
+
+        // 1. Input Spectrum (subtle translucent slate-blue fill and stroke)
+        ID2D1SolidColorBrush* br_in_fill = nullptr;
+        ID2D1SolidColorBrush* br_in_stroke = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.35f, 0.42f, 0.50f, 0.18f), &br_in_fill);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.50f, 0.58f, 0.65f, 0.40f), &br_in_stroke);
+
+        if (br_in_fill && br_in_stroke) {
+            ID2D1PathGeometry* path_in = nullptr;
+            build_bezier_path(s_in_db, &path_in);
+            if (path_in) {
+                rt->FillGeometry(path_in, br_in_fill);
+                rt->DrawGeometry(path_in, br_in_stroke, 1.0f);
+                path_in->Release();
+            }
+        }
+        if (br_in_fill) br_in_fill->Release();
+        if (br_in_stroke) br_in_stroke->Release();
+
+        // 2. Output Spectrum with Linear Gradient Fill and Glowing Bezier Stroke
+        ID2D1LinearGradientBrush* br_out_grad = nullptr;
+        ID2D1GradientStopCollection* stops = nullptr;
+        D2D1_GRADIENT_STOP stop_data[3];
+        stop_data[0].position = 0.0f;
+        stop_data[0].color = D2D1::ColorF(accent.r, accent.g, accent.b, 0.42f);
+        stop_data[1].position = 0.60f;
+        stop_data[1].color = D2D1::ColorF(accent.r, accent.g, accent.b, 0.16f);
+        stop_data[2].position = 1.0f;
+        stop_data[2].color = D2D1::ColorF(accent.r, accent.g, accent.b, 0.02f);
+
+        rt->CreateGradientStopCollection(stop_data, 3, &stops);
+        if (stops) {
+            rt->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(p.left, p.top), D2D1::Point2F(p.left, p.bottom)),
+                stops, &br_out_grad);
+            stops->Release();
+        }
+
+        ID2D1SolidColorBrush* br_out_glow = nullptr;
+        ID2D1SolidColorBrush* br_out_stroke = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.35f), &br_out_glow);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.95f), &br_out_stroke);
+
+        if (br_out_grad && br_out_stroke && br_out_glow) {
+            ID2D1PathGeometry* path_out = nullptr;
+            build_bezier_path(s_out_db, &path_out);
+            if (path_out) {
+                rt->FillGeometry(path_out, br_out_grad);
+                rt->DrawGeometry(path_out, br_out_glow, 3.0f);
+                rt->DrawGeometry(path_out, br_out_stroke, 1.8f);
+                path_out->Release();
+            }
+        }
+        if (br_out_grad) br_out_grad->Release();
+        if (br_out_glow) br_out_glow->Release();
+        if (br_out_stroke) br_out_stroke->Release();
+        if (factory) factory->Release();
+
+        // Spectrum legend badge in top-right
         if (font_small) {
-            D2D1_RECT_F sig_lbl_rc = D2D1::RectF(p.right - 120.0f, p.top + 4.0f, p.right - 8.0f, p.top + 20.0f);
-            D2DRenderer::draw_text(rt, font_small, "▬ IN  ▬ OUT", sig_lbl_rc,
-                                   D2D1::ColorF(0.55f, 0.58f, 0.62f, 0.5f));
+            D2D1_RECT_F leg_rc = D2D1::RectF(p.right - 210.0f, p.top + 4.0f, p.right - 8.0f, p.top + 22.0f);
+            D2DRenderer::draw_text(rt, font_small, "▬ IN SPECTRUM   ▬ OUT SPECTRUM", leg_rc,
+                                   D2D1::ColorF(accent.r, accent.g, accent.b, 0.75f));
         }
     }
 
-    static void render_signal_waveform_gdi(HDC hdc, const RECT& p,
-                                           plugins::XAudioEffectDevice* dev, COLORREF accent) {
+    // 1b. Real-Time Frequency Spectrum Analyzer for X-Eq (GDI Fallback)
+    static void render_eq_spectrum_gdi(HDC hdc, const RECT& p,
+                                       plugins::XAudioEffectDevice* dev, PluginUiState& state,
+                                       COLORREF accent) {
         if (!hdc || !dev) return;
         const float* in_data = dev->vis_in_data();
         const float* out_data = dev->vis_out_data();
         size_t wp = dev->vis_write_pos();
         constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
 
-        // Check if there's any signal
-        float max_abs = 0.0f;
-        for (size_t i = 0; i < N; ++i) {
-            max_abs = std::max(max_abs, std::max(std::abs(in_data[i]), std::abs(out_data[i])));
-        }
-        if (max_abs < 0.0001f) return;
+        constexpr size_t fft_size = 512;
+        std::array<float, fft_size> in_re{}, in_im{};
+        std::array<float, fft_size> out_re{}, out_im{};
 
-        float scale = 1.0f / std::max(max_abs, 0.05f);
-        scale = std::min(scale, 4.0f);
+        float max_in = 0.0f, max_out = 0.0f;
+        for (size_t i = 0; i < fft_size; ++i) {
+            size_t idx = (wp + N - fft_size + i) % N;
+            float w = 0.5f * (1.0f - std::cos(2.0f * 3.14159265358979323846f * static_cast<float>(i) / (fft_size - 1)));
+            float s_in = in_data[idx];
+            float s_out = out_data[idx];
+            max_in = std::max(max_in, std::abs(s_in));
+            max_out = std::max(max_out, std::abs(s_out));
+            in_re[i] = s_in * w;
+            out_re[i] = s_out * w;
+        }
+
+        bool has_signal = (max_in > 0.0001f || max_out > 0.0001f);
+        if (has_signal) {
+            compute_fft_512(in_re, in_im);
+            compute_fft_512(out_re, out_im);
+        }
+
+        double fs = dev->sample_rate() > 0.0 ? dev->sample_rate() : 48000.0;
+        constexpr size_t BANDS = PluginUiState::kSpecBands;
+        if (!state.spec_initialized) {
+            state.spec_in_db.fill(-72.0f);
+            state.spec_out_db.fill(-72.0f);
+            state.spec_initialized = true;
+        }
+
+        for (size_t b = 0; b < BANDS; ++b) {
+            float t = static_cast<float>(b) / static_cast<float>(BANDS - 1);
+            double freq = 20.0 * std::pow(1000.0, static_cast<double>(t));
+
+            if (has_signal) {
+                float bin_f = static_cast<float>(freq * fft_size / fs);
+                size_t b0 = std::clamp(static_cast<size_t>(bin_f), size_t(0), size_t(fft_size / 2 - 2));
+                size_t b1 = b0 + 1;
+                float frac = bin_f - static_cast<float>(b0);
+
+                auto get_mag = [](float r, float im) {
+                    return std::sqrt(r * r + im * im) * (2.0f / static_cast<float>(fft_size));
+                };
+                float m_in = (1.0f - frac) * get_mag(in_re[b0], in_im[b0]) + frac * get_mag(in_re[b1], in_im[b1]);
+                float m_out = (1.0f - frac) * get_mag(out_re[b0], out_im[b0]) + frac * get_mag(out_re[b1], out_im[b1]);
+
+                float tilt = std::sqrt(static_cast<float>(freq) / 1000.0f);
+                float db_in = 20.0f * std::log10(std::max(m_in * tilt * 2.8f, 1e-4f));
+                float db_out = 20.0f * std::log10(std::max(m_out * tilt * 2.8f, 1e-4f));
+
+                if (db_in > state.spec_in_db[b]) {
+                    state.spec_in_db[b] = state.spec_in_db[b] * 0.35f + db_in * 0.65f;
+                } else {
+                    state.spec_in_db[b] = state.spec_in_db[b] * 0.82f + (-72.0f) * 0.18f;
+                }
+
+                if (db_out > state.spec_out_db[b]) {
+                    state.spec_out_db[b] = state.spec_out_db[b] * 0.35f + db_out * 0.65f;
+                } else {
+                    state.spec_out_db[b] = state.spec_out_db[b] * 0.82f + (-72.0f) * 0.18f;
+                }
+            } else {
+                state.spec_in_db[b] = state.spec_in_db[b] * 0.85f + (-72.0f) * 0.15f;
+                state.spec_out_db[b] = state.spec_out_db[b] * 0.85f + (-72.0f) * 0.15f;
+            }
+        }
 
         int pw = p.right - p.left;
         int ph = p.bottom - p.top;
-        int mid_y = p.top + ph / 2;
 
-        constexpr size_t display_count = 256;
-        size_t start = (wp + N - display_count) % N;
-
-        auto draw_waveform_gdi = [&](const float* data, COLORREF color, int thickness) {
-            HPEN pen = CreatePen(PS_SOLID, thickness, color);
-            HGDIOBJ old_pen = SelectObject(hdc, pen);
-            bool first = true;
-            for (size_t i = 0; i < display_count; ++i) {
-                size_t idx = (start + i) % N;
-                float sample = std::clamp(data[idx] * scale, -1.0f, 1.0f);
-                int x = p.left + static_cast<int>(pw * static_cast<float>(i) / static_cast<float>(display_count - 1));
-                int y = mid_y - static_cast<int>(sample * (ph * 0.42f));
-                if (first) {
-                    MoveToEx(hdc, x, y, NULL);
-                    first = false;
-                } else {
-                    LineTo(hdc, x, y);
-                }
-            }
-            SelectObject(hdc, old_pen);
-            DeleteObject(pen);
+        auto db_to_y_gdi = [&](float db) {
+            float norm = std::clamp((db - (-60.0f)) / 72.0f, 0.0f, 1.0f);
+            return p.bottom - static_cast<int>(norm * ph);
         };
 
-        // Input: dim gray
-        COLORREF in_color = RGB(100, 106, 115);
-        draw_waveform_gdi(in_data, in_color, 1);
-        // Output: accent color
-        draw_waveform_gdi(out_data, accent, 1);
+        // Smooth GDI spectrum bins
+        std::array<float, BANDS> s_in_db{}, s_out_db{};
+        for (size_t b = 0; b < BANDS; ++b) {
+            float prev_in = (b > 0) ? state.spec_in_db[b - 1] : state.spec_in_db[b];
+            float next_in = (b + 1 < BANDS) ? state.spec_in_db[b + 1] : state.spec_in_db[b];
+            s_in_db[b] = 0.2f * prev_in + 0.6f * state.spec_in_db[b] + 0.2f * next_in;
+
+            float prev_out = (b > 0) ? state.spec_out_db[b - 1] : state.spec_out_db[b];
+            float next_out = (b + 1 < BANDS) ? state.spec_out_db[b + 1] : state.spec_out_db[b];
+            s_out_db[b] = 0.2f * prev_out + 0.6f * state.spec_out_db[b] + 0.2f * next_out;
+        }
+
+        // Draw In polyline (dim gray)
+        HPEN pen_in = CreatePen(PS_SOLID, 1, RGB(90, 105, 120));
+        HGDIOBJ old_pen = SelectObject(hdc, pen_in);
+        for (size_t b = 0; b < BANDS; ++b) {
+            float t = static_cast<float>(b) / static_cast<float>(BANDS - 1);
+            int x = p.left + static_cast<int>(t * pw);
+            int y = db_to_y_gdi(s_in_db[b]);
+            if (b == 0) MoveToEx(hdc, x, y, NULL);
+            else LineTo(hdc, x, y);
+        }
+
+        // Draw Out polyline (accent color)
+        HPEN pen_out = CreatePen(PS_SOLID, 2, accent);
+        SelectObject(hdc, pen_out);
+        for (size_t b = 0; b < BANDS; ++b) {
+            float t = static_cast<float>(b) / static_cast<float>(BANDS - 1);
+            int x = p.left + static_cast<int>(t * pw);
+            int y = db_to_y_gdi(s_out_db[b]);
+            if (b == 0) MoveToEx(hdc, x, y, NULL);
+            else LineTo(hdc, x, y);
+        }
+
+        SelectObject(hdc, old_pen);
+        DeleteObject(pen_in);
+        DeleteObject(pen_out);
+    }
+
+    // 2. Real-Time Signal Indicator for X-Compressor
+    static void render_comp_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                       plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 0.0);
+        double thresh = dev->get_plain(4);
+        double ratio = dev->get_plain(5);
+        double knee = dev->get_plain(8);
+        double makeup = dev->get_plain(9);
+
+        double red = xaudio::reduction(in_db, thresh, ratio, knee);
+        double out_db = std::clamp(in_db - red + makeup, -60.0, 0.0);
+
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        float x = p.left + static_cast<float>((in_db + 60.0) / 60.0) * pw;
+        float y = p.bottom - static_cast<float>((out_db + 60.0) / 60.0) * ph;
+
+        // Dynamic indicator ball with halo on transfer curve
+        ID2D1SolidColorBrush* br_halo = nullptr;
+        ID2D1SolidColorBrush* br_dot = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.25f), &br_halo);
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.95f), &br_dot);
+
+        if (br_halo && br_dot) {
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 12.0f, 12.0f), br_halo);
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 5.5f, 5.5f), br_dot);
+
+            // If gain reduction is occurring, draw an active reduction drop line
+            if (red > 0.5) {
+                float uncomp_y = p.bottom - static_cast<float>((in_db + 60.0) / 60.0) * ph;
+                ID2D1SolidColorBrush* br_red = nullptr;
+                rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.45f, 0.35f, 0.70f), &br_red);
+                if (br_red) {
+                    rt->DrawLine(D2D1::Point2F(x, uncomp_y), D2D1::Point2F(x, y), br_red, 2.0f);
+                    br_red->Release();
+                }
+            }
+        }
+        if (br_halo) br_halo->Release();
+        if (br_dot) br_dot->Release();
+    }
+
+    static void render_comp_signal_gdi(HDC hdc, const RECT& p,
+                                       plugins::XAudioEffectDevice* dev, COLORREF accent) {
+        if (!hdc || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 0.0);
+        double thresh = dev->get_plain(4);
+        double ratio = dev->get_plain(5);
+        double knee = dev->get_plain(8);
+        double makeup = dev->get_plain(9);
+
+        double red = xaudio::reduction(in_db, thresh, ratio, knee);
+        double out_db = std::clamp(in_db - red + makeup, -60.0, 0.0);
+
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+        int x = p.left + static_cast<int>((in_db + 60.0) / 60.0 * pw);
+        int y = p.bottom - static_cast<int>((out_db + 60.0) / 60.0 * ph);
+
+        HBRUSH br_dot = CreateSolidBrush(accent);
+        HGDIOBJ old_br = SelectObject(hdc, br_dot);
+        HGDIOBJ old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+        Ellipse(hdc, x - 5, y - 5, x + 6, y + 6);
+        SelectObject(hdc, old_br);
+        SelectObject(hdc, old_pen);
+        DeleteObject(br_dot);
+    }
+
+    // 3. Real-Time Signal Indicator for X-Distortion
+    static void render_distortion_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                            plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double drive = dev->get_plain(4);
+        double bias = dev->get_plain(6);
+
+        float s = std::clamp(m_in, 0.0f, 1.0f);
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+
+        // Trace points on shaping curve
+        double y_pos = 0.5 - xaudio::saturate(s, drive, bias) / 3.0;
+        double y_neg = 0.5 - xaudio::saturate(-s, drive, bias) / 3.0;
+
+        float x_pos = p.left + (s + 1.0f) * 0.5f * pw;
+        float cy_pos = p.top + static_cast<float>(std::clamp(y_pos, 0.0, 1.0)) * ph;
+
+        float x_neg = p.left + (-s + 1.0f) * 0.5f * pw;
+        float cy_neg = p.top + static_cast<float>(std::clamp(y_neg, 0.0, 1.0)) * ph;
+
+        ID2D1SolidColorBrush* br_dot = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.9f), &br_dot);
+        if (br_dot) {
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x_pos, cy_pos), 5.0f, 5.0f), br_dot);
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x_neg, cy_neg), 5.0f, 5.0f), br_dot);
+            br_dot->Release();
+        }
+    }
+
+    static void render_distortion_signal_gdi(HDC hdc, const RECT& p,
+                                            plugins::XAudioEffectDevice* dev, COLORREF accent) {
+        if (!hdc || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double drive = dev->get_plain(4);
+        double bias = dev->get_plain(6);
+
+        float s = std::clamp(m_in, 0.0f, 1.0f);
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+
+        double y_pos = 0.5 - xaudio::saturate(s, drive, bias) / 3.0;
+        int x_pos = p.left + static_cast<int>((s + 1.0f) * 0.5f * pw);
+        int cy_pos = p.top + static_cast<int>(std::clamp(y_pos, 0.0, 1.0) * ph);
+
+        HBRUSH br = CreateSolidBrush(accent);
+        HGDIOBJ ob = SelectObject(hdc, br);
+        HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
+        Ellipse(hdc, x_pos - 5, cy_pos - 5, x_pos + 6, cy_pos + 6);
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
+        DeleteObject(br);
+    }
+
+    // 4. Real-Time Signal Indicator for X-Limiter
+    static void render_limiter_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                         plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double ceiling = dev->get_plain(5);
+        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 6.0);
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+
+        float x = p.left + static_cast<float>(std::clamp((in_db + 60.0) / 66.0, 0.0, 1.0)) * pw;
+        float y = p.bottom - static_cast<float>(std::clamp((std::min(in_db, ceiling) + 60.0) / 60.0, 0.0, 1.0)) * ph;
+
+        bool is_limiting = (in_db >= ceiling - 0.2);
+        D2D1_COLOR_F dot_col = is_limiting ? D2D1::ColorF(1.0f, 0.35f, 0.30f, 0.95f) : accent;
+
+        ID2D1SolidColorBrush* br_dot = nullptr;
+        ID2D1SolidColorBrush* br_halo = nullptr;
+        rt->CreateSolidColorBrush(dot_col, &br_dot);
+        rt->CreateSolidColorBrush(D2D1::ColorF(dot_col.r, dot_col.g, dot_col.b, is_limiting ? 0.35f : 0.18f), &br_halo);
+
+        if (br_dot && br_halo) {
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), is_limiting ? 14.0f : 8.0f, is_limiting ? 14.0f : 8.0f), br_halo);
+            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 5.0f, 5.0f), br_dot);
+        }
+        if (br_dot) br_dot->Release();
+        if (br_halo) br_halo->Release();
+    }
+
+    static void render_limiter_signal_gdi(HDC hdc, const RECT& p,
+                                         plugins::XAudioEffectDevice* dev, COLORREF accent) {
+        if (!hdc || !dev) return;
+        float m_in = dev->meter_in();
+        if (m_in < 0.001f) return;
+
+        double ceiling = dev->get_plain(5);
+        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 6.0);
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+
+        int x = p.left + static_cast<int>(std::clamp((in_db + 60.0) / 66.0, 0.0, 1.0) * pw);
+        int y = p.bottom - static_cast<int>(std::clamp((std::min(in_db, ceiling) + 60.0) / 60.0, 0.0, 1.0) * ph);
+
+        bool is_limiting = (in_db >= ceiling - 0.2);
+        COLORREF dot_col = is_limiting ? RGB(255, 90, 75) : accent;
+
+        HBRUSH br = CreateSolidBrush(dot_col);
+        HGDIOBJ ob = SelectObject(hdc, br);
+        HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
+        Ellipse(hdc, x - 5, y - 5, x + 6, y + 6);
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
+        DeleteObject(br);
+    }
+
+    // 5. Real-Time Signal Indicator for X-Reverb
+    static void render_reverb_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+                                         plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
+        if (!rt || !dev) return;
+        float m_out = dev->meter_out();
+        if (m_out < 0.001f) return;
+
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        float lvl_norm = std::clamp(m_out, 0.0f, 1.0f);
+
+        ID2D1SolidColorBrush* br = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, lvl_norm * 0.40f), &br);
+        if (br) {
+            D2D1_RECT_F fill_rc = D2D1::RectF(p.left + 10.0f, p.bottom - lvl_norm * ph * 0.5f,
+                                             p.left + 10.0f + lvl_norm * pw * 0.4f, p.bottom - 4.0f);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(fill_rc, 4.0f, 4.0f), br);
+            br->Release();
+        }
+    }
+
+    static void render_reverb_signal_gdi(HDC hdc, const RECT& p,
+                                         plugins::XAudioEffectDevice* dev, COLORREF accent) {
+        if (!hdc || !dev) return;
+        float m_out = dev->meter_out();
+        if (m_out < 0.001f) return;
+
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+        float lvl_norm = std::clamp(m_out, 0.0f, 1.0f);
+
+        HBRUSH br = CreateSolidBrush(accent);
+        RECT fill_rc{p.left + 10, p.bottom - static_cast<int>(lvl_norm * ph * 0.5f),
+                     p.left + 10 + static_cast<int>(lvl_norm * pw * 0.4f), p.bottom - 4};
+        GuiRenderer::draw_rounded_box(hdc, fill_rc, accent, accent, 4);
+        DeleteObject(br);
     }
 
     // ========================================================================
@@ -2253,7 +3238,7 @@ public:
 
             if (x >= bx && x <= bx + card_w && y >= by && y <= by + card_h) {
                 int p_idx = find_param_idx(dev, item.id);
-                if (p_idx < 0) break;
+                if (p_idx < 0) continue;
 
                 // Choice combo click (Filter Type)
                 if (item.id.find("type") != std::string::npos) {
@@ -2311,7 +3296,9 @@ public:
     }
 
     static void handle_effect_drag(domain::IDevice* dev, const RECT& bounds,
-                                  int dragging_param_idx, int x, int y, std::string& status_msg) {
+                                  int dragging_param_idx,
+                                  int drag_start_x, int drag_start_y, float drag_orig_val,
+                                  int x, int y, std::string& status_msg) {
         if (!dev || dragging_param_idx < 0) return;
         auto* xfx = dynamic_cast<plugins::XAudioEffectDevice*>(dev);
         int kind = xfx ? xfx->kind() : 0;
@@ -2331,9 +3318,10 @@ public:
                 D2D1_RECT_F p = D2D1::RectF(mx + 64.0f, my + 112.0f, mx + mw - 126.0f, ctrl_top - 40.0f);
                 float pw = p.right - p.left;
                 float ph = p.bottom - p.top;
+                float mid_y = (p.top + p.bottom) * 0.5f;
 
                 double f = 20.0 * std::pow(1000.0, std::clamp(static_cast<double>(x - p.left) / pw, 0.0, 1.0));
-                double g = std::clamp(static_cast<double>((p.top + ph * 0.5f - y) / ph * 48.0), -18.0, 18.0);
+                double g = std::clamp(static_cast<double>((mid_y - y) / ph * 48.0), -24.0, 24.0);
 
                 int p_f = find_param_idx(dev, "eq" + std::to_string(b + 1) + "freq");
                 int p_g = find_param_idx(dev, "eq" + std::to_string(b + 1) + "gain");
@@ -2365,15 +3353,16 @@ public:
         }
 
         // 3. Card Sliders / Knobs
+        float sensitivity = (GetKeyState(VK_SHIFT) < 0) ? 500.0f : 150.0f;
         if (state.detail) {
-            // Horizontal slider drag in detail mode
-            float delta = static_cast<float>(x - (mx + 200)) / 220.0f;
-            float new_norm = std::clamp(delta, 0.0f, 1.0f);
+            // Horizontal slider drag in detail mode (dragging right increases value)
+            float delta = static_cast<float>(x - drag_start_x) / sensitivity;
+            float new_norm = std::clamp(drag_orig_val + delta, 0.0f, 1.0f);
             dev->set_parameter(static_cast<uint32_t>(dragging_param_idx), new_norm);
         } else {
-            // Vertical Rotary Knob drag in simple mode
-            float delta = static_cast<float>(bounds.top + 300 - y) / 180.0f;
-            float new_norm = std::clamp(delta, 0.0f, 1.0f);
+            // Vertical Rotary Knob drag in simple mode (dragging UP increases value)
+            float delta = static_cast<float>(drag_start_y - y) / sensitivity;
+            float new_norm = std::clamp(drag_orig_val + delta, 0.0f, 1.0f);
             dev->set_parameter(static_cast<uint32_t>(dragging_param_idx), new_norm);
         }
 
@@ -2383,33 +3372,72 @@ public:
         }
     }
 
-    // Compatibility overload for older callers without y
+    // Compatibility overloads for older callers
     static void handle_effect_drag(domain::IDevice* dev, const RECT& bounds,
-                                  int dragging_param_idx, int x, std::string& status_msg) {
-        handle_effect_drag(dev, bounds, dragging_param_idx, x, bounds.top + 300, status_msg);
+                                  int dragging_param_idx, int x, int y, std::string& status_msg) {
+        handle_effect_drag(dev, bounds, dragging_param_idx, x, y, 0.5f, x, y, status_msg);
     }
 
-    // Mouse Wheel support for Q resonance adjustment on EQ graph
+    static void handle_effect_drag(domain::IDevice* dev, const RECT& bounds,
+                                  int dragging_param_idx, int x, std::string& status_msg) {
+        handle_effect_drag(dev, bounds, dragging_param_idx, x, bounds.top + 300, 0.5f, x, bounds.top + 300, status_msg);
+    }
+
+    // Mouse Wheel support: EQ resonance Q on graph, and knob adjustment on cards
     static void handle_effect_wheel(domain::IDevice* dev, const RECT& bounds,
                                    int x, int y, int wheel_steps, std::string& status_msg) {
         if (!dev || wheel_steps == 0) return;
         auto* xfx = dynamic_cast<plugins::XAudioEffectDevice*>(dev);
-        if (!xfx || xfx->kind() != 0) return;
+        if (!xfx) return;
         auto& state = get_state(dev);
 
-        float ctrl_top = bounds.top + (bounds.bottom - bounds.top) - (state.detail ? 350.0f : 260.0f);
-        D2D1_RECT_F p = D2D1::RectF(bounds.left + 64.0f, bounds.top + 112.0f, bounds.right - 126.0f, ctrl_top - 40.0f);
+        int mx = bounds.left;
+        int my = bounds.top;
+        int mw = bounds.right - bounds.left;
+        int mh = bounds.bottom - bounds.top;
+        float ctrl_top = my + mh - (state.detail ? 350.0f : 260.0f);
 
-        // If mouse is inside EQ graph area, adjust selected band's Q
-        if (x >= p.left && x <= p.right && y >= p.top && y <= p.bottom) {
-            int b = state.selected_band;
-            int p_q = find_param_idx(dev, "eq" + std::to_string(b + 1) + "q");
-            if (p_q >= 0) {
-                double cur_q = xfx->get_plain(p_q);
-                double factor = std::exp(static_cast<double>(wheel_steps) * 0.15);
-                double new_q = std::clamp(cur_q * factor, 0.15, 12.0);
-                xfx->set_plain(p_q, new_q);
-                status_msg = "Band " + std::to_string(b + 1) + " Q: " + format_param_display("", new_q);
+        // 1. If mouse is inside EQ graph area, adjust selected band's Q
+        if (xfx->kind() == 0) {
+            D2D1_RECT_F p = D2D1::RectF(mx + 64.0f, my + 112.0f, mx + mw - 126.0f, ctrl_top - 40.0f);
+            if (x >= p.left && x <= p.right && y >= p.top && y <= p.bottom) {
+                int b = state.selected_band;
+                int p_q = find_param_idx(dev, "eq" + std::to_string(b + 1) + "q");
+                if (p_q >= 0) {
+                    double cur_q = xfx->get_plain(p_q);
+                    double factor = std::exp(static_cast<double>(wheel_steps) * 0.15);
+                    double new_q = std::clamp(cur_q * factor, 0.15, 12.0);
+                    xfx->set_plain(p_q, new_q);
+                    status_msg = "Band " + std::to_string(b + 1) + " Q: " + format_param_display("", new_q);
+                    return;
+                }
+            }
+        }
+
+        // 2. If mouse is over any parameter card in the grid, adjust that knob
+        auto items = get_items(xfx->kind(), state.detail, state.selected_band);
+        int cols = state.detail ? 4 : std::max(1, static_cast<int>(items.size()));
+        int rows = (static_cast<int>(items.size()) + cols - 1) / cols;
+        float card_w = (mw - 48.0f - 8.0f * (cols - 1)) / static_cast<float>(cols);
+        float card_h = (mh - 102.0f - (ctrl_top - my) - 42.0f - 8.0f * (rows - 1)) / static_cast<float>(rows);
+
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            int c_col = static_cast<int>(i) % cols;
+            int c_row = static_cast<int>(i) / cols;
+            float bx = mx + 24.0f + static_cast<float>(c_col) * (card_w + 8.0f);
+            float by = ctrl_top + 42.0f + static_cast<float>(c_row) * (card_h + 8.0f);
+            if (x >= bx && x <= bx + card_w && y >= by && y <= by + card_h) {
+                int p_idx = find_param_idx(dev, item.id);
+                if (p_idx >= 0 && item.id.find("type") == std::string::npos &&
+                    item.id != "external" && item.id.find("solo") == std::string::npos && item.id.find("mute") == std::string::npos) {
+                    float step = (GetKeyState(VK_SHIFT) < 0) ? 0.008f : 0.035f;
+                    float cur_norm = dev->get_parameter(static_cast<uint32_t>(p_idx));
+                    float new_norm = std::clamp(cur_norm + wheel_steps * step, 0.0f, 1.0f);
+                    dev->set_parameter(static_cast<uint32_t>(p_idx), new_norm);
+                    status_msg = item.title + ": " + format_param_display(xfx->spec()[p_idx].unit, xfx->get_plain(p_idx));
+                    return;
+                }
             }
         }
     }

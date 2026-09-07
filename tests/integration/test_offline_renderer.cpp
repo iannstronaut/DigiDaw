@@ -1,7 +1,7 @@
 #include "../test_framework.hpp"
 #include "../../app/usecases/offline_renderer.hpp"
 #include "../../adapters/plugins/synth_3xosc.hpp"
-#include "../../adapters/plugins/parametric_eq.hpp"
+#include "../../adapters/plugins/xaudio_devices.hpp"
 #include "../../adapters/plugins/limiter_device.hpp"
 #include <filesystem>
 #include <fstream>
@@ -36,7 +36,7 @@ TEST_CASE(IntegrationAudio, OfflineRenderToWav) {
 
     // Add EQ to insert 1, Limiter to Master
     auto synth = std::make_shared<Synth3xOsc>();
-    auto eq = std::make_shared<ParametricEQ>();
+    auto eq = std::make_shared<XEqDevice>();
     auto limiter = std::make_shared<LimiterDevice>();
 
     auto* trk1 = proj.mixer_graph().get_track(1);

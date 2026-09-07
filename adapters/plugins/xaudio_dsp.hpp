@@ -287,6 +287,7 @@ public:
         wetHP = {};
         damp.fill(0.0);
         gr.fill(0.0f);
+        band_levels.fill(0.0f);
         counter = 0;
         toneState.fill(0.0);
         dcInput.fill(0.0);
@@ -372,7 +373,9 @@ public:
             }
             for (int b = 0; b < 4; ++b) {
                 int i = 7 + b * 8;
-                double g = comp[b].tick(std::max(std::abs(bands[0][b]), std::abs(bands[1][b])),
+                double in_lvl = std::max(std::abs(bands[0][b]), std::abs(bands[1][b]));
+                band_levels[b] = static_cast<float>(std::max(static_cast<double>(band_levels[b]) * 0.9995, in_lvl));
+                double g = comp[b].tick(in_lvl,
                                         value[i], value[i + 1], value[i + 4], value[i + 2],
                                         value[i + 3], fs) *
                            dbGain(value[i + 5]);
@@ -472,6 +475,7 @@ public:
     int kind{0};
     std::vector<Param> spec{};
     std::array<float, 4> gr{};
+    std::array<float, 4> band_levels{};
 
 private:
     void update() noexcept {
