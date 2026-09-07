@@ -81,3 +81,103 @@ TEST_CASE(DomainMixer, AudioSummingAndPanLaws) {
     ASSERT_NEAR(peak_l, 0.3535f, 0.01f);
     ASSERT_NEAR(peak_r, 0.3535f, 0.01f);
 }
+
+TEST_CASE(DomainMixer, AddAndRemoveInsertTracksDynamically) {
+    MixerGraph graph;
+    ASSERT_EQ(graph.insert_track_count(), 0);
+    ASSERT_EQ(graph.max_insert_track_id(), 0);
+
+    // Cannot remove master
+    ASSERT_FALSE(graph.remove_track(MasterTrackId));
+
+    // Add insert tracks dynamically
+    auto t1 = graph.add_insert_track("Vocal");
+    ASSERT_EQ(t1, 1);
+    ASSERT_EQ(graph.insert_track_count(), 1);
+    ASSERT_EQ(graph.max_insert_track_id(), 1);
+    ASSERT_TRUE(graph.get_track(1) != nullptr);
+    ASSERT_EQ(graph.get_track(1)->name(), "Vocal");
+    ASSERT_EQ(graph.get_insert_track_ids(), (std::vector<MixerTrackId>{1}));
+
+    auto t2 = graph.add_insert_track("Reverb Send");
+    ASSERT_EQ(t2, 2);
+    ASSERT_EQ(graph.insert_track_count(), 2);
+    ASSERT_EQ(graph.max_insert_track_id(), 2);
+    ASSERT_EQ(graph.get_insert_track_ids(), (std::vector<MixerTrackId>{1, 2}));
+
+    auto t3 = graph.add_insert_track();
+    ASSERT_EQ(t3, 3);
+    ASSERT_EQ(graph.get_track(3)->name(), "Track 3");
+    ASSERT_EQ(graph.insert_track_count(), 3);
+    ASSERT_EQ(graph.max_insert_track_id(), 3);
+    ASSERT_EQ(graph.get_insert_track_ids(), (std::vector<MixerTrackId>{1, 2, 3}));
+
+    // Connect t1 -> t2
+    ASSERT_OK(graph.connect_send(t1, t2));
+
+    // Remove t2
+    ASSERT_TRUE(graph.remove_track(t2));
+    ASSERT_EQ(graph.get_track(t2), nullptr);
+    ASSERT_EQ(graph.insert_track_count(), 2);
+    ASSERT_EQ(graph.max_insert_track_id(), 3);
+    ASSERT_EQ(graph.get_insert_track_ids(), (std::vector<MixerTrackId>{1, 3}));
+
+    // Verify send in t1 to t2 was cleaned up
+    ASSERT_TRUE(graph.get_track(t1) != nullptr);
+    for (const auto& send : graph.get_track(t1)->sends()) {
+        ASSERT_NE(send.target_track, t2);
+    }
+
+    // Adding next track reuses ID 2
+    auto t2_new = graph.add_insert_track("Delay");
+    ASSERT_EQ(t2_new, 2);
+    ASSERT_EQ(graph.insert_track_count(), 3);
+    ASSERT_EQ(graph.get_insert_track_ids(), (std::vector<MixerTrackId>{1, 2, 3}));
+
+    // Removing non-existent track returns false
+    ASSERT_FALSE(graph.remove_track(99));
+}
+
+TEST_CASE(DomainMixer, DirectMasterInputAndSendSumming) {
+    MixerGraph graph;
+    graph.prepare(44100.0, 64);
+    graph.add_track(1, "Insert 1");
+
+    auto* master = graph.get_track(MasterTrackId);
+    ASSERT_TRUE(master != nullptr);
+    master->set_volume(1.0f);
+    master->set_pan(0.0f);
+
+    auto* t1 = graph.get_track(1);
+    ASSERT_TRUE(t1 != nullptr);
+    t1->set_volume(1.0f);
+    t1->set_pan(0.0f);
+
+    // Channel A (unassigned, routes directly to MasterTrackId 0)
+    OwningAudioBuffer master_input_buf(64);
+    for (size_t i = 0; i < 64; ++i) {
+        master_input_buf.view().left[i] = 0.2f;
+        master_input_buf.view().right[i] = 0.2f;
+    }
+
+    // Channel B (assigned to Insert Track 1, sends to Master)
+    OwningAudioBuffer t1_input_buf(64);
+    for (size_t i = 0; i < 64; ++i) {
+        t1_input_buf.view().left[i] = 0.3f;
+        t1_input_buf.view().right[i] = 0.3f;
+    }
+
+    std::unordered_map<MixerTrackId, AudioBufferView> inputs;
+    inputs[MasterTrackId] = master_input_buf.view();
+    inputs[1] = t1_input_buf.view();
+
+    OwningAudioBuffer master_out(64);
+    auto master_view = master_out.view();
+    graph.process(inputs, master_view);
+
+    // Direct input (0.2) + Insert 1 send to master (~0.3 * center_gain ~0.707 = ~0.212)
+    // Master out should have both components summed
+    auto [peak_l, peak_r] = master_view.compute_peak();
+    ASSERT_TRUE(peak_l > 0.35f);
+    ASSERT_TRUE(peak_r > 0.35f);
+}

@@ -34,6 +34,65 @@ public:
         }
     }
 
+    MixerTrackId add_insert_track(std::string name = "") {
+        MixerTrackId next_id = 1;
+        while (tracks_.find(next_id) != tracks_.end()) {
+            next_id++;
+        }
+        if (name.empty()) {
+            name = "Track " + std::to_string(next_id);
+        }
+        add_track(next_id, std::move(name));
+        return next_id;
+    }
+
+    bool remove_track(MixerTrackId id) {
+        if (id == MasterTrackId) return false;
+        auto it = tracks_.find(id);
+        if (it == tracks_.end()) return false;
+
+        tracks_.erase(it);
+        track_buffers_.erase(id);
+
+        // Remove any sends to this track in all remaining tracks
+        for (auto& [_, track] : tracks_) {
+            track.remove_send(id);
+        }
+
+        rebuild_topological_order();
+        return true;
+    }
+
+    [[nodiscard]] size_t insert_track_count() const noexcept {
+        size_t count = 0;
+        for (const auto& [id, _] : tracks_) {
+            if (id != MasterTrackId) ++count;
+        }
+        return count;
+    }
+
+    [[nodiscard]] MixerTrackId max_insert_track_id() const noexcept {
+        MixerTrackId max_id = 0;
+        for (const auto& [id, _] : tracks_) {
+            if (id != MasterTrackId) {
+                max_id = std::max(max_id, id);
+            }
+        }
+        return max_id;
+    }
+
+    [[nodiscard]] std::vector<MixerTrackId> get_insert_track_ids() const {
+        std::vector<MixerTrackId> ids;
+        ids.reserve(tracks_.size());
+        for (const auto& [id, _] : tracks_) {
+            if (id != MasterTrackId) {
+                ids.push_back(id);
+            }
+        }
+        std::sort(ids.begin(), ids.end());
+        return ids;
+    }
+
     [[nodiscard]] MixerTrack* get_track(MixerTrackId id) noexcept {
         auto it = tracks_.find(id);
         if (it != tracks_.end()) {

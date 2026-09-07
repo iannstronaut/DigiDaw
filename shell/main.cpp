@@ -35,60 +35,60 @@ void setup_default_template(digidaw::app::Engine& engine) {
     const auto ppq = proj.time_map().ppq();
     const auto bar_ticks = 4 * ppq;
 
-    // 1. Add default channels matching FL Studio screenshot (default volume 80% with +20% headroom)
+    // 1. Add default channels matching FL Studio template (default volume 80% with +20% headroom, mixer_track unassigned = 0 / "--")
     digidaw::domain::ChannelSettings s1;
     s1.name = "Osc";
     s1.volume = digidaw::domain::kDefaultChannelVolume;
     s1.pan = 0.0f;
-    s1.mixer_track = 1;
+    s1.mixer_track = 0;
     auto ch1_id = proj.add_channel("core.generator.3xosc", s1);
 
     digidaw::domain::ChannelSettings s2;
     s2.name = "808 Clap";
     s2.volume = digidaw::domain::kDefaultChannelVolume;
     s2.pan = 0.0f;
-    s2.mixer_track = 2;
+    s2.mixer_track = 0;
     auto ch2_id = proj.add_channel("core.generator.3xosc", s2);
 
     digidaw::domain::ChannelSettings s3;
     s3.name = "808 HiHat";
     s3.volume = digidaw::domain::kDefaultChannelVolume;
     s3.pan = 0.0f;
-    s3.mixer_track = 3;
+    s3.mixer_track = 0;
     auto ch3_id = proj.add_channel("core.generator.3xosc", s3);
 
     digidaw::domain::ChannelSettings s4;
     s4.name = "808 Snare";
     s4.volume = digidaw::domain::kDefaultChannelVolume;
     s4.pan = 0.0f;
-    s4.mixer_track = 4;
+    s4.mixer_track = 0;
     auto ch4_id = proj.add_channel("core.generator.3xosc", s4);
 
     digidaw::domain::ChannelSettings s5;
     s5.name = "FLEX Bass";
     s5.volume = digidaw::domain::kDefaultChannelVolume;
     s5.pan = 0.0f;
-    s5.mixer_track = 5;
+    s5.mixer_track = 0;
     auto ch5_id = proj.add_channel("core.generator.3xosc", s5);
 
     digidaw::domain::ChannelSettings s6;
     s6.name = "Clipper";
     s6.volume = digidaw::domain::kDefaultChannelVolume;
     s6.pan = 0.0f;
-    s6.mixer_track = 6;
+    s6.mixer_track = 0;
     auto ch6_id = proj.add_channel("core.generator.audioclip", s6);
 
-    // 2. Setup Mixer routing for tracks 1..6
+    // 2. Setup Mixer routing: Master gets Limiter, Insert tracks 1..6 available
     auto* master = proj.mixer_graph().get_track(digidaw::domain::MasterTrackId);
     if (master) {
         master->add_insert(std::make_shared<digidaw::adapters::plugins::LimiterDevice>());
     }
-    proj.mixer_graph().add_track(1, "Osc");
-    proj.mixer_graph().add_track(2, "808 Clap");
-    proj.mixer_graph().add_track(3, "808 HiHat");
-    proj.mixer_graph().add_track(4, "808 Snare");
-    proj.mixer_graph().add_track(5, "FLEX Bass");
-    proj.mixer_graph().add_track(6, "Clipper");
+    proj.mixer_graph().add_track(1, "Insert 1");
+    proj.mixer_graph().add_track(2, "Insert 2");
+    proj.mixer_graph().add_track(3, "Insert 3");
+    proj.mixer_graph().add_track(4, "Insert 4");
+    proj.mixer_graph().add_track(5, "Insert 5");
+    proj.mixer_graph().add_track(6, "Insert 6");
 
     // 3. Pattern 1: Melody on Osc (mini piano roll) + Beat steps on drums & bass & Clipper
     auto* pat1 = proj.get_pattern(1);
@@ -202,7 +202,7 @@ void run_interactive_repl(digidaw::app::Engine& engine) {
                 std::cout << "  - [" << ch.id() << "] " << ch.settings().name
                           << " | Vol: " << ch.settings().volume
                           << " | Pan: " << ch.settings().pan
-                          << " | Track: " << (int)ch.settings().mixer_track << "\n";
+                          << " | Track: " << (ch.settings().mixer_track == 0 ? "--" : std::to_string(ch.settings().mixer_track)) << "\n";
             }
             std::cout << "Patterns (" << proj.patterns().size() << "):\n";
             for (const auto& pat : proj.patterns()) {

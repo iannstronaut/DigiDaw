@@ -137,17 +137,25 @@ public:
                 ch_view.apply_gain(ch.settings().volume);
                 ch_view.apply_pan(ch.settings().pan);
 
-                // Sum into targeted mixer track (with fallback to Master)
+                // Sum into targeted mixer track (0 = Unassigned -> routes directly to Master)
                 const domain::MixerTrackId target_track = ch.settings().mixer_track;
-                auto track_in_it = track_inputs.find(target_track);
-                if (track_in_it != track_inputs.end()) {
-                    auto target_view = track_in_it->second.view();
-                    target_view.add_from(ch_view, 1.0f);
-                } else {
+                if (target_track == domain::MasterTrackId || target_track == 0) {
                     auto master_it = track_inputs.find(domain::MasterTrackId);
                     if (master_it != track_inputs.end()) {
                         auto target_view = master_it->second.view();
                         target_view.add_from(ch_view, 1.0f);
+                    }
+                } else {
+                    auto track_in_it = track_inputs.find(target_track);
+                    if (track_in_it != track_inputs.end()) {
+                        auto target_view = track_in_it->second.view();
+                        target_view.add_from(ch_view, 1.0f);
+                    } else {
+                        auto master_it = track_inputs.find(domain::MasterTrackId);
+                        if (master_it != track_inputs.end()) {
+                            auto target_view = master_it->second.view();
+                            target_view.add_from(ch_view, 1.0f);
+                        }
                     }
                 }
             }

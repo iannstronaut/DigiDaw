@@ -971,4 +971,74 @@ TEST_CASE(DomainSequencing, ChannelSettingsDefaultVolumeAndHeadroom) {
     }
 }
 
+TEST_CASE(DomainSequencing, ChannelSettingsDefaultMixerTrackIsUnassignedZeroAndDecoupledFromMixer) {
+    // 1. ChannelSettings default initialization
+    ChannelSettings s;
+    ASSERT_EQ(s.mixer_track, 0); // 0 = Unassigned (-- / Master)
+
+    // 2. Project channel addition must NOT alter mixer tracks (decoupled workflows)
+    Project proj("Decoupled Test Project");
+    size_t initial_mixer_tracks = proj.mixer_graph().tracks().size();
+    ASSERT_EQ(proj.mixer_graph().insert_track_count(), 4); // Starter project has 4 insert tracks
+
+    // Add 10 channels with default settings
+    for (int i = 0; i < 10; ++i) {
+        auto cid = proj.add_channel("core.generator.3xosc", ChannelSettings{});
+        const auto* ch = proj.get_channel(cid);
+        ASSERT_TRUE(ch != nullptr);
+        ASSERT_EQ(ch->settings().mixer_track, 0); // Must be unassigned (0)
+    }
+
+    // Mixer tracks must remain completely unchanged!
+    ASSERT_EQ(proj.mixer_graph().tracks().size(), initial_mixer_tracks);
+    ASSERT_EQ(proj.mixer_graph().insert_track_count(), 4);
+
+    // 3. User can freely route channel to an insert track later
+    auto* ch1 = proj.get_channel(1);
+    ASSERT_TRUE(ch1 != nullptr);
+    ch1->settings().mixer_track = 2; // Route to Track 2
+    ASSERT_EQ(ch1->settings().mixer_track, 2);
+
+    // Reset back to unassigned
+    ch1->settings().mixer_track = 0;
+    ASSERT_EQ(ch1->settings().mixer_track, 0);
+}
+
+TEST_CASE(DomainSequencing, MixerTrackRemovalReroutesChannelsToMaster) {
+    Project proj("Mixer Track Removal Test");
+    ASSERT_EQ(proj.mixer_graph().insert_track_count(), 4);
+
+    // Channel 1 routed to Insert Track 2
+    ChannelSettings s1;
+    s1.mixer_track = 2;
+    auto cid1 = proj.add_channel("core.generator.3xosc", s1);
+
+    // Channel 2 routed to Insert Track 3
+    ChannelSettings s2;
+    s2.mixer_track = 3;
+    auto cid2 = proj.add_channel("core.generator.3xosc", s2);
+
+    // Channel 3 unassigned (0)
+    ChannelSettings s3;
+    s3.mixer_track = 0;
+    auto cid3 = proj.add_channel("core.generator.3xosc", s3);
+
+    ASSERT_EQ(proj.get_channel(cid1)->settings().mixer_track, 2);
+    ASSERT_EQ(proj.get_channel(cid2)->settings().mixer_track, 3);
+    ASSERT_EQ(proj.get_channel(cid3)->settings().mixer_track, 0);
+
+    // Remove Track 2
+    ASSERT_TRUE(proj.mixer_graph().remove_track(2));
+    // Simulate DAW channel re-routing logic for removed track
+    for (auto& ch : proj.channels()) {
+        if (ch.settings().mixer_track == 2) {
+            ch.settings().mixer_track = 0;
+        }
+    }
+
+    ASSERT_EQ(proj.get_channel(cid1)->settings().mixer_track, 0); // Re-routed to Master!
+    ASSERT_EQ(proj.get_channel(cid2)->settings().mixer_track, 3); // Unaffected
+    ASSERT_EQ(proj.get_channel(cid3)->settings().mixer_track, 0); // Still Master
+}
+
 

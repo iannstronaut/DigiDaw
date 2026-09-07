@@ -175,6 +175,17 @@ public:
             auto master_view = master_scratch_buf_.view();
             master_view.clear();
 
+            // Prune deleted mixer track buffers if tracks were removed
+            if (track_inputs_scratch_.size() != mixer.tracks().size()) {
+                for (auto it = track_inputs_scratch_.begin(); it != track_inputs_scratch_.end(); ) {
+                    if (!mixer.get_track(it->first)) {
+                        it = track_inputs_scratch_.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
             for (const auto& [track_id, _] : mixer.tracks()) {
                 auto it = track_inputs_scratch_.find(track_id);
                 if (it == track_inputs_scratch_.end() || it->second.frames() < frames) {
@@ -251,17 +262,23 @@ public:
                 ch_view.apply_gain(ch.settings().volume);
                 ch_view.apply_pan(ch.settings().pan);
 
-                // Accumulate into targeted mixer track input (with fallback to Master)
+                // Accumulate into targeted mixer track input (0 = Unassigned -> routes directly to Master)
                 const domain::MixerTrackId target_track = ch.settings().mixer_track;
-                auto trk_it = track_inputs_scratch_.find(target_track);
-                if (trk_it != track_inputs_scratch_.end()) {
-                    auto trk_view = trk_it->second.view();
-                    trk_view.add_from(ch_view);
-                } else {
+                if (target_track == domain::MasterTrackId || target_track == 0) {
                     auto master_it = track_inputs_scratch_.find(domain::MasterTrackId);
                     if (master_it != track_inputs_scratch_.end()) {
-                        auto m_view = master_it->second.view();
-                        m_view.add_from(ch_view);
+                        master_it->second.view().add_from(ch_view);
+                    }
+                } else {
+                    auto trk_it = track_inputs_scratch_.find(target_track);
+                    if (trk_it != track_inputs_scratch_.end()) {
+                        trk_it->second.view().add_from(ch_view);
+                    } else {
+                        // Fallback to Master if designated mixer track does not exist
+                        auto master_it = track_inputs_scratch_.find(domain::MasterTrackId);
+                        if (master_it != track_inputs_scratch_.end()) {
+                            master_it->second.view().add_from(ch_view);
+                        }
                     }
                 }
             }

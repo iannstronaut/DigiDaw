@@ -85,7 +85,7 @@ public:
 
         // Mixer Track LCD Box
         D2D1_RECT_F trk_rc = D2D1::RectF(mx + 230.0f, my + 6.0f, mx + 300.0f, my + 32.0f);
-        std::string trk_str = (mixer_track == 0) ? "MST" : ("TRK " + std::to_string(mixer_track));
+        std::string trk_str = (mixer_track == 0) ? "--" : ("TRK " + std::to_string(mixer_track));
         D2DRenderer::draw_button(rt, font_small, trk_rc, trk_str, false, t.accent, t.bg_control, 3.0f);
 
         // Header Knobs: PAN, VOL, PITCH
@@ -683,7 +683,7 @@ public:
 
         // Mixer Track LCD
         RECT trk_rc{bounds.left + 230, bounds.top + 6, bounds.left + 300, bounds.top + 32};
-        std::string trk_str = (mixer_track == 0) ? "MST" : ("TRK " + std::to_string(mixer_track));
+        std::string trk_str = (mixer_track == 0) ? "--" : ("TRK " + std::to_string(mixer_track));
         GuiRenderer::draw_button(hdc, trk_rc, trk_str, false, t.accent, t.bg_control);
 
         // Header Knobs: PAN, VOL, PITCH
@@ -831,7 +831,7 @@ public:
             // Header Mixer Track LCD
             if (x >= mx + 230.0f && x <= mx + 300.0f) {
                 mixer_track = (mixer_track + 1) % 64;
-                status_msg = "Target Mixer Track set to: " + (mixer_track == 0 ? "Master" : std::to_string(mixer_track));
+                status_msg = "Target Mixer Track set to: " + (mixer_track == 0 ? "-- (Master)" : ("Track " + std::to_string(mixer_track)));
                 return false;
             }
         }

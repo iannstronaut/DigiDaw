@@ -1474,7 +1474,7 @@ private:
                                         proj.mixer_graph().add_track(new_trk, "Track " + std::to_string(new_trk));
                                     }
                                     selected_mixer_track_ = ch.settings().mixer_track;
-                                    status_message_ = ch.settings().name + " Mixer Track: " + (new_trk == 0 ? "Master" : ("Track " + std::to_string(new_trk)));
+                                    status_message_ = ch.settings().name + " Mixer Track: " + (new_trk == 0 ? "-- (Master)" : ("Track " + std::to_string(new_trk)));
                                     handled = true;
                                 }
                             }
@@ -3089,8 +3089,9 @@ private:
         uint32_t tid = selected_mixer_track_;
         auto* track = proj.mixer_graph().get_track(tid);
         if (!track && tid > 0) {
-            proj.mixer_graph().add_track(tid, "Track " + std::to_string(tid));
-            track = proj.mixer_graph().get_track(tid);
+            selected_mixer_track_ = 0;
+            tid = 0;
+            track = proj.mixer_graph().get_track(0);
         }
 
         std::string tr_name = track ? track->name() : (tid == 0 ? "Master" : ("Track " + std::to_string(tid)));
@@ -3391,15 +3392,29 @@ private:
 
         float track_w = 96.0f;
         float gap = 10.0f;
-        float ty = my + 26.0f;
+        float ty = my + 28.0f;
 
         float master_x = mx + 12.0f;
         float insert_start_x = master_x + track_w + gap;
         float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
-        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+        auto insert_ids = proj.mixer_graph().get_insert_track_ids();
+        size_t total_inserts = insert_ids.size();
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
         mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
+
+        // Header: "MIXER" title and separate [+ Add Track] & [− Remove Track] buttons
+        D2D1_RECT_F title_rc = D2D1::RectF(mx + 12.0f, my + 4.0f, mx + 65.0f, my + 24.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "MIXER", title_rc, t.text_secondary,
+                              DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        D2D1_RECT_F add_trk_rc = D2D1::RectF(mx + 70.0f, my + 3.0f, mx + 160.0f, my + 23.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, add_trk_rc, "+ Add Track", false, t.accent, t.bg_control, 3.0f);
+
+        if (selected_mixer_track_ > 0 && proj.mixer_graph().get_track(selected_mixer_track_)) {
+            D2D1_RECT_F rem_trk_rc = D2D1::RectF(mx + 166.0f, my + 3.0f, mx + 276.0f, my + 23.0f);
+            D2DRenderer::draw_button(d2d_target_, dwrite_small_, rem_trk_rc, "− Remove Track", false, t.danger, t.bg_control, 3.0f);
+        }
 
         // Header Track Navigation Buttons & Range if tracks exceed window width
         if (max_mix_scroll > 0) {
@@ -3476,8 +3491,9 @@ private:
 
         // 2. Render Visible Insert Tracks
         for (int s = 0; s < vis_inserts; ++s) {
-            int tid = 1 + mixer_scroll_track_ + s;
-            if (static_cast<size_t>(tid) > total_inserts) break;
+            size_t idx = static_cast<size_t>(mixer_scroll_track_ + s);
+            if (idx >= insert_ids.size()) break;
+            uint32_t tid = insert_ids[idx];
             float tx = insert_start_x + s * (track_w + gap);
             render_strip(tid, tx);
         }
@@ -4728,8 +4744,9 @@ private:
         uint32_t tid = selected_mixer_track_;
         auto* track = proj.mixer_graph().get_track(tid);
         if (!track && tid > 0) {
-            proj.mixer_graph().add_track(tid, "Track " + std::to_string(tid));
-            track = proj.mixer_graph().get_track(tid);
+            selected_mixer_track_ = 0;
+            tid = 0;
+            track = proj.mixer_graph().get_track(0);
         }
 
         std::string tr_name = track ? track->name() : (tid == 0 ? "Master" : ("Track " + std::to_string(tid)));
@@ -5023,24 +5040,33 @@ private:
         int insert_start_x = master_x + strip_w + strip_gap;
         int avail_w = (mx + mw - 12) - insert_start_x;
         int vis_inserts = std::max(1, avail_w / (strip_w + strip_gap));
-        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+        auto insert_ids = proj.mixer_graph().get_insert_track_ids();
+        size_t total_inserts = insert_ids.size();
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
         mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
 
         SelectObject(mem_dc_, font_bold_);
-        RECT title_rc{mx + 12, my + 5, mx + 120, my + 25};
+        RECT title_rc{mx + 12, my + 5, mx + 65, my + 25};
         GuiRenderer::draw_text(mem_dc_, "MIXER", title_rc, t.text_secondary);
 
+        SelectObject(mem_dc_, font_small_);
+        RECT add_trk_rc{mx + 70, my + 3, mx + 160, my + 23};
+        GuiRenderer::draw_button(mem_dc_, add_trk_rc, "+ Add Track", false, t.accent, t.bg_control);
+
+        if (selected_mixer_track_ > 0 && proj.mixer_graph().get_track(selected_mixer_track_)) {
+            RECT rem_trk_rc{mx + 166, my + 3, mx + 276, my + 23};
+            GuiRenderer::draw_button(mem_dc_, rem_trk_rc, "− Remove Track", false, t.danger, t.bg_control);
+        }
+
         if (max_mix_scroll > 0) {
-            SelectObject(mem_dc_, font_small_);
             std::string mix_lbl = "Tracks " + std::to_string(1 + mixer_scroll_track_) + "-" +
                                   std::to_string(std::min(total_inserts, size_t(1 + mixer_scroll_track_ + vis_inserts - 1))) +
                                   " / " + std::to_string(total_inserts);
-            RECT lbl_rc{mx + mw - 220, my + 5, mx + mw - 75, my + 25};
+            RECT lbl_rc{static_cast<int>(mx + mw - 240), static_cast<int>(my + 4), static_cast<int>(mx + mw - 85), static_cast<int>(my + 24)};
             GuiRenderer::draw_text(mem_dc_, mix_lbl, lbl_rc, t.text_secondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-            RECT btn_l{mx + mw - 68, my + 4, mx + mw - 40, my + 26};
-            RECT btn_r{mx + mw - 36, my + 4, mx + mw - 8, my + 26};
+            RECT btn_l{static_cast<int>(mx + mw - 80), static_cast<int>(my + 3), static_cast<int>(mx + mw - 52), static_cast<int>(my + 23)};
+            RECT btn_r{static_cast<int>(mx + mw - 48), static_cast<int>(my + 3), static_cast<int>(mx + mw - 20), static_cast<int>(my + 23)};
             GuiRenderer::draw_button(mem_dc_, btn_l, "◀", false, t.bg_control, t.bg_control);
             GuiRenderer::draw_button(mem_dc_, btn_r, "▶", false, t.bg_control, t.bg_control);
         }
@@ -5100,8 +5126,9 @@ private:
 
         render_gdi_strip(0, master_x);
         for (int s = 0; s < vis_inserts; ++s) {
-            int tid = 1 + mixer_scroll_track_ + s;
-            if (static_cast<size_t>(tid) > total_inserts) break;
+            size_t idx = static_cast<size_t>(mixer_scroll_track_ + s);
+            if (idx >= insert_ids.size()) break;
+            uint32_t tid = insert_ids[idx];
             int sx = insert_start_x + s * (strip_w + strip_gap);
             render_gdi_strip(tid, sx);
         }
@@ -5532,8 +5559,9 @@ private:
         auto& proj = engine_.session().project();
         auto* track = proj.mixer_graph().get_track(tid);
         if (!track && tid > 0) {
-            proj.mixer_graph().add_track(tid, "Track " + std::to_string(tid));
-            track = proj.mixer_graph().get_track(tid);
+            selected_mixer_track_ = 0;
+            tid = 0;
+            track = proj.mixer_graph().get_track(0);
         }
         if (!track) return;
 
@@ -5780,17 +5808,32 @@ private:
         float insert_start_x = master_x + track_w + gap;
         float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
-        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+        auto insert_ids = proj.mixer_graph().get_insert_track_ids();
+        size_t total_inserts = insert_ids.size();
         int max_mix_scroll = std::max(0, static_cast<int>(total_inserts) - vis_inserts);
+        mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
 
-        // 1. Navigation buttons: [ ◀ ] and [ ▶ ]
+        // Header [+ Add Track] button
+        if (x >= mx + 70.0f && x <= mx + 160.0f && y >= my + 3.0f && y <= my + 23.0f) {
+            add_mixer_track();
+            return;
+        }
+
+        // Header [− Remove Track] button
+        if (selected_mixer_track_ > 0 && proj.mixer_graph().get_track(selected_mixer_track_) &&
+            x >= mx + 166.0f && x <= mx + 276.0f && y >= my + 3.0f && y <= my + 23.0f) {
+            remove_mixer_track(selected_mixer_track_);
+            return;
+        }
+
+        // 1. Navigation buttons: [ ◀ ] and [ ▶ ] (non-overlapping exact bounds matching render)
         if (max_mix_scroll > 0) {
-            if (x >= mx + mw - 68.0f && x <= mx + mw - 40.0f && y >= my + 4.0f && y <= my + 26.0f) {
+            if (x >= mx + mw - 80.0f && x <= mx + mw - 52.0f && y >= my + 3.0f && y <= my + 23.0f) {
                 mixer_scroll_track_ = std::max(0, mixer_scroll_track_ - 1);
                 status_message_ = "Scrolled mixer to Track " + std::to_string(1 + mixer_scroll_track_);
                 return;
             }
-            if (x >= mx + mw - 36.0f && x <= mx + mw - 8.0f && y >= my + 4.0f && y <= my + 26.0f) {
+            if (x >= mx + mw - 48.0f && x <= mx + mw - 20.0f && y >= my + 3.0f && y <= my + 23.0f) {
                 mixer_scroll_track_ = std::min(max_mix_scroll, mixer_scroll_track_ + 1);
                 status_message_ = "Scrolled mixer to Track " + std::to_string(1 + mixer_scroll_track_);
                 return;
@@ -5853,8 +5896,9 @@ private:
 
         // Check Visible Insert Strips
         for (int s = 0; s < vis_inserts; ++s) {
-            int tid = 1 + mixer_scroll_track_ + s;
-            if (static_cast<size_t>(tid) > total_inserts) break;
+            size_t idx = static_cast<size_t>(mixer_scroll_track_ + s);
+            if (idx >= insert_ids.size()) break;
+            uint32_t tid = insert_ids[idx];
             float tx = insert_start_x + s * (track_w + gap);
             if (handle_strip_click(tid, tx)) return;
         }
@@ -5881,7 +5925,7 @@ private:
         float insert_start_x = master_x + track_w + gap;
         float avail_w = (mx + mw - 12.0f) - insert_start_x;
         int vis_inserts = std::max(1, static_cast<int>(avail_w / (track_w + gap)));
-        size_t total_inserts = std::max(size_t(4), proj.channels().size());
+        auto insert_ids = proj.mixer_graph().get_insert_track_ids();
 
         auto handle_strip_right_click = [&](int tid, float tx) -> bool {
             float fader_bot = ty + strip_h - 52.0f;
@@ -5892,6 +5936,20 @@ private:
             selected_mixer_track_ = static_cast<uint32_t>(tid);
             auto* mix_tr = proj.mixer_graph().get_track(tid);
             if (!mix_tr) return false;
+
+            // Right-click on Track Header -> Delete Track context menu
+            if (tid > 0 && y >= ty && y <= ty + 24.0f) {
+                POINT pt;
+                GetCursorPos(&pt);
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuA(hMenu, MF_STRING, 3001, "Delete Track");
+                int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, nullptr);
+                DestroyMenu(hMenu);
+                if (cmd == 3001) {
+                    remove_mixer_track(static_cast<uint32_t>(tid));
+                }
+                return true;
+            }
 
             // Right-click on Panning knob -> reset to Center (0.0)
             if (x >= tx + 6.0f && x <= tx + track_w - 6.0f && y >= fader_bot + 2.0f && y <= ty + strip_h - 2.0f) {
@@ -5913,8 +5971,9 @@ private:
         if (handle_strip_right_click(0, master_x)) return;
 
         for (int s = 0; s < vis_inserts; ++s) {
-            int tid = 1 + mixer_scroll_track_ + s;
-            if (static_cast<size_t>(tid) > total_inserts) break;
+            size_t idx = static_cast<size_t>(mixer_scroll_track_ + s);
+            if (idx >= insert_ids.size()) break;
+            uint32_t tid = insert_ids[idx];
             float tx = insert_start_x + s * (track_w + gap);
             if (handle_strip_right_click(tid, tx)) return;
         }
@@ -6739,10 +6798,9 @@ private:
         const auto ppq = proj.time_map().ppq();
 
         domain::ChannelSettings s;
-        size_t next_idx = proj.channels().size() + 1;
         s.name = "Clipper: " + filename;
         s.volume = domain::kDefaultChannelVolume;
-        s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
+        s.mixer_track = 0; // Unassigned (--), routes directly to Master
         auto new_cid = proj.add_channel("core.generator.audioclip", s);
 
         while (proj.tracks().size() < 4) {
@@ -6834,11 +6892,11 @@ private:
 
         if (clipper_cid == 0) {
             domain::ChannelSettings s;
-            size_t next_idx = proj.channels().size() + 1;
             s.name = "Clipper: " + filename;
             s.volume = domain::kDefaultChannelVolume;
-            s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
+            s.mixer_track = 0; // Unassigned (--), routes directly to Master
             clipper_cid = proj.add_channel("core.generator.audioclip", s);
+            selected_mixer_track_ = 0;
         }
 
         auto dev = engine_.get_or_create_channel_device(clipper_cid);
@@ -6918,10 +6976,11 @@ private:
                     return;
                 }
 
-                // Right click Target Mixer Track LCD -> reset to default track idx
+                // Right click Target Mixer Track LCD -> reset to unassigned 0 (-- / Master)
                 if (x >= px + 82 && x <= px + 110 && y >= row_y + 5 && y <= row_y + 29) {
-                    ch.settings().mixer_track = static_cast<uint8_t>(ch_idx + 1);
-                    status_message_ = ch.settings().name + " Mixer Track set to Track " + std::to_string(ch_idx + 1);
+                    ch.settings().mixer_track = 0;
+                    selected_mixer_track_ = 0;
+                    status_message_ = ch.settings().name + " Mixer Track reset to -- (Master)";
                     return;
                 }
 
@@ -7799,7 +7858,7 @@ private:
                     proj.mixer_graph().add_track(new_trk, "Track " + std::to_string(new_trk));
                 }
                 selected_mixer_track_ = ch.settings().mixer_track;
-                status_message_ = ch.settings().name + " Mixer Track: " + (new_trk == 0 ? "Master" : ("Track " + std::to_string(new_trk)));
+                status_message_ = ch.settings().name + " Mixer Track: " + (new_trk == 0 ? "-- (Master)" : ("Track " + std::to_string(new_trk)));
             }
             return;
         }
@@ -8085,9 +8144,13 @@ private:
             float strip_h = std::max(120.0f, mh - 36.0f);
             float master_x = mx + 12.0f;
             float insert_start_x = master_x + track_w + gap;
-            float tx = (dragging_mixer_track_ == 0)
-                ? master_x
-                : (insert_start_x + static_cast<float>(dragging_mixer_track_ - 1 - mixer_scroll_track_) * (track_w + gap));
+            float tx = master_x;
+            if (dragging_mixer_track_ != 0) {
+                auto insert_ids = engine_.session().project().mixer_graph().get_insert_track_ids();
+                auto it = std::find(insert_ids.begin(), insert_ids.end(), static_cast<uint32_t>(dragging_mixer_track_));
+                int pos = (it != insert_ids.end()) ? static_cast<int>(std::distance(insert_ids.begin(), it)) : (dragging_mixer_track_ - 1);
+                tx = insert_start_x + static_cast<float>(pos - mixer_scroll_track_) * (track_w + gap);
+            }
 
             float fader_bot = ty + strip_h - 52.0f;
             RECT fader_rc{static_cast<int>(tx + 33.0f), static_cast<int>(ty + 46.0f),
@@ -8144,6 +8207,9 @@ private:
 
             if (ch && m_track != ch->settings().mixer_track) {
                 ch->settings().mixer_track = m_track;
+                if (m_track > 0 && !engine_.session().project().mixer_graph().get_track(m_track)) {
+                    engine_.session().project().mixer_graph().add_track(m_track, "Track " + std::to_string(m_track));
+                }
                 selected_mixer_track_ = m_track;
             }
 
@@ -8330,7 +8396,7 @@ private:
         size_t next_idx = proj.channels().size() + 1;
         s.name = name_prefix + " #" + std::to_string(next_idx);
         s.volume = domain::kDefaultChannelVolume;
-        s.mixer_track = static_cast<uint8_t>(std::min(size_t(63), next_idx));
+        s.mixer_track = 0; // Empty / unassigned (--), routes directly to Master
         auto new_cid = proj.add_channel(uid, s);
 
         while (proj.tracks().size() < 4) {
@@ -8338,7 +8404,7 @@ private:
             proj.tracks().emplace_back(tid, "Track " + std::to_string(tid));
         }
 
-        proj.mixer_graph().add_track(s.mixer_track, "Track " + std::to_string(s.mixer_track));
+        // Decoupled workflow: DO NOT automatically create a new track in the Mixer!
 
         // Pre-instantiate device on GUI thread so audio thread never has to allocate or load plugin during playback
         engine_.get_or_create_channel_device(new_cid);
@@ -8350,16 +8416,55 @@ private:
         int max_ch_scroll = std::max(0, static_cast<int>(proj.channels().size()) - visible_channels);
         channel_rack_scroll_ch_ = max_ch_scroll;
 
-        selected_mixer_track_ = s.mixer_track;
+        selected_mixer_track_ = 0; // Route to Master
 
         // Automatically open editor for newly added instrument!
         active_editor_channel_ = new_cid;
 
-        status_message_ = "Added channel: " + s.name + " (Mapped to Track " + std::to_string(s.mixer_track) + ")";
+        status_message_ = "Added instrument: " + s.name + " (Mixer: -- / Master)";
     }
 
     void add_channel() {
         add_channel_with_uid("core.generator.audioclip", "Clipper");
+    }
+
+    void add_mixer_track() {
+        std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+        auto& proj = engine_.session().project();
+        auto new_tid = proj.mixer_graph().add_insert_track();
+        selected_mixer_track_ = new_tid;
+        status_message_ = "Added Mixer Track: Track " + std::to_string(new_tid);
+        InvalidateRect(hwnd_, NULL, FALSE);
+    }
+
+    void remove_mixer_track(uint32_t tid) {
+        if (tid == domain::MasterTrackId) {
+            status_message_ = "Cannot remove Master Track";
+            return;
+        }
+        std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+        auto& proj = engine_.session().project();
+        if (!proj.mixer_graph().remove_track(tid)) {
+            status_message_ = "Mixer Track " + std::to_string(tid) + " not found";
+            return;
+        }
+        // Re-route any channels that were routed to this track back to unassigned / Master (0)
+        for (auto& ch : proj.channels()) {
+            if (ch.settings().mixer_track == tid) {
+                ch.settings().mixer_track = 0;
+            }
+        }
+        if (selected_mixer_track_ == tid || !proj.mixer_graph().get_track(selected_mixer_track_)) {
+            selected_mixer_track_ = 0; // Revert to Master
+        }
+        auto insert_ids = proj.mixer_graph().get_insert_track_ids();
+        float avail_w = (win_mixer_.w - 12.0f) - (win_mixer_.x + 12.0f + 96.0f + 10.0f);
+        int vis_inserts = std::max(1, static_cast<int>(avail_w / 106.0f));
+        int max_mix_scroll = std::max(0, static_cast<int>(insert_ids.size()) - vis_inserts);
+        mixer_scroll_track_ = std::clamp(mixer_scroll_track_, 0, max_mix_scroll);
+
+        status_message_ = "Removed Mixer Track " + std::to_string(tid) + " (Channels routed to Master)";
+        InvalidateRect(hwnd_, NULL, FALSE);
     }
 
     void do_undo() {
@@ -8397,11 +8502,10 @@ private:
     void insert_effect_to_track(uint32_t tid, const std::string& uid) {
         std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
         auto* trk = engine_.session().project().mixer_graph().get_track(tid);
-        if (!trk && tid > 0) {
-            engine_.session().project().mixer_graph().add_track(tid, "Track " + std::to_string(tid));
-            trk = engine_.session().project().mixer_graph().get_track(tid);
+        if (!trk) {
+            status_message_ = "Mixer track not found";
+            return;
         }
-        if (!trk) return;
         if (trk->inserts().size() >= 10) {
             status_message_ = "Insert limit reached (max 10 inserts per track)";
             return;
@@ -8468,7 +8572,7 @@ private:
 
     // Inspector & Mixer Selection State
     bool inspector_open_{true};
-    uint32_t selected_mixer_track_{1};
+    uint32_t selected_mixer_track_{0};
     bool dragging_inspector_vol_{false};
     bool dragging_inspector_pan_{false};
     int dragging_inspector_wet_slot_{-1};
@@ -8520,7 +8624,7 @@ private:
     int drag_knob_start_mouse_y_{0};
     float drag_knob_orig_val_{0.0f};
     int drag_target_track_start_mouse_y_{0};
-    int drag_target_track_orig_val_{1};
+    int drag_target_track_orig_val_{0};
 
     // Sequencer & Mixer State
     int sequencer_scroll_bar_{0}; // Horizontal bar offset (Bar 1, Bar 5, etc.)

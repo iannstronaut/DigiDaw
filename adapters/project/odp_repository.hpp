@@ -274,7 +274,7 @@ private:
 
             uint32_t id = 0;
             float vol = 0.8f, pan = 0.0f;
-            uint8_t mix_track = 1;
+            uint8_t mix_track = 0;
 
             std::memcpy(&id, ptr, sizeof(uint32_t)); ptr += sizeof(uint32_t);
             std::memcpy(&vol, ptr, sizeof(float)); ptr += sizeof(float);
