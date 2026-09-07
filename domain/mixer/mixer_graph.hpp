@@ -3,6 +3,7 @@
 #include "mixer_track.hpp"
 #include "../buffer/audio_buffer.hpp"
 #include "../common/result.hpp"
+#include "../dsp/denormal.hpp"
 #include <unordered_map>
 #include <vector>
 #include <queue>
@@ -111,9 +112,11 @@ public:
     // RT-safe: Preallocated buffers, no heap allocs
     void process(const std::unordered_map<MixerTrackId, AudioBufferView>& track_inputs,
                  AudioBufferView& master_out) {
+        dsp::enable_ftz_daz();
         const size_t frames = master_out.frames;
+        if (frames == 0) return;
 
-        // 1. Clear all track scratch buffers and populate with direct inputs
+        // 1. Clear or populate track scratch buffers directly
         for (const auto& id : topo_order_) {
             auto& buf = track_buffers_[id];
             if (!buf) {
@@ -121,11 +124,12 @@ public:
             }
             buf->resize_frames(frames);
             auto view = buf->view();
-            view.clear();
 
             auto input_it = track_inputs.find(id);
             if (input_it != track_inputs.end()) {
                 view.copy_from(input_it->second);
+            } else {
+                view.clear();
             }
         }
 
@@ -183,20 +187,26 @@ public:
                         }
                         dry_scratch_->resize_frames(frames);
                         auto dry_view = dry_scratch_->view();
-                        for (size_t f = 0; f < frames; ++f) {
-                            if (dry_view.left && track_view.left) dry_view.left[f] = track_view.left[f];
-                            if (dry_view.right && track_view.right) dry_view.right[f] = track_view.right[f];
-                        }
+                        dry_view.copy_from(track_view);
+
                         try {
                             std::span<const MidiEvent> empty_midi{};
                             slot.device->process(track_view, empty_midi);
                             const float wet = slot.wet_mix;
                             const float dry = 1.0f - wet;
-                            for (size_t f = 0; f < frames; ++f) {
-                                if (track_view.left && dry_view.left)
-                                    track_view.left[f] = dry_view.left[f] * dry + track_view.left[f] * wet;
-                                if (track_view.right && dry_view.right)
-                                    track_view.right[f] = dry_view.right[f] * dry + track_view.right[f] * wet;
+                            float* tl = track_view.left;
+                            float* tr = track_view.right;
+                            const float* dl = dry_view.left;
+                            const float* dr = dry_view.right;
+                            if (tl && dl) {
+                                for (size_t f = 0; f < frames; ++f) {
+                                    tl[f] = dl[f] * dry + tl[f] * wet;
+                                }
+                            }
+                            if (tr && dr) {
+                                for (size_t f = 0; f < frames; ++f) {
+                                    tr[f] = dr[f] * dry + tr[f] * wet;
+                                }
                             }
                         } catch (...) {
                             slot.bypassed_due_to_error = true;
@@ -205,17 +215,30 @@ public:
                 }
             }
 
-            // Apply Track Volume and Pan
+            // Apply Track Volume and Pan with vectorized multiplier (skipping unity/zero gain)
             const float vol = track.volume();
             const auto [pan_l, pan_r] = track.compute_pan_gains();
+            const float gain_l = vol * pan_l;
+            const float gain_r = vol * pan_r;
 
-            for (size_t f = 0; f < frames; ++f) {
-                if (track_view.left) track_view.left[f] *= (vol * pan_l);
-                if (track_view.right) track_view.right[f] *= (vol * pan_r);
+            if (gain_l == 0.0f && gain_r == 0.0f) {
+                track_view.clear();
+            } else if (std::abs(gain_l - 1.0f) > 1e-5f || std::abs(gain_r - 1.0f) > 1e-5f) {
+                if (track_view.left) {
+                    for (size_t f = 0; f < frames; ++f) {
+                        track_view.left[f] *= gain_l;
+                    }
+                }
+                if (track_view.right) {
+                    for (size_t f = 0; f < frames; ++f) {
+                        track_view.right[f] *= gain_r;
+                    }
+                }
             }
 
             // Route to target sends
             for (const auto& send : track.sends()) {
+                if (send.amount <= 0.0001f) continue;
                 auto target_it = track_buffers_.find(send.target_track);
                 if (target_it != track_buffers_.end()) {
                     auto target_view = target_it->second->view();

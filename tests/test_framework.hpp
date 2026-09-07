@@ -38,7 +38,7 @@ public:
         auto suite_start = std::chrono::steady_clock::now();
 
         for (const auto& t : tests_) {
-            std::cout << "  [" << t.suite << "] " << t.name << " ... ";
+            std::cout << "  [" << t.suite << "] " << t.name << " ... " << std::flush;
             current_test_failed_ = false;
             current_failure_msg_.clear();
 

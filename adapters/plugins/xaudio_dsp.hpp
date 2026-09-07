@@ -123,6 +123,8 @@ struct Biquad {
         double y = b0 * x + z1;
         z1 = b1 * x - a1 * y + z2;
         z2 = b2 * x - a2 * y;
+        if (std::abs(z1) < 1e-25) z1 = 0.0;
+        if (std::abs(z2) < 1e-25) z2 = 0.0;
         return y;
     }
 
@@ -222,6 +224,14 @@ inline double reduction(double level, double threshold, double ratio, double kne
 struct Compressor {
     double gr{0.0};
 
+    double tick_fast(double detector, double threshold, double ratio, double knee,
+                     double att_c, double rel_c) noexcept {
+        double target = reduction(gainDb(detector), threshold, ratio, knee);
+        double c = (target > gr) ? att_c : rel_c;
+        gr = c * gr + (1.0 - c) * target;
+        return dbGain(-gr);
+    }
+
     double tick(double detector, double threshold, double ratio, double knee, double attack,
                 double release, double fs) noexcept {
         double target = reduction(gainDb(detector), threshold, ratio, knee);
@@ -243,13 +253,15 @@ struct Delay {
     [[nodiscard]] double read(size_t n) const noexcept {
         if (data.empty()) return 0.0;
         n = std::min(n, data.size() - 1);
-        return data[(pos + data.size() - n) % data.size()];
+        size_t idx = pos + data.size() - n;
+        if (idx >= data.size()) idx -= data.size();
+        return data[idx];
     }
 
     void push(double x) noexcept {
         if (data.empty()) return;
         data[pos] = x;
-        pos = (pos + 1) % data.size();
+        if (++pos >= data.size()) pos = 0;
     }
 
     double allpass(double x, double g) noexcept {
@@ -314,7 +326,11 @@ public:
 
     void set(size_t i, double v) noexcept {
         if (i < target.size()) {
-            target[i] = std::clamp(clean(v), static_cast<double>(spec[i].lo), static_cast<double>(spec[i].hi));
+            double c = std::clamp(clean(v), static_cast<double>(spec[i].lo), static_cast<double>(spec[i].hi));
+            if (target[i] != c) {
+                target[i] = c;
+                dirty_ = true;
+            }
         }
     }
 
@@ -323,15 +339,25 @@ public:
     }
 
     void tick(double& left, double& right, double sideL = 0.0, double sideR = 0.0, bool hasSide = false) noexcept {
-        for (size_t i = 0; i < value.size(); ++i) {
-            value[i] = smooth * value[i] + (1.0 - smooth) * target[i];
-        }
-        if ((counter++ % 32) == 0) {
-            update();
+        if (dirty_) {
+            bool any_moving = false;
+            for (size_t i = 0; i < value.size(); ++i) {
+                double diff = target[i] - value[i];
+                if (std::abs(diff) > 1e-5) {
+                    value[i] = smooth * value[i] + (1.0 - smooth) * target[i];
+                    any_moving = true;
+                } else {
+                    value[i] = target[i];
+                }
+            }
+            if ((counter++ & 31) == 0 || !any_moving) {
+                update();
+            }
+            dirty_ = any_moving;
         }
 
         double original[2]{clean(left), clean(right)};
-        double x[2]{original[0] * dbGain(value[1]), original[1] * dbGain(value[1])};
+        double x[2]{original[0] * in_gain_, original[1] * in_gain_};
         double dry[2]{x[0], x[1]};
 
         if (kind == 0) { // X-Eq
@@ -340,21 +366,16 @@ public:
                     x[c] = b.tick(x[c]);
                 }
             }
-        }
-
-        if (kind == 1) { // X-Compressor
+        } else if (kind == 1) { // X-Compressor
             bool external = target[11] > 0.5 && hasSide;
             double dl = sc[0].tick(external ? clean(sideL) : x[0]);
             double dr = sc[1].tick(external ? clean(sideR) : x[1]);
-            double g = comp[0].tick(std::max(std::abs(dl), std::abs(dr)), value[4], value[5],
-                                    value[8], value[6], value[7], fs) *
-                       dbGain(value[9]);
+            double g = comp[0].tick_fast(std::max(std::abs(dl), std::abs(dr)), value[4], value[5],
+                                         value[8], comp_att_c_, comp_rel_c_) * comp_makeup_;
             x[0] *= g;
             x[1] *= g;
             gr[0] = static_cast<float>(comp[0].gr);
-        }
-
-        if (kind == 2) { // X-Multiband
+        } else if (kind == 2) { // X-Multiband
             double bands[2][4]{};
             bool solo = false;
             for (int b = 0; b < 4; ++b) {
@@ -375,101 +396,89 @@ public:
                 int i = 7 + b * 8;
                 double in_lvl = std::max(std::abs(bands[0][b]), std::abs(bands[1][b]));
                 band_levels[b] = static_cast<float>(std::max(static_cast<double>(band_levels[b]) * 0.9995, in_lvl));
-                double g = comp[b].tick(in_lvl,
-                                        value[i], value[i + 1], value[i + 4], value[i + 2],
-                                        value[i + 3], fs) *
-                           dbGain(value[i + 5]);
+                double g = comp[b].tick_fast(in_lvl,
+                                             value[i], value[i + 1], value[i + 4],
+                                             mb_att_c_[b], mb_rel_c_[b]) * mb_makeup_[b];
                 double gate = (1.0 - value[i + 7]) * (solo ? value[i + 6] : 1.0);
                 for (int c = 0; c < 2; ++c) {
                     x[c] += bands[c][b] * g * gate;
                 }
                 gr[b] = static_cast<float>(comp[b].gr);
             }
-        }
-
-        if (kind == 3) { // X-Reverb
+        } else if (kind == 3) { // X-Reverb
             double input[2]{};
+            double n = value[4] * 0.001 * fs;
+            size_t a = static_cast<size_t>(n);
+            double frac = n - static_cast<double>(a);
             for (int c = 0; c < 2; ++c) {
-                double n = value[4] * 0.001 * fs;
-                size_t a = static_cast<size_t>(n);
-                double frac = n - static_cast<double>(a);
                 double v = (a == 0) ? x[c] : pre[c].read(a);
                 double w = pre[c].read(a + 1);
                 input[c] = v + (w - v) * frac;
                 pre[c].push(x[c]);
                 for (auto& d : diff[c]) {
-                    input[c] = d.allpass(input[c], value[9] * 0.007);
+                    input[c] = d.allpass(input[c], rev_diff_g_);
                 }
             }
             std::array<double, 8> v{}, h{};
-            double dc = std::exp(-2.0 * pi * std::min(value[6], fs * 0.45) / fs);
             for (int j = 0; j < 8; ++j) {
                 double z = lines[j].read(length[j]);
-                damp[j] = (1.0 - dc) * z + dc * damp[j];
+                damp[j] = (1.0 - rev_dc_) * z + rev_dc_ * damp[j];
+                if (std::abs(damp[j]) < 1e-25) damp[j] = 0.0;
                 v[j] = damp[j];
                 h[j] = v[j];
             }
             for (int stride = 1; stride < 8; stride *= 2) {
                 for (int base = 0; base < 8; base += 2 * stride) {
                     for (int k = 0; k < stride; ++k) {
-                        double a = h[base + k];
-                        double b = h[base + k + stride];
-                        h[base + k] = a + b;
-                        h[base + k + stride] = a - b;
+                        double ah = h[base + k];
+                        double bh = h[base + k + stride];
+                        h[base + k] = ah + bh;
+                        h[base + k + stride] = ah - bh;
                     }
                 }
             }
             for (int j = 0; j < 8; ++j) {
-                double feedback = std::pow(10.0, -3.0 * static_cast<double>(length[j]) / (fs * value[5]));
                 double injection = (input[0] + ((j % 2) ? -input[1] : input[1])) * 0.25;
-                lines[j].push(injection + h[j] * 0.3535533905932738 * feedback);
+                lines[j].push(injection + h[j] * 0.3535533905932738 * rev_feedback_[j]);
             }
             double l = (v[0] + v[1] - v[2] - v[3] + v[4] + v[5] - v[6] - v[7]) * 0.5;
             double r = (v[0] - v[1] - v[2] + v[3] + v[4] - v[5] - v[6] + v[7]) * 0.5;
             double mid = (l + r) * 0.5;
-            double side = (l - r) * 0.5 * value[8] * 0.01;
+            double side = (l - r) * rev_side_gain_;
             x[0] = wetHP[0].tick(mid + side);
             x[1] = wetHP[1].tick(mid - side);
-        }
-
-        if (kind == 4) { // X-Distortion
-            const double toneC = std::exp(-2.0 * pi * std::min(value[5], fs * 0.45) / fs);
-            const double dcC = std::exp(-2.0 * pi * 20.0 / fs);
+        } else if (kind == 4) { // X-Distortion
             for (int c = 0; c < 2; ++c) {
-                const double shaped = saturate(x[c], value[4], value[6]);
-                toneState[c] = (1.0 - toneC) * shaped + toneC * toneState[c];
-                const double blocked = toneState[c] - dcInput[c] + dcC * dcOutput[c];
-                dcInput[c] = toneState[c];
-                dcOutput[c] = blocked;
-                x[c] = blocked;
+                const double shaped = std::tanh(x[c] * dist_drive_gain_ + dist_bias_) - dist_tanh_bias_;
+                toneState[c] = (1.0 - dist_tone_c_) * shaped + dist_tone_c_ * toneState[c];
+                const double blocked = toneState[c] - dcInput[c] + dist_dc_c_ * dcOutput[c];
+                if (std::abs(toneState[c]) < 1e-25) toneState[c] = 0.0;
+                if (std::abs(blocked) < 1e-25) {
+                    dcInput[c] = toneState[c];
+                    dcOutput[c] = 0.0;
+                    x[c] = 0.0;
+                } else {
+                    dcInput[c] = toneState[c];
+                    dcOutput[c] = blocked;
+                    x[c] = blocked;
+                }
             }
-        }
+        } else if (kind == 5) { // X-Limiter
+            x[0] *= lim_gain_;
+            x[1] *= lim_gain_;
 
-        if (kind == 5) { // X-Limiter
-            const double boost = dbGain(-value[4]);
-            const double blend = value[3] * 0.01;
-            const double gain = ((1.0 - blend) + blend * boost) * dbGain(value[2]);
-            x[0] *= gain;
-            x[1] *= gain;
-
-            const double ceiling = dbGain(target[5]);
             const double peak = std::max(std::abs(x[0]), std::abs(x[1]));
-            const double required = (peak > ceiling) ? (ceiling / peak) : 1.0;
-            const double releaseC = std::exp(-1.0 / (0.001 * value[6] * fs));
-            limiterGain = std::min(required, releaseC * limiterGain + (1.0 - releaseC));
+            const double required = (peak > lim_ceiling_) ? (lim_ceiling_ / peak) : 1.0;
+            limiterGain = std::min(required, lim_rel_c_ * limiterGain + (1.0 - lim_rel_c_));
             gr[0] = static_cast<float>(-gainDb(limiterGain));
 
-            const double bypass = value[0];
-            left = clean(x[0] * limiterGain * (1.0 - bypass) + original[0] * bypass);
-            right = clean(x[1] * limiterGain * (1.0 - bypass) + original[1] * bypass);
+            left = clean(x[0] * limiterGain * (1.0 - bypass_) + original[0] * bypass_);
+            right = clean(x[1] * limiterGain * (1.0 - bypass_) + original[1] * bypass_);
             return;
         }
 
-        double mix = value[3] * 0.01;
-        double bypass = value[0];
-        double out = dbGain(value[2]);
-        left = clean(((dry[0] * (1.0 - mix) + x[0] * mix) * out) * (1.0 - bypass) + original[0] * bypass);
-        right = clean(((dry[1] * (1.0 - mix) + x[1] * mix) * out) * (1.0 - bypass) + original[0] * bypass);
+        left = clean(((dry[0] * (1.0 - mix_) + x[0] * mix_) * out_gain_) * (1.0 - bypass_) + original[0] * bypass_);
+        right = clean(((dry[1] * (1.0 - mix_) + x[1] * mix_) * out_gain_) * (1.0 - bypass_) + original[0] * bypass_);
     }
 
     int kind{0};
@@ -479,6 +488,11 @@ public:
 
 private:
     void update() noexcept {
+        in_gain_ = dbGain(value[1]);
+        out_gain_ = dbGain(value[2]);
+        mix_ = value[3] * 0.01;
+        bypass_ = value[0];
+
         if (kind == 0) {
             for (int c = 0; c < 2; ++c) {
                 for (int b = 0; b < 6; ++b) {
@@ -487,13 +501,14 @@ private:
                                  value[i + 2], fs);
                 }
             }
-        }
-        if (kind == 1) {
+        } else if (kind == 1) {
             for (auto& b : sc) {
                 b.set(4, value[10], 0.0, 0.70710678, fs);
             }
-        }
-        if (kind == 2) {
+            comp_att_c_ = std::exp(-1.0 / (0.001 * value[6] * fs));
+            comp_rel_c_ = std::exp(-1.0 / (0.001 * value[7] * fs));
+            comp_makeup_ = dbGain(value[9]);
+        } else if (kind == 2) {
             for (int c = 0; c < 2; ++c) {
                 for (int i = 0; i < 3; ++i) {
                     cross[c][i].set(value[4 + i], fs);
@@ -502,17 +517,63 @@ private:
                 phase[c][1].set(value[6], fs);
                 phase[c][2].set(value[6], fs);
             }
-        }
-        if (kind == 3) {
+            for (int b = 0; b < 4; ++b) {
+                int i = 7 + b * 8;
+                mb_att_c_[b] = std::exp(-1.0 / (0.001 * value[i + 2] * fs));
+                mb_rel_c_[b] = std::exp(-1.0 / (0.001 * value[i + 3] * fs));
+                mb_makeup_[b] = dbGain(value[i + 5]);
+            }
+        } else if (kind == 3) {
             for (auto& b : wetHP) {
                 b.set(4, value[7], 0.0, 0.70710678, fs);
             }
+            rev_diff_g_ = value[9] * 0.007;
+            rev_dc_ = std::exp(-2.0 * pi * std::min(value[6], fs * 0.45) / fs);
+            for (int j = 0; j < 8; ++j) {
+                rev_feedback_[j] = std::pow(10.0, -3.0 * static_cast<double>(length[j]) / (fs * value[5]));
+            }
+            rev_side_gain_ = value[8] * 0.01 * 0.5;
+        } else if (kind == 4) {
+            dist_tone_c_ = std::exp(-2.0 * pi * std::min(value[5], fs * 0.45) / fs);
+            dist_dc_c_ = std::exp(-2.0 * pi * 20.0 / fs);
+            dist_drive_gain_ = dbGain(value[4]);
+            dist_bias_ = value[6] * 0.01;
+            dist_tanh_bias_ = std::tanh(dist_bias_);
+        } else if (kind == 5) {
+            const double boost = dbGain(-value[4]);
+            const double blend = value[3] * 0.01;
+            lim_gain_ = ((1.0 - blend) + blend * boost) * dbGain(value[2]);
+            lim_ceiling_ = dbGain(target[5]);
+            lim_rel_c_ = std::exp(-1.0 / (0.001 * value[6] * fs));
         }
     }
 
     double fs{48000.0};
     double smooth{0.0};
     double limiterGain{1.0};
+    bool dirty_{true};
+    double in_gain_{1.0};
+    double out_gain_{1.0};
+    double mix_{1.0};
+    double bypass_{0.0};
+    double comp_att_c_{0.0};
+    double comp_rel_c_{0.0};
+    double comp_makeup_{1.0};
+    std::array<double, 4> mb_att_c_{};
+    std::array<double, 4> mb_rel_c_{};
+    std::array<double, 4> mb_makeup_{};
+    double rev_dc_{0.0};
+    std::array<double, 8> rev_feedback_{};
+    double rev_diff_g_{0.0};
+    double rev_side_gain_{0.0};
+    double dist_tone_c_{0.0};
+    double dist_dc_c_{0.0};
+    double dist_drive_gain_{1.0};
+    double dist_bias_{0.0};
+    double dist_tanh_bias_{0.0};
+    double lim_gain_{1.0};
+    double lim_ceiling_{1.0};
+    double lim_rel_c_{0.0};
     std::array<double, 2> toneState{}, dcInput{}, dcOutput{};
     unsigned counter{0};
     std::vector<double> target{}, value{};

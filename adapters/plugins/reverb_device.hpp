@@ -15,10 +15,11 @@ public:
         filter_store_ = 0.0f;
     }
 
-    float process(float input, float feedback, float damp) {
+    float process(float input, float feedback, float damp, float damp1) {
         if (buffer_.empty()) return input;
         float output = buffer_[index_];
-        filter_store_ = (output * (1.0f - damp)) + (filter_store_ * damp);
+        filter_store_ = (output * damp1) + (filter_store_ * damp);
+        if (std::abs(filter_store_) < 1e-15f) filter_store_ = 0.0f;
         buffer_[index_] = input + (filter_store_ * feedback);
         if (++index_ >= buffer_.size()) index_ = 0;
         return output;
@@ -115,21 +116,25 @@ public:
 
     void process(domain::AudioBufferView& audio, std::span<const domain::MidiEvent> /*midi*/) override {
         const size_t frames = audio.frames;
-        if (!audio.left || !audio.right || frames == 0) return;
+        float* left_ptr = audio.left;
+        float* right_ptr = audio.right;
+        if (!left_ptr || !right_ptr || frames == 0) return;
 
         const float feedback = 0.7f + room_size_ * 0.28f;
+        const float damp = damping_;
+        const float damp1 = 1.0f - damping_;
 
         for (size_t i = 0; i < frames; ++i) {
-            float in_l = audio.left[i];
-            float in_r = audio.right[i];
+            float in_l = left_ptr[i];
+            float in_r = right_ptr[i];
             float in_mono = (in_l + in_r) * 0.5f;
 
             // 1. Parallel Comb Filters
             float out_comb_l = 0.0f;
             float out_comb_r = 0.0f;
             for (int c = 0; c < 4; ++c) {
-                out_comb_l += comb_l_[c].process(in_mono, feedback, damping_);
-                out_comb_r += comb_r_[c].process(in_mono, feedback, damping_);
+                out_comb_l += comb_l_[c].process(in_mono, feedback, damp, damp1);
+                out_comb_r += comb_r_[c].process(in_mono, feedback, damp, damp1);
             }
 
             // 2. Series Allpass Diffusers
@@ -139,8 +144,8 @@ public:
             }
 
             // 3. Dry / Wet Mix
-            audio.left[i] = (in_l * dry_) + (out_comb_l * wet_);
-            audio.right[i] = (in_r * dry_) + (out_comb_r * wet_);
+            left_ptr[i] = (in_l * dry_) + (out_comb_l * wet_);
+            right_ptr[i] = (in_r * dry_) + (out_comb_r * wet_);
         }
     }
 

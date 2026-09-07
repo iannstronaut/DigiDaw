@@ -49,8 +49,9 @@ public:
         delay_l_[write_pos_] = left;
         delay_r_[write_pos_] = right;
 
-        // Advance read/write pos
-        size_t read_pos = (write_pos_ + 1) % lookahead_samples_;
+        // Advance read/write pos with fast branch-wrapping
+        size_t read_pos = write_pos_ + 1;
+        if (read_pos >= lookahead_samples_) read_pos = 0;
         write_pos_ = read_pos;
 
         // Output delayed sample with smoothed gain reduction applied

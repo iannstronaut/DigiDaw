@@ -34,6 +34,7 @@ public:
 
     Synth3xOsc() {
         voices_.resize(MaxVoices);
+        update_osc_multipliers();
     }
 
     [[nodiscard]] domain::DeviceUid uid() const override {
@@ -50,6 +51,7 @@ public:
 
     void prepare(double sample_rate, size_t /*max_block_size*/) override {
         sample_rate_ = (sample_rate > 0.0) ? sample_rate : 44100.0;
+        update_osc_multipliers();
         filter_.set_parameters(domain::dsp::BiquadType::Lowpass, filter_cutoff_, filter_q_, 0.0, sample_rate_);
         filter_.reset();
     }
@@ -79,12 +81,36 @@ public:
         const float attack_step = 1.0f / std::max(0.001f, attack_sec_ * static_cast<float>(sample_rate_));
         const float decay_step = 1.0f / std::max(0.001f, decay_sec_ * static_cast<float>(sample_rate_));
         const float release_step = 1.0f / std::max(0.001f, release_sec_ * static_cast<float>(sample_rate_));
+        float* out_l = buffer.left;
+        float* out_r = buffer.right;
+
+        struct Active3xVoice {
+            Voice* v;
+            double step1;
+            double step2;
+            double step3;
+        };
+        std::array<Active3xVoice, MaxVoices> active_voices{};
+        size_t num_active = 0;
+        for (auto& v : voices_) {
+            if (!v.active) continue;
+            const double base_freq = 440.0 * std::pow(2.0, (v.note - 69) / 12.0);
+            const double f1 = base_freq * osc1_mult_;
+            const double f2 = base_freq * osc2_mult_;
+            const double f3 = base_freq * osc3_mult_;
+            active_voices[num_active++] = {&v, f1 * inv_sr, f2 * inv_sr, f3 * inv_sr};
+        }
+
+        if (num_active == 0) {
+            return;
+        }
 
         for (size_t f = 0; f < buffer.frames; ++f) {
             float sample_l = 0.0f;
             float sample_r = 0.0f;
 
-            for (auto& v : voices_) {
+            for (size_t vi = 0; vi < num_active; ++vi) {
+                auto& v = *active_voices[vi].v;
                 if (!v.active) continue;
 
                 // Update envelope
@@ -120,18 +146,18 @@ public:
 
                 if (!v.active) continue;
 
-                const double base_freq = 440.0 * std::pow(2.0, (v.note - 69) / 12.0);
-                const double f1 = base_freq * std::pow(2.0, osc1_semi_ / 12.0);
-                const double f2 = base_freq * std::pow(2.0, (osc2_semi_ + osc2_fine_ / 100.0) / 12.0);
-                const double f3 = base_freq * std::pow(2.0, (osc3_semi_ + osc3_fine_ / 100.0) / 12.0);
-
                 float s1 = generate_osc(osc1_wave_, v.phase1) * osc1_vol_;
                 float s2 = generate_osc(osc2_wave_, v.phase2) * osc2_vol_;
                 float s3 = generate_osc(osc3_wave_, v.phase3) * osc3_vol_;
 
-                v.phase1 = std::fmod(v.phase1 + f1 * inv_sr, 1.0);
-                v.phase2 = std::fmod(v.phase2 + f2 * inv_sr, 1.0);
-                v.phase3 = std::fmod(v.phase3 + f3 * inv_sr, 1.0);
+                v.phase1 += active_voices[vi].step1;
+                if (v.phase1 >= 1.0) v.phase1 -= 1.0;
+
+                v.phase2 += active_voices[vi].step2;
+                if (v.phase2 >= 1.0) v.phase2 -= 1.0;
+
+                v.phase3 += active_voices[vi].step3;
+                if (v.phase3 >= 1.0) v.phase3 -= 1.0;
 
                 float voice_out = (s1 + s2 + s3) * v.velocity * v.env_val;
                 sample_l += voice_out;
@@ -142,8 +168,8 @@ public:
             sample_l = filter_.process(sample_l * master_vol_);
             sample_r = sample_l; // Mono to stereo
 
-            if (buffer.left) buffer.left[f] += sample_l;
-            if (buffer.right) buffer.right[f] += sample_r;
+            if (out_l) out_l[f] += sample_l;
+            if (out_r) out_r[f] += sample_r;
         }
     }
 
@@ -154,7 +180,9 @@ public:
             case 2: osc1_vol_ = val; break;
             case 3: osc2_wave_ = static_cast<OscWaveform>(static_cast<int>(val * 3.99f)); break;
             case 4: osc2_vol_ = val; break;
-            case 5: osc2_semi_ = static_cast<int>((val - 0.5f) * 48.0f); break;
+            case 5: osc2_semi_ = static_cast<int>((val - 0.5f) * 48.0f);
+                    update_osc_multipliers();
+                    break;
             case 6: filter_cutoff_ = 20.0 + std::pow(val, 2.0) * 18000.0;
                     filter_.set_parameters(domain::dsp::BiquadType::Lowpass, filter_cutoff_, filter_q_, 0.0, sample_rate_);
                     break;
@@ -215,6 +243,7 @@ public:
         osc2_wave_ = static_cast<OscWaveform>(static_cast<int>(params[3]));
         osc2_vol_ = params[4];
         osc2_semi_ = static_cast<int>(params[5]);
+        update_osc_multipliers();
         filter_cutoff_ = params[6];
         filter_q_ = params[7];
         filter_.set_parameters(domain::dsp::BiquadType::Lowpass, filter_cutoff_, filter_q_, 0.0, sample_rate_);
@@ -314,6 +343,16 @@ private:
     double filter_cutoff_{10000.0};
     double filter_q_{1.0};
     domain::dsp::BiquadFilter filter_;
+
+    double osc1_mult_{1.0};
+    double osc2_mult_{1.0};
+    double osc3_mult_{0.5};
+
+    void update_osc_multipliers() noexcept {
+        osc1_mult_ = std::pow(2.0, osc1_semi_ / 12.0);
+        osc2_mult_ = std::pow(2.0, (osc2_semi_ + osc2_fine_ / 100.0) / 12.0);
+        osc3_mult_ = std::pow(2.0, (osc3_semi_ + osc3_fine_ / 100.0) / 12.0);
+    }
 
     std::vector<Voice> voices_;
 };

@@ -117,7 +117,8 @@ public:
             domain::Tick end;
             bool is_end_of_loop;
         };
-        std::vector<Interval> intervals;
+        std::array<Interval, 2> intervals{};
+        size_t num_intervals = 0;
 
         if (is_looping && loop_end > loop_start) {
             const domain::Tick loop_len = loop_end - loop_start;
@@ -128,23 +129,26 @@ public:
 
             const domain::Tick next_tick = current_tick_ + delta_ticks;
             if (next_tick < loop_end) {
-                intervals.push_back({current_tick_, next_tick, false});
+                intervals[num_intervals++] = {current_tick_, next_tick, false};
                 current_tick_ = next_tick;
             } else {
                 // Crosses loop boundary!
-                intervals.push_back({current_tick_, loop_end, true});
+                intervals[num_intervals++] = {current_tick_, loop_end, true};
                 domain::Tick wrapped_ticks = (next_tick - loop_end) % loop_len;
-                intervals.push_back({loop_start, loop_start + wrapped_ticks, false});
+                intervals[num_intervals++] = {loop_start, loop_start + wrapped_ticks, false};
                 current_tick_ = loop_start + wrapped_ticks;
             }
         } else {
-            intervals.push_back({current_tick_, current_tick_ + delta_ticks, false});
+            intervals[num_intervals++] = {current_tick_, current_tick_ + delta_ticks, false};
             current_tick_ += delta_ticks;
         }
 
-        std::unordered_map<domain::ChannelId, std::vector<domain::MidiEvent>> ch_map;
+        for (auto& [_, evs] : ch_map_scratch_) {
+            evs.clear();
+        }
 
-        for (const auto& span : intervals) {
+        for (size_t ii = 0; ii < num_intervals; ++ii) {
+            const auto& span = intervals[ii];
             const domain::Tick s_start = span.start;
             const domain::Tick s_end = span.end;
 
@@ -152,7 +156,7 @@ public:
                 auto* pat = project_->get_pattern(project_->ui_state().selected_pattern_id);
                 if (pat) {
                     for (const auto& [ch_id, note_set] : pat->all_notes()) {
-                        auto& ev_list = ch_map[ch_id];
+                        auto& ev_list = ch_map_scratch_[ch_id];
                         for (const auto& note : note_set.notes()) {
                             // Note On
                             if (note.start >= s_start && note.start < s_end) {
@@ -205,7 +209,7 @@ public:
                         // Pattern notes trigger only once at defined offset (n.start < clip.length).
                         // The extended portion beyond pattern notes remains completely silent.
                         for (const auto& [ch_id, note_set] : pat->all_notes()) {
-                            auto& ev_list = ch_map[ch_id];
+                            auto& ev_list = ch_map_scratch_[ch_id];
 
                             for (const auto& note : note_set.notes()) {
                                 if (note.start >= clip.length) continue;
@@ -230,13 +234,14 @@ public:
             }
         }
 
-        for (auto& [cid, evs] : ch_map) {
+        result_scratch_.clear();
+        for (const auto& [cid, evs] : ch_map_scratch_) {
             if (!evs.empty()) {
-                result.push_back(ScheduledChannelEvents{cid, std::move(evs)});
+                result_scratch_.push_back(ScheduledChannelEvents{cid, evs});
             }
         }
 
-        return result;
+        return result_scratch_;
     }
 
 private:
@@ -247,6 +252,8 @@ private:
     domain::Tick loop_start_{0};
     domain::Tick loop_end_{0};
     bool loop_enabled_{false};
+    std::unordered_map<domain::ChannelId, std::vector<domain::MidiEvent>> ch_map_scratch_;
+    std::vector<ScheduledChannelEvents> result_scratch_;
 };
 
 } // namespace digidaw::app

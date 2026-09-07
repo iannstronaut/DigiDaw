@@ -46,33 +46,41 @@ public:
     void process(domain::AudioBufferView& buffer, std::span<const domain::MidiEvent> /*midi*/) override {
         if (max_delay_samples_ == 0) return;
 
-        for (size_t f = 0; f < buffer.frames; ++f) {
-            float in_l = buffer.left ? buffer.left[f] : 0.0f;
-            float in_r = buffer.right ? buffer.right[f] : 0.0f;
+        const float damp_val = damp_l_.current();
+        const float fb_gain = damp_val * feedback_;
+        const float wet = wet_mix_;
+        const float dry = 1.0f - wet;
+        float* left_ptr = buffer.left;
+        float* right_ptr = buffer.right;
 
-            // Read from delay lines
-            size_t read_l = (write_pos_ + max_delay_samples_ - delay_samples_l_) % max_delay_samples_;
-            size_t read_r = (write_pos_ + max_delay_samples_ - delay_samples_r_) % max_delay_samples_;
+        for (size_t f = 0; f < buffer.frames; ++f) {
+            float in_l = left_ptr ? left_ptr[f] : 0.0f;
+            float in_r = right_ptr ? right_ptr[f] : 0.0f;
+
+            // Fast branch-wrapping instead of 64-bit integer division
+            size_t read_l = write_pos_ + max_delay_samples_ - delay_samples_l_;
+            if (read_l >= max_delay_samples_) read_l -= max_delay_samples_;
+            size_t read_r = write_pos_ + max_delay_samples_ - delay_samples_r_;
+            if (read_r >= max_delay_samples_) read_r -= max_delay_samples_;
 
             float delayed_l = buffer_l_[read_l];
             float delayed_r = buffer_r_[read_r];
 
-            // Apply damping filter to feedback path
-            float fb_l = damp_l_.process() * delayed_l * feedback_;
-            float fb_r = damp_r_.process() * delayed_r * feedback_;
+            // Feedback with anti-denormal flush
+            float fb_l = delayed_l * fb_gain;
+            float fb_r = delayed_r * fb_gain;
+            if (std::abs(fb_l) < 1e-15f) fb_l = 0.0f;
+            if (std::abs(fb_r) < 1e-15f) fb_r = 0.0f;
 
             // Write to buffer
             buffer_l_[write_pos_] = in_l + fb_l;
             buffer_r_[write_pos_] = in_r + fb_r;
 
-            write_pos_ = (write_pos_ + 1) % max_delay_samples_;
+            if (++write_pos_ >= max_delay_samples_) write_pos_ = 0;
 
             // Mix wet & dry
-            float out_l = in_l * (1.0f - wet_mix_) + delayed_l * wet_mix_;
-            float out_r = in_r * (1.0f - wet_mix_) + delayed_r * wet_mix_;
-
-            if (buffer.left) buffer.left[f] = out_l;
-            if (buffer.right) buffer.right[f] = out_r;
+            if (left_ptr) left_ptr[f] = in_l * dry + delayed_l * wet;
+            if (right_ptr) right_ptr[f] = in_r * dry + delayed_r * wet;
         }
     }
 

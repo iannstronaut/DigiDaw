@@ -2,6 +2,7 @@
 
 #include "../../app/ports/audio_device.hpp"
 #include "../../domain/common/result.hpp"
+#include "../../domain/dsp/denormal.hpp"
 #include <memory>
 #include <vector>
 #include <thread>
@@ -11,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mmsystem.h>
+#include "wasapi_driver.hpp"
 #endif
 
 namespace digidaw::adapters::audio {
@@ -46,6 +48,7 @@ public:
 
         running_ = true;
         thread_ = std::thread([this]() {
+            domain::dsp::enable_ftz_daz();
             domain::OwningAudioBuffer buf(buffer_size_);
             while (running_) {
                 auto start_time = std::chrono::steady_clock::now();
@@ -111,13 +114,22 @@ public:
         wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
         wfx.cbSize = 0;
 
-        MMRESULT res = waveOutOpen(&h_wave_out_, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL);
+        h_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!h_event_) {
+            return domain::Result<void>(domain::ErrorCode::DeviceOpenFailed);
+        }
+
+        MMRESULT res = waveOutOpen(&h_wave_out_, WAVE_MAPPER, &wfx,
+                                   reinterpret_cast<DWORD_PTR>(h_event_), 0, CALLBACK_EVENT);
         if (res != MMSYSERR_NOERROR) {
+            CloseHandle(h_event_);
+            h_event_ = NULL;
             h_wave_out_ = NULL;
             return domain::Result<void>(domain::ErrorCode::DeviceOpenFailed);
         }
 
-        const size_t num_buffers = 4;
+        // 8 buffers provide 92ms jitter-absorption headroom with zero added write latency
+        const size_t num_buffers = 8;
         buffer_bytes_ = buffer_size * wfx.nBlockAlign;
         headers_.resize(num_buffers);
         pcm_data_.resize(num_buffers * buffer_bytes_, 0);
@@ -144,6 +156,10 @@ public:
             waveOutClose(h_wave_out_);
             h_wave_out_ = NULL;
         }
+        if (h_event_) {
+            CloseHandle(h_event_);
+            h_event_ = NULL;
+        }
         opened_ = false;
     }
 
@@ -151,24 +167,38 @@ public:
         if (!opened_ || !h_wave_out_) return domain::Result<void>(domain::ErrorCode::DeviceOpenFailed);
         if (running_) return domain::Result<void>::ok();
 
+        timeBeginPeriod(1);
         running_ = true;
+
         thread_ = std::thread([this]() {
+            // TIME_CRITICAL thread priority & MMCSS "Pro Audio" registration
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+            DWORD task_index = 0;
+            HMODULE avrt = LoadLibraryA("avrt.dll");
+            HANDLE h_task = NULL;
+            if (avrt) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+                typedef HANDLE (WINAPI *AvSetMmThreadCharacteristicsW_t)(LPCWSTR, LPDWORD);
+                auto pAvSet = reinterpret_cast<AvSetMmThreadCharacteristicsW_t>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW"));
+                if (pAvSet) h_task = pAvSet(L"Pro Audio", &task_index);
+#pragma GCC diagnostic pop
+            }
+
+            // Flush denormal numbers to zero on CPU to completely eliminate denormal slowdowns
+            domain::dsp::enable_ftz_daz();
+
             domain::OwningAudioBuffer float_buf(buffer_size_);
             size_t buf_idx = 0;
 
-            while (running_) {
+            // Pre-fill initial 4 buffers so DAC begins with steady pipeline
+            for (size_t i = 0; i < 4 && i < headers_.size(); ++i) {
                 WAVEHDR& hdr = headers_[buf_idx];
-                if (!(hdr.dwFlags & WHDR_DONE)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    continue;
-                }
-
                 auto view = float_buf.view();
                 view.clear();
                 if (callback_) {
                     callback_(view);
                 }
-
                 int16_t* pcm_out = reinterpret_cast<int16_t*>(hdr.lpData);
                 for (size_t f = 0; f < buffer_size_; ++f) {
                     float sl = std::clamp(view.left ? view.left[f] : 0.0f, -1.0f, 1.0f);
@@ -176,11 +206,52 @@ public:
                     pcm_out[f * 2 + 0] = static_cast<int16_t>(sl * 32767.0f);
                     pcm_out[f * 2 + 1] = static_cast<int16_t>(sr * 32767.0f);
                 }
-
                 hdr.dwFlags &= ~WHDR_DONE;
                 waveOutWrite(h_wave_out_, &hdr, sizeof(WAVEHDR));
-
                 buf_idx = (buf_idx + 1) % headers_.size();
+            }
+
+            while (running_) {
+                // Event-driven: wakes up immediately when sound hardware releases a buffer
+                WaitForSingleObject(h_event_, 15);
+                if (!running_) break;
+
+                while (running_) {
+                    WAVEHDR& hdr = headers_[buf_idx];
+                    if (!(hdr.dwFlags & WHDR_DONE)) {
+                        break;
+                    }
+
+                    auto view = float_buf.view();
+                    view.clear();
+                    if (callback_) {
+                        callback_(view);
+                    }
+
+                    int16_t* pcm_out = reinterpret_cast<int16_t*>(hdr.lpData);
+                    for (size_t f = 0; f < buffer_size_; ++f) {
+                        float sl = std::clamp(view.left ? view.left[f] : 0.0f, -1.0f, 1.0f);
+                        float sr = std::clamp(view.right ? view.right[f] : 0.0f, -1.0f, 1.0f);
+                        pcm_out[f * 2 + 0] = static_cast<int16_t>(sl * 32767.0f);
+                        pcm_out[f * 2 + 1] = static_cast<int16_t>(sr * 32767.0f);
+                    }
+
+                    hdr.dwFlags &= ~WHDR_DONE;
+                    waveOutWrite(h_wave_out_, &hdr, sizeof(WAVEHDR));
+                    buf_idx = (buf_idx + 1) % headers_.size();
+                }
+            }
+
+            if (avrt) {
+                if (h_task) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+                    typedef BOOL (WINAPI *AvRevertMmThreadCharacteristics_t)(HANDLE);
+                    auto pAvRev = reinterpret_cast<AvRevertMmThreadCharacteristics_t>(GetProcAddress(avrt, "AvRevertMmThreadCharacteristics"));
+                    if (pAvRev) pAvRev(h_task);
+#pragma GCC diagnostic pop
+                }
+                FreeLibrary(avrt);
             }
         });
 
@@ -190,19 +261,23 @@ public:
     void stop() override {
         if (running_) {
             running_ = false;
+            if (h_event_) {
+                SetEvent(h_event_);
+            }
             if (thread_.joinable()) {
                 thread_.join();
             }
             if (h_wave_out_) {
                 waveOutReset(h_wave_out_);
             }
+            timeEndPeriod(1);
         }
     }
 
     [[nodiscard]] bool is_running() const noexcept override { return running_; }
     [[nodiscard]] double sample_rate() const noexcept override { return sample_rate_; }
     [[nodiscard]] size_t buffer_size() const noexcept override { return buffer_size_; }
-    [[nodiscard]] std::string device_name() const override { return "Windows Multimedia Audio (waveOut)"; }
+    [[nodiscard]] std::string device_name() const override { return "Windows Multimedia Audio (waveOut Event-Driven)"; }
 
 private:
     double sample_rate_{44100.0};
@@ -213,12 +288,13 @@ private:
     bool opened_{false};
     std::thread thread_;
     HWAVEOUT h_wave_out_{NULL};
+    HANDLE h_event_{NULL};
     std::vector<WAVEHDR> headers_;
     std::vector<uint8_t> pcm_data_;
 };
 #endif
 
-// Fallback chain: WaveOut (Windows) / ASIO -> WASAPI -> DirectSound -> Null (DAW-FR-102, ERR-AUD-001)
+// Fallback chain: WASAPI (Low-Latency) -> WaveOut (DirectSound/Multimedia) -> Null (DAW-FR-102, ERR-AUD-001)
 class AudioDeviceChain : public app::IAudioDevice {
 public:
     explicit AudioDeviceChain(bool force_dummy = false, bool simulate_asio_failure = false)
@@ -231,6 +307,16 @@ public:
 
         if (!force_dummy_) {
 #ifdef _WIN32
+            // 1. Primary: Windows Audio Session API (WASAPI Low-Latency 32-bit Float)
+            auto wasapi_dev = std::make_unique<WasapiAudioDevice>();
+            if (wasapi_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
+                current_device_ = std::move(wasapi_dev);
+                active_driver_ = AudioDriverType::WASAPI;
+                active_driver_name_ = "Windows Audio Session API (WASAPI Low-Latency)";
+                return domain::Result<void>::ok();
+            }
+
+            // 2. High-Performance Event-Driven WaveOut Fallback
             auto win_dev = std::make_unique<WaveOutAudioDevice>();
             if (win_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
                 current_device_ = std::move(win_dev);

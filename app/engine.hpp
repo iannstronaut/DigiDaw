@@ -7,6 +7,7 @@
 #include "../adapters/project/odp_repository.hpp"
 #include "../adapters/config/config_store.hpp"
 #include "../adapters/config/user_tree.hpp"
+#include "../domain/dsp/denormal.hpp"
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -120,7 +121,18 @@ public:
         if (transport_ && session_) {
             transport_->set_project(&session_->project());
         }
-        session_->project().mixer_graph().prepare(44100.0, 512);
+        auto& mixer = session_->project().mixer_graph();
+        mixer.prepare(44100.0, 512);
+
+        // Preallocate scratch buffers for zero real-time audio thread allocations
+        master_scratch_buf_ = domain::OwningAudioBuffer(2048);
+        channel_scratch_buf_ = domain::OwningAudioBuffer(2048);
+        mono_scratch_buf_.assign(2048, 0.0f);
+        track_inputs_scratch_.clear();
+        for (const auto& [track_id, _] : mixer.tracks()) {
+            track_inputs_scratch_[track_id] = domain::OwningAudioBuffer(2048);
+        }
+        ch_midi_scratch_.reserve(128);
 
         auto res = audio_device_->open(44100.0, 512, [this](domain::AudioBufferView& out) {
             process_realtime_audio(out);
@@ -137,6 +149,7 @@ public:
     }
 
     void process_realtime_audio(domain::AudioBufferView& out) {
+        domain::dsp::enable_ftz_daz();
         out.clear();
         const size_t frames = out.frames;
         if (frames == 0) return;
@@ -154,31 +167,45 @@ public:
             auto& proj = session_->project();
             auto& mixer = proj.mixer_graph();
 
-            // Scratch buffers per track
-            domain::OwningAudioBuffer master_buf(frames);
-            auto master_view = master_buf.view();
+            // Zero-allocation scratch buffers
+            if (master_scratch_buf_.frames() < frames) {
+                master_scratch_buf_ = domain::OwningAudioBuffer(std::max(frames, size_t(2048)));
+            }
+            master_scratch_buf_.resize_frames(frames);
+            auto master_view = master_scratch_buf_.view();
             master_view.clear();
 
-            std::unordered_map<domain::MixerTrackId, domain::OwningAudioBuffer> track_inputs;
             for (const auto& [track_id, _] : mixer.tracks()) {
-                track_inputs[track_id] = domain::OwningAudioBuffer(frames);
+                auto it = track_inputs_scratch_.find(track_id);
+                if (it == track_inputs_scratch_.end() || it->second.frames() < frames) {
+                    track_inputs_scratch_[track_id] = domain::OwningAudioBuffer(std::max(frames, size_t(2048)));
+                }
+                auto& t_buf = track_inputs_scratch_[track_id];
+                t_buf.resize_frames(frames);
+                t_buf.view().clear();
             }
 
             // 1. Advance transport if playing
-            std::vector<Transport::ScheduledChannelEvents> scheduled_events;
+            scheduled_events_scratch_.clear();
             if (transport_->is_playing()) {
-                scheduled_events = transport_->advance_block(frames, 44100.0);
+                scheduled_events_scratch_ = transport_->advance_block(frames, 44100.0);
             }
 
             // 2. Fetch audition events
-            std::vector<std::pair<domain::ChannelId, domain::MidiEvent>> cur_auditions;
+            cur_auditions_scratch_.clear();
             {
                 std::lock_guard<std::mutex> alock(audition_mutex_);
-                cur_auditions = std::move(audition_queue_);
-                audition_queue_.clear();
+                if (!audition_queue_.empty()) {
+                    cur_auditions_scratch_ = std::move(audition_queue_);
+                    audition_queue_.clear();
+                }
             }
 
             // 3. Process each channel
+            if (channel_scratch_buf_.frames() < frames) {
+                channel_scratch_buf_ = domain::OwningAudioBuffer(std::max(frames, size_t(2048)));
+            }
+
             for (const auto& ch : proj.channels()) {
                 if (ch.settings().muted) continue;
 
@@ -186,17 +213,17 @@ public:
                 if (!dev) continue;
 
                 // Collect MIDI events for this channel in this block
-                std::vector<domain::MidiEvent> ch_midi;
-                for (const auto& sch : scheduled_events) {
+                ch_midi_scratch_.clear();
+                for (const auto& sch : scheduled_events_scratch_) {
                     if (sch.channel_id == ch.id()) {
-                        ch_midi.insert(ch_midi.end(), sch.events.begin(), sch.events.end());
+                        ch_midi_scratch_.insert(ch_midi_scratch_.end(), sch.events.begin(), sch.events.end());
                     }
                 }
 
                 // Add live audition NoteOn
-                for (const auto& [aid, ev] : cur_auditions) {
+                for (const auto& [aid, ev] : cur_auditions_scratch_) {
                     if (aid == ch.id()) {
-                        ch_midi.push_back(ev);
+                        ch_midi_scratch_.push_back(ev);
                     }
                 }
 
@@ -205,19 +232,19 @@ public:
                 if (it_rem != audition_frames_remaining_.end() && it_rem->second > 0) {
                     if (it_rem->second <= frames) {
                         it_rem->second = 0;
-                        ch_midi.push_back(domain::MidiEvent::make_note_off(0, 0, audition_pitch_[ch.id()]));
+                        ch_midi_scratch_.push_back(domain::MidiEvent::make_note_off(0, 0, audition_pitch_[ch.id()]));
                     } else {
                         it_rem->second -= frames;
                     }
                 }
 
-                // Synthesize
-                domain::OwningAudioBuffer ch_buf(frames);
-                auto ch_view = ch_buf.view();
+                // Synthesize using preallocated scratch buffer
+                channel_scratch_buf_.resize_frames(frames);
+                auto ch_view = channel_scratch_buf_.view();
                 ch_view.clear();
 
                 try {
-                    dev->process(ch_view, ch_midi);
+                    dev->process(ch_view, ch_midi_scratch_);
                 } catch (...) {
                     // Prevent single plugin crash from crashing host
                 }
@@ -226,13 +253,13 @@ public:
 
                 // Accumulate into targeted mixer track input (with fallback to Master)
                 const domain::MixerTrackId target_track = ch.settings().mixer_track;
-                auto trk_it = track_inputs.find(target_track);
-                if (trk_it != track_inputs.end()) {
+                auto trk_it = track_inputs_scratch_.find(target_track);
+                if (trk_it != track_inputs_scratch_.end()) {
                     auto trk_view = trk_it->second.view();
                     trk_view.add_from(ch_view);
                 } else {
-                    auto master_it = track_inputs.find(domain::MasterTrackId);
-                    if (master_it != track_inputs.end()) {
+                    auto master_it = track_inputs_scratch_.find(domain::MasterTrackId);
+                    if (master_it != track_inputs_scratch_.end()) {
                         auto m_view = master_it->second.view();
                         m_view.add_from(ch_view);
                     }
@@ -240,11 +267,11 @@ public:
             }
 
             // 4. Run Mixer Graph
-            std::unordered_map<domain::MixerTrackId, domain::AudioBufferView> trk_views;
-            for (auto& [id, buf] : track_inputs) {
-                trk_views[id] = buf.view();
+            trk_views_scratch_.clear();
+            for (auto& [id, buf] : track_inputs_scratch_) {
+                trk_views_scratch_[id] = buf.view();
             }
-            mixer.process(trk_views, master_view);
+            mixer.process(trk_views_scratch_, master_view);
 
             // 5. Measure real-time stereo peaks for Master and all mixer tracks
             float master_pl = 0.0f, master_pr = 0.0f;
@@ -291,29 +318,37 @@ public:
             }
 
             if (master_view.left && master_view.right && frames > 0) {
-                // Record master waveform ring buffer
+                // Record master waveform ring buffer with power-of-two mask
                 size_t w_head = master_waveform_head_.load(std::memory_order_relaxed);
+                if (mono_scratch_buf_.size() < frames) mono_scratch_buf_.resize(frames);
                 for (size_t f = 0; f < frames; ++f) {
                     float mono = 0.5f * (master_view.left[f] + master_view.right[f]);
+                    mono_scratch_buf_[f] = mono;
                     master_waveform_[w_head] = mono;
-                    w_head = (w_head + 1) % WaveformHistorySize;
+                    w_head = (w_head + 1) & (WaveformHistorySize - 1);
                 }
                 master_waveform_head_.store(w_head, std::memory_order_relaxed);
 
-                // Run 16-band Goertzel filters
-                for (size_t k = 0; k < 16; ++k) {
-                    float coeff = kGoertzelCoeffs[k];
-                    float s1 = 0.0f, s2 = 0.0f;
-                    for (size_t f = 0; f < frames; ++f) {
-                        float mono = 0.5f * (master_view.left[f] + master_view.right[f]);
-                        float s0 = mono + coeff * s1 - s2;
-                        s2 = s1;
-                        s1 = s0;
+                if (master_pl < 0.0001f && master_pr < 0.0001f) {
+                    for (size_t k = 0; k < 16; ++k) {
+                        spectrum_bands_[k].store(0.0f, std::memory_order_relaxed);
                     }
-                    float p = s1 * s1 + s2 * s2 - coeff * s1 * s2;
-                    float mag = (p > 0.0f) ? (std::sqrt(p) / static_cast<float>(frames)) : 0.0f;
-                    float weight = 2.4f + 0.38f * static_cast<float>(k);
-                    spectrum_bands_[k].store(std::min(1.5f, mag * weight), std::memory_order_relaxed);
+                } else {
+                    // Run 16-band Goertzel filters on precomputed mono signal
+                    const float inv_frames = 1.0f / static_cast<float>(frames);
+                    for (size_t k = 0; k < 16; ++k) {
+                        float coeff = kGoertzelCoeffs[k];
+                        float s1 = 0.0f, s2 = 0.0f;
+                        for (size_t f = 0; f < frames; ++f) {
+                            float s0 = mono_scratch_buf_[f] + coeff * s1 - s2;
+                            s2 = s1;
+                            s1 = s0;
+                        }
+                        float p = s1 * s1 + s2 * s2 - coeff * s1 * s2;
+                        float mag = (p > 0.0f) ? (std::sqrt(p) * inv_frames) : 0.0f;
+                        float weight = 2.4f + 0.38f * static_cast<float>(k);
+                        spectrum_bands_[k].store(std::min(1.5f, mag * weight), std::memory_order_relaxed);
+                    }
                 }
             } else {
                 for (size_t k = 0; k < 16; ++k) {
@@ -385,7 +420,7 @@ public:
     void get_waveform(std::array<float, 256>& out) const noexcept {
         size_t head = master_waveform_head_.load(std::memory_order_relaxed);
         for (size_t i = 0; i < 256; ++i) {
-            out[i] = master_waveform_[(head + i) % WaveformHistorySize];
+            out[i] = master_waveform_[(head + i) & (WaveformHistorySize - 1)];
         }
     }
 
@@ -421,6 +456,16 @@ private:
     std::vector<float> preview_r_;
     size_t preview_pos_{0};
     bool preview_active_{false};
+
+    // Preallocated real-time audio thread scratch buffers
+    domain::OwningAudioBuffer master_scratch_buf_{2048};
+    domain::OwningAudioBuffer channel_scratch_buf_{2048};
+    std::vector<float> mono_scratch_buf_{2048};
+    std::unordered_map<domain::MixerTrackId, domain::OwningAudioBuffer> track_inputs_scratch_;
+    std::unordered_map<domain::MixerTrackId, domain::AudioBufferView> trk_views_scratch_;
+    std::vector<domain::MidiEvent> ch_midi_scratch_;
+    std::vector<Transport::ScheduledChannelEvents> scheduled_events_scratch_;
+    std::vector<std::pair<domain::ChannelId, domain::MidiEvent>> cur_auditions_scratch_;
 };
 
 } // namespace digidaw::app

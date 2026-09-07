@@ -100,10 +100,12 @@ public:
         float out_peak_l = 0.0f, out_peak_r = 0.0f;
 
         size_t wp = vis_write_pos_.load(std::memory_order_relaxed);
+        float* left_ptr = buffer.left;
+        float* right_ptr = buffer.right;
 
         for (size_t f = 0; f < buffer.frames; ++f) {
-            double l = buffer.left ? buffer.left[f] : 0.0;
-            double r = buffer.right ? buffer.right[f] : 0.0;
+            double l = left_ptr ? left_ptr[f] : 0.0;
+            double r = right_ptr ? right_ptr[f] : 0.0;
 
             float in_peak = static_cast<float>(std::max(std::abs(l), std::abs(r)));
             in_peak_l = std::max(in_peak_l, static_cast<float>(std::abs(l)));
@@ -120,9 +122,9 @@ public:
             float out_mono = static_cast<float>((l + r) * 0.5);
             vis_buf_in_[wp] = in_mono;
             vis_buf_out_[wp] = out_mono;
-            wp = (wp + 1) % kVisBufSize;
+            wp = (wp + 1) & (kVisBufSize - 1);
 
-            float cur_gr = engine_.gr.empty() ? 0.0f : engine_.gr[0];
+            float cur_gr = engine_.gr[0];
             hist_cur_in_ = std::max(hist_cur_in_, in_peak);
             hist_cur_out_ = std::max(hist_cur_out_, out_peak);
             hist_cur_gr_ = std::max(hist_cur_gr_, cur_gr);
@@ -132,14 +134,14 @@ public:
                 hist_in_[hp] = hist_cur_in_;
                 hist_out_[hp] = hist_cur_out_;
                 hist_gr_[hp] = hist_cur_gr_;
-                hist_write_pos_.store((hp + 1) % kHistPoints, std::memory_order_relaxed);
+                hist_write_pos_.store((hp + 1) & (kHistPoints - 1), std::memory_order_relaxed);
                 hist_cur_in_ = 0.0f;
                 hist_cur_out_ = 0.0f;
                 hist_cur_gr_ = 0.0f;
             }
 
-            if (buffer.left) buffer.left[f] = static_cast<float>(l);
-            if (buffer.right) buffer.right[f] = static_cast<float>(r);
+            if (left_ptr) left_ptr[f] = static_cast<float>(l);
+            if (right_ptr) right_ptr[f] = static_cast<float>(r);
         }
 
         vis_write_pos_.store(wp, std::memory_order_relaxed);
@@ -591,12 +593,38 @@ public:
         const double att_rate = 1.0 / std::max(0.001, 0.001 * attack_ms_ * sample_rate_);
         const double dec_rate = (1.0 - sustain_level_) / std::max(0.001, 0.001 * decay_ms_ * sample_rate_);
         const double rel_rate = 1.0 / std::max(0.001, 0.001 * release_ms_ * sample_rate_);
+        const double drive_gain = xaudio::dbGain(drive_db_);
+        float* out_l = buffer.left;
+        float* out_r = buffer.right;
+
+        struct ActiveVoiceInfo {
+            Voice* v;
+            double step1;
+            double step2;
+            double sub_step;
+        };
+        std::array<ActiveVoiceInfo, 16> active_info{};
+        size_t num_active = 0;
+        for (auto& v : voices_) {
+            if (!v.active) continue;
+            double p1 = static_cast<double>(static_cast<int>(v.note) + (osc1_octave_ * 12) - 69);
+            double p2 = static_cast<double>(static_cast<int>(v.note) + (osc2_octave_ * 12) + osc2_detune_semi_ - 69);
+            double base_freq = 440.0 * std::pow(2.0, p1 / 12.0);
+            double detune_freq = 440.0 * std::pow(2.0, p2 / 12.0);
+            active_info[num_active++] = {&v, base_freq * dt, detune_freq * dt, (base_freq * 0.5) * dt};
+        }
+
+        if (num_active == 0) {
+            buffer.clear();
+            return;
+        }
 
         for (size_t f = 0; f < buffer.frames; ++f) {
             double sample_l = 0.0;
             double sample_r = 0.0;
 
-            for (auto& v : voices_) {
+            for (size_t vi = 0; vi < num_active; ++vi) {
+                auto& v = *active_info[vi].v;
                 if (!v.active) continue;
 
                 // ADSR envelope step
@@ -633,24 +661,18 @@ public:
 
                 if (!v.active) continue;
 
-                // Frequencies with octave transposition and detune
-                double p1 = static_cast<double>(static_cast<int>(v.note) + (osc1_octave_ * 12) - 69);
-                double p2 = static_cast<double>(static_cast<int>(v.note) + (osc2_octave_ * 12) + osc2_detune_semi_ - 69);
-                double base_freq = 440.0 * std::pow(2.0, p1 / 12.0);
-                double detune_freq = 440.0 * std::pow(2.0, p2 / 12.0);
-
                 // Oscillators
                 double o1 = generate_wave(osc1_shape_, v.phase1) * osc1_vol_;
                 double o2 = generate_wave(osc2_shape_, v.phase2) * osc2_vol_;
                 double sub = (v.sub_phase < 0.5 ? 1.0 : -1.0) * sub_vol_;
 
-                v.phase1 += base_freq * dt;
+                v.phase1 += active_info[vi].step1;
                 if (v.phase1 >= 1.0) v.phase1 -= 1.0;
 
-                v.phase2 += detune_freq * dt;
+                v.phase2 += active_info[vi].step2;
                 if (v.phase2 >= 1.0) v.phase2 -= 1.0;
 
-                v.sub_phase += (base_freq * 0.5) * dt;
+                v.sub_phase += active_info[vi].sub_step;
                 if (v.sub_phase >= 1.0) v.sub_phase -= 1.0;
 
                 double raw_sig = (o1 + o2 + sub) * v.velocity * v.env_level;
@@ -664,11 +686,11 @@ public:
             }
 
             // Nonlinear Saturation stage using XAudio tanh waveshaper
-            sample_l = xaudio::saturate(sample_l, drive_db_, 0.0) * master_vol_;
-            sample_r = xaudio::saturate(sample_r, drive_db_, 0.0) * master_vol_;
+            sample_l = std::tanh(sample_l * drive_gain) * master_vol_;
+            sample_r = std::tanh(sample_r * drive_gain) * master_vol_;
 
-            if (buffer.left) buffer.left[f] += static_cast<float>(sample_l);
-            if (buffer.right) buffer.right[f] += static_cast<float>(sample_r);
+            if (out_l) out_l[f] += static_cast<float>(sample_l);
+            if (out_r) out_r[f] += static_cast<float>(sample_r);
         }
     }
 

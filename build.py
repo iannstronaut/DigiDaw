@@ -34,7 +34,9 @@ def main():
 
     common_flags = [
         "-std=c++20",
-        "-O2",
+        "-O3",
+        "-msse4.2",
+        "-mfpmath=sse",
         "-Wall",
         "-Wextra",
         "-static",
@@ -72,7 +74,7 @@ def main():
     test_exe = os.path.join(bin_dir, "run_tests.exe")
 
     print("[Build] Compiling Test Suite (run_tests.exe)...")
-    cmd_tests = [gpp] + common_flags + test_sources + ["-o", test_exe, "-lshell32", "-lwinmm"]
+    cmd_tests = [gpp] + common_flags + test_sources + ["-o", test_exe, "-lshell32", "-lwinmm", "-lole32", "-lavrt"]
     t0 = time.time()
     res = subprocess.run(cmd_tests, cwd=root_dir)
     if res.returncode != 0:
@@ -152,7 +154,7 @@ def main():
     cmd_app = [gpp, f"-specs={spec_path}"] + common_flags + shell_sources + [
         "-o", app_exe,
         "-lgdi32", "-luser32", "-lkernel32", "-lcomctl32", "-lcomdlg32", "-lshell32", "-lwinmm",
-        "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32",
+        "-ld2d1", "-ldwrite", "-ld3d11", "-ld3dcompiler", "-ldxgi", "-lole32", "-lavrt",
         "-ldwmapi"
     ]
     t0 = time.time()

@@ -33,22 +33,26 @@ public:
 
     void process(domain::AudioBufferView& audio, std::span<const domain::MidiEvent> /*midi*/) override {
         const size_t frames = audio.frames;
-        if (!audio.left || !audio.right || frames == 0) return;
+        float* left_ptr = audio.left;
+        float* right_ptr = audio.right;
+        if (!left_ptr || !right_ptr || frames == 0) return;
 
         const float makeup_linear = std::pow(10.0f, makeup_db_ / 20.0f);
+        const float slope = 1.0f - 1.0f / ratio_;
+        const float thresh_lin = std::pow(10.0f, threshold_db_ / 20.0f);
 
         for (size_t i = 0; i < frames; ++i) {
-            float in_l = audio.left[i];
-            float in_r = audio.right[i];
+            float in_l = left_ptr[i];
+            float in_r = right_ptr[i];
 
             // Peak detector
             float in_peak = std::max(std::abs(in_l), std::abs(in_r));
-            float in_db = (in_peak > 1e-6f) ? (20.0f * std::log10(in_peak)) : -120.0f;
 
-            // Compute static gain reduction curve
+            // Fast path: skip expensive log10 when peak is below threshold
             float target_reduction_db = 0.0f;
-            if (in_db > threshold_db_) {
-                target_reduction_db = (1.0f - 1.0f / ratio_) * (in_db - threshold_db_);
+            if (in_peak > thresh_lin) {
+                float in_db = 20.0f * std::log10(in_peak);
+                target_reduction_db = slope * (in_db - threshold_db_);
             }
 
             // Ballistic filter (Attack / Release)
@@ -57,11 +61,13 @@ public:
             } else {
                 envelope_ += release_coeff_ * (target_reduction_db - envelope_);
             }
+            if (envelope_ < 1e-6f) envelope_ = 0.0f;
 
-            float gain = std::pow(10.0f, -envelope_ / 20.0f) * makeup_linear;
+            // Fast path: skip pow when envelope is 0
+            float gain = (envelope_ == 0.0f) ? makeup_linear : (std::pow(10.0f, -envelope_ * 0.05f) * makeup_linear);
 
-            audio.left[i] = in_l * gain;
-            audio.right[i] = in_r * gain;
+            left_ptr[i] = in_l * gain;
+            right_ptr[i] = in_r * gain;
         }
     }
 
