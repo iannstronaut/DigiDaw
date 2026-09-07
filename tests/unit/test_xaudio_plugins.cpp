@@ -656,3 +656,48 @@ TEST_CASE(UnitXAudio, XAudioSignalVisualizationBuffers) {
     ASSERT_EQ(eq.vis_write_pos(), 0);
 }
 
+TEST_CASE(UnitXAudio, XAudioDynamicsRollingAnalysisHistory) {
+    XCompressorDevice comp;
+    comp.prepare(48000.0, 512);
+
+    ASSERT_EQ(comp.hist_size(), 512);
+    ASSERT_TRUE(comp.hist_in_data() != nullptr);
+    ASSERT_TRUE(comp.hist_out_data() != nullptr);
+    ASSERT_TRUE(comp.hist_gr_data() != nullptr);
+    ASSERT_EQ(comp.hist_write_pos(), 0);
+
+    // Process audio buffer with 512 samples (2 steps of 256 samples)
+    OwningAudioBuffer buf(512);
+    for (size_t i = 0; i < 512; ++i) {
+        float sig = 0.8f * std::sin(static_cast<float>(i) * 0.1f);
+        buf.view().left[i] = sig;
+        buf.view().right[i] = sig;
+    }
+
+    std::span<const MidiEvent> empty_midi{};
+    auto view = buf.view();
+    comp.process(view, empty_midi);
+
+    // 512 samples / 256 samples-per-slice = exactly 2 history points pushed
+    ASSERT_EQ(comp.hist_write_pos(), 2);
+    ASSERT_TRUE(comp.hist_in_data()[0] > 0.1f);
+    ASSERT_TRUE(comp.hist_out_data()[0] > 0.1f);
+
+    // Reset should clear history pos
+    comp.reset();
+    ASSERT_EQ(comp.hist_write_pos(), 0);
+
+    // Verify XLimiterDevice also has identical history capabilities
+    XLimiterDevice lim;
+    lim.prepare(48000.0, 512);
+    ASSERT_EQ(lim.hist_size(), 512);
+    ASSERT_EQ(lim.hist_write_pos(), 0);
+
+    auto view_lim = buf.view();
+    lim.process(view_lim, empty_midi);
+    ASSERT_EQ(lim.hist_write_pos(), 2);
+    ASSERT_TRUE(lim.hist_in_data()[0] > 0.1f);
+    lim.reset();
+    ASSERT_EQ(lim.hist_write_pos(), 0);
+}
+

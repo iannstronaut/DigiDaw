@@ -84,6 +84,14 @@ public:
         vis_buf_in_.fill(0.0f);
         vis_buf_out_.fill(0.0f);
         vis_write_pos_.store(0, std::memory_order_relaxed);
+        hist_in_.fill(0.0f);
+        hist_out_.fill(0.0f);
+        hist_gr_.fill(0.0f);
+        hist_write_pos_.store(0, std::memory_order_relaxed);
+        hist_step_counter_ = 0;
+        hist_cur_in_ = 0.0f;
+        hist_cur_out_ = 0.0f;
+        hist_cur_gr_ = 0.0f;
     }
 
     void process(domain::AudioBufferView& buffer, std::span<const domain::MidiEvent> /*midi*/) override {
@@ -97,6 +105,7 @@ public:
             double l = buffer.left ? buffer.left[f] : 0.0;
             double r = buffer.right ? buffer.right[f] : 0.0;
 
+            float in_peak = static_cast<float>(std::max(std::abs(l), std::abs(r)));
             in_peak_l = std::max(in_peak_l, static_cast<float>(std::abs(l)));
             in_peak_r = std::max(in_peak_r, static_cast<float>(std::abs(r)));
 
@@ -104,6 +113,7 @@ public:
 
             engine_.tick(l, r);
 
+            float out_peak = static_cast<float>(std::max(std::abs(l), std::abs(r)));
             out_peak_l = std::max(out_peak_l, static_cast<float>(std::abs(l)));
             out_peak_r = std::max(out_peak_r, static_cast<float>(std::abs(r)));
 
@@ -111,6 +121,22 @@ public:
             vis_buf_in_[wp] = in_mono;
             vis_buf_out_[wp] = out_mono;
             wp = (wp + 1) % kVisBufSize;
+
+            float cur_gr = engine_.gr.empty() ? 0.0f : engine_.gr[0];
+            hist_cur_in_ = std::max(hist_cur_in_, in_peak);
+            hist_cur_out_ = std::max(hist_cur_out_, out_peak);
+            hist_cur_gr_ = std::max(hist_cur_gr_, cur_gr);
+            if (++hist_step_counter_ >= 256) {
+                hist_step_counter_ = 0;
+                size_t hp = hist_write_pos_.load(std::memory_order_relaxed);
+                hist_in_[hp] = hist_cur_in_;
+                hist_out_[hp] = hist_cur_out_;
+                hist_gr_[hp] = hist_cur_gr_;
+                hist_write_pos_.store((hp + 1) % kHistPoints, std::memory_order_relaxed);
+                hist_cur_in_ = 0.0f;
+                hist_cur_out_ = 0.0f;
+                hist_cur_gr_ = 0.0f;
+            }
 
             if (buffer.left) buffer.left[f] = static_cast<float>(l);
             if (buffer.right) buffer.right[f] = static_cast<float>(r);
@@ -188,6 +214,14 @@ public:
     [[nodiscard]] const float* vis_out_data() const noexcept { return vis_buf_out_.data(); }
     [[nodiscard]] size_t vis_write_pos() const noexcept { return vis_write_pos_.load(std::memory_order_relaxed); }
     [[nodiscard]] static constexpr size_t vis_buf_size() noexcept { return kVisBufSize; }
+
+    // Rolling time-history visualizer buffers (Compressor & Limiter analysis display)
+    static constexpr size_t kHistPoints = 512;
+    [[nodiscard]] const float* hist_in_data() const noexcept { return hist_in_.data(); }
+    [[nodiscard]] const float* hist_out_data() const noexcept { return hist_out_.data(); }
+    [[nodiscard]] const float* hist_gr_data() const noexcept { return hist_gr_.data(); }
+    [[nodiscard]] size_t hist_write_pos() const noexcept { return hist_write_pos_.load(std::memory_order_relaxed); }
+    [[nodiscard]] static constexpr size_t hist_size() noexcept { return kHistPoints; }
 
     // Factory Presets (faithfully ported from XAudio)
     [[nodiscard]] int active_preset() const noexcept { return active_preset_; }
@@ -296,6 +330,14 @@ protected:
     std::array<float, kVisBufSize> vis_buf_in_{};
     std::array<float, kVisBufSize> vis_buf_out_{};
     std::atomic<size_t> vis_write_pos_{0};
+    std::array<float, kHistPoints> hist_in_{};
+    std::array<float, kHistPoints> hist_out_{};
+    std::array<float, kHistPoints> hist_gr_{};
+    std::atomic<size_t> hist_write_pos_{0};
+    size_t hist_step_counter_{0};
+    float hist_cur_in_{0.0f};
+    float hist_cur_out_{0.0f};
+    float hist_cur_gr_{0.0f};
 };
 
 // ============================================================================

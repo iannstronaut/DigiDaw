@@ -228,11 +228,11 @@ public:
     static const char* get_graph_title(int kind) {
         const char* t[] = {
             "SPECTRUM & FREQUENCY RESPONSE",
-            "WAVEFORM SIGNAL & COMPRESSION",
+            "COMPRESSION DYNAMICS & ANALYSIS DISPLAY",
             "4-BAND DYNAMICS HISTOGRAM",
             "3D ROOM SIZE SIMULATION",
             "SHAPING CURVE (BEFORE TONE / DC FILTER)",
-            "WAVEFORM SIGNAL & PEAK CEILING"
+            "PEAK LIMITER & ANALYSIS DISPLAY"
         };
         return (kind >= 0 && kind < 6) ? t[kind] : "AUDIO RESPONSE";
     }
@@ -1273,110 +1273,267 @@ public:
     // ------------------------------------------------------------------------
     // 1. Compressor Waveform Signal & Transfer Curve Visualizer
     // ------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // 1. Dynamic Rolling Analysis Display (Fruity Limiter / Analysis Display Style)
+    // ------------------------------------------------------------------------
+    static void render_analysis_history_display_d2d(
+        ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
+        plugins::XAudioEffectDevice* dev, double guide_db,
+        const char* guide_label, D2D1_COLOR_F accent,
+        IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
+        if (!rt || !dev) return;
+        (void)font_bold;
+        (void)accent;
+
+        float pw = p.right - p.left;
+        float ph = p.bottom - p.top;
+        if (pw < 10.0f || ph < 10.0f) return;
+
+        float gr = dev->gain_reduction_db(0);
+
+        // 1. Soft Mint / Sage Green Background (#D4ECD7)
+        ID2D1SolidColorBrush* br_bg = nullptr;
+        ID2D1SolidColorBrush* br_border = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0xd4 / 255.f, 0xec / 255.f, 0xd7 / 255.f), &br_bg);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x20 / 255.f, 0x2e / 255.f, 0x39 / 255.f, 0.40f), &br_border);
+
+        if (br_bg) {
+            D2D1_ROUNDED_RECT r_rc = D2D1::RoundedRect(p, 4.0f, 4.0f);
+            rt->FillRoundedRectangle(r_rc, br_bg);
+            if (br_border) rt->DrawRoundedRectangle(r_rc, br_border, 1.0f);
+            br_bg->Release();
+        }
+        if (br_border) br_border->Release();
+
+        // Clip all drawings within p
+        rt->PushAxisAlignedClip(p, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        // Subtle horizontal guide grids in soft sage
+        ID2D1SolidColorBrush* br_faint_grid = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0xbc / 255.f, 0xdf / 255.f, 0xc1 / 255.f, 0.45f), &br_faint_grid);
+
+        auto db_to_y = [&](float db) -> float {
+            if (db >= 0.0f) {
+                float t = std::clamp(db / 6.0f, 0.0f, 1.0f);
+                return (p.top + ph * 0.10f) - t * (ph * 0.09f);
+            } else {
+                float t = std::clamp((db - (-48.0f)) / 48.0f, 0.0f, 1.0f);
+                return p.bottom - t * (ph * 0.90f);
+            }
+        };
+
+        if (br_faint_grid) {
+            for (float ref_db : {-12.0f, -24.0f, -36.0f}) {
+                float y_ref = db_to_y(ref_db);
+                rt->DrawLine(D2D1::Point2F(p.left, y_ref), D2D1::Point2F(p.right, y_ref), br_faint_grid, 0.8f);
+            }
+            br_faint_grid->Release();
+        }
+
+        // Lime-Green Guideline Y Position (Threshold or Ceiling)
+        float y_guide = db_to_y(static_cast<float>(guide_db));
+        y_guide = std::clamp(y_guide, p.top + 6.0f, p.bottom - 6.0f);
+
+        // Brushes
+        ID2D1SolidColorBrush* br_body = nullptr;   // Dark Charcoal silhouette #232B2D
+        ID2D1SolidColorBrush* br_purple = nullptr; // Purple/Violet overshoot #A86BEF
+        ID2D1SolidColorBrush* br_white = nullptr;  // White peak crest outline #FFFFFF
+        ID2D1SolidColorBrush* br_green = nullptr;  // Vibrant Lime-Green guide line #64D82C
+
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f), &br_body);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0xa8 / 255.f, 0x6b / 255.f, 0xef / 255.f), &br_purple);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.95f), &br_white);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x64 / 255.f, 0xd8 / 255.f, 0x2c / 255.f), &br_green);
+
+        // Read rolling history from dev
+        const float* in_hist = dev->hist_in_data();
+        const float* out_hist = dev->hist_out_data();
+        const float* gr_hist = dev->hist_gr_data();
+        size_t wp = dev->hist_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kHistPoints;
+
+        size_t M = std::min(static_cast<size_t>(pw), N);
+        if (M < 2) M = 2;
+        float col_w = std::max(1.0f, pw / static_cast<float>(M));
+
+        if (br_body && br_purple) {
+            for (size_t i = 0; i < M; ++i) {
+                size_t idx = (wp + N - M + i) % N;
+                float s_in = in_hist[idx];
+                float s_out = out_hist[idx];
+                float pt_gr = gr_hist[idx];
+
+                float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+                float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+
+                float x = p.left + (static_cast<float>(i) / static_cast<float>(M - 1)) * pw;
+
+                // 1. Purple overshoot spike (Above the green line)
+                if (in_db > guide_db) {
+                    float y_top = db_to_y(in_db);
+                    y_top = std::min(y_top, y_guide - 1.0f);
+                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_top), br_purple, col_w);
+                    if (br_white) {
+                        rt->DrawLine(D2D1::Point2F(x - col_w * 0.5f, y_top), D2D1::Point2F(x + col_w * 0.5f, y_top), br_white, 1.5f);
+                    }
+                }
+
+                // 2. Dark charcoal silhouette hanging downwards (Gain reduction / limited body)
+                float drop_db = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
+                if (drop_db > 0.05f || (in_db > guide_db - 3.0f && s_in > 0.01f)) {
+                    float eff_gr = std::max(drop_db, std::max(0.0f, in_db - static_cast<float>(guide_db)));
+                    float depth_px = std::clamp(eff_gr * 4.2f + 4.0f, 2.0f, ph * 0.70f);
+                    float ripple = 1.0f + 0.12f * std::sin(static_cast<float>(i) * 1.5f);
+                    float y_bot = std::min(y_guide + depth_px * ripple, p.bottom - 2.0f);
+                    rt->DrawLine(D2D1::Point2F(x, y_guide), D2D1::Point2F(x, y_bot), br_body, col_w);
+                }
+            }
+        }
+
+        // 3. Lime-green guideline on top
+        if (br_green) {
+            rt->DrawLine(D2D1::Point2F(p.left, y_guide), D2D1::Point2F(p.right, y_guide), br_green, 1.5f);
+        }
+
+        rt->PopAxisAlignedClip();
+
+        // 4. Badges & Readouts
+        if (font_small) {
+            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
+            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   |   " + gr_str;
+            D2D1_RECT_F st_rc = D2D1::RectF(p.left + 10.0f, p.top + 6.0f, p.left + 260.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, st_str, st_rc,
+                                   (gr > 0.1f) ? D2D1::ColorF(0.85f, 0.20f, 0.15f, 0.95f) : D2D1::ColorF(0x23 / 255.f, 0x2b / 255.f, 0x2d / 255.f, 0.90f));
+
+            D2D1_RECT_F leg_rc = D2D1::RectF(p.right - 280.0f, p.top + 6.0f, p.right - 10.0f, p.top + 24.0f);
+            D2DRenderer::draw_text(rt, font_small, "■ INPUT (OVERSHOOT)   ■ GAIN REDUCTION", leg_rc,
+                                   D2D1::ColorF(0x35 / 255.f, 0x43 / 255.f, 0x45 / 255.f, 0.85f));
+        }
+
+        if (br_body) br_body->Release();
+        if (br_purple) br_purple->Release();
+        if (br_white) br_white->Release();
+        if (br_green) br_green->Release();
+    }
+
+    static void render_analysis_history_display_gdi(
+        HDC hdc, const RECT& p,
+        plugins::XAudioEffectDevice* dev, double guide_db,
+        const char* guide_label, COLORREF accent,
+        HFONT font_small = NULL) {
+        if (!hdc || !dev) return;
+        (void)accent;
+
+        int pw = p.right - p.left;
+        int ph = p.bottom - p.top;
+        if (pw < 10 || ph < 10) return;
+
+        float gr = dev->gain_reduction_db(0);
+
+        // 1. Sage Green Background
+        HBRUSH br_bg = CreateSolidBrush(RGB(212, 236, 215));
+        FillRect(hdc, &p, br_bg);
+        DeleteObject(br_bg);
+
+        // Set clipping
+        HRGN rgn = CreateRectRgn(p.left, p.top, p.right, p.bottom);
+        SelectClipRgn(hdc, rgn);
+
+        auto db_to_y = [&](float db) -> int {
+            if (db >= 0.0f) {
+                float t = std::clamp(db / 6.0f, 0.0f, 1.0f);
+                return static_cast<int>((p.top + ph * 0.10f) - t * (ph * 0.09f));
+            } else {
+                float t = std::clamp((db - (-48.0f)) / 48.0f, 0.0f, 1.0f);
+                return static_cast<int>(p.bottom - t * (ph * 0.90f));
+            }
+        };
+
+        // Faint grid
+        HPEN pen_grid = CreatePen(PS_SOLID, 1, RGB(188, 223, 193));
+        HGDIOBJ old_pen = SelectObject(hdc, pen_grid);
+        for (float ref_db : {-12.0f, -24.0f, -36.0f}) {
+            int y_ref = db_to_y(ref_db);
+            MoveToEx(hdc, p.left, y_ref, NULL); LineTo(hdc, p.right, y_ref);
+        }
+        SelectObject(hdc, old_pen);
+        DeleteObject(pen_grid);
+
+        int y_guide = db_to_y(static_cast<float>(guide_db));
+        y_guide = std::clamp(y_guide, static_cast<int>(p.top + 6), static_cast<int>(p.bottom - 6));
+
+        const float* in_hist = dev->hist_in_data();
+        const float* out_hist = dev->hist_out_data();
+        const float* gr_hist = dev->hist_gr_data();
+        size_t wp = dev->hist_write_pos();
+        constexpr size_t N = plugins::XAudioEffectDevice::kHistPoints;
+
+        size_t M = std::min(static_cast<size_t>(pw), N);
+        if (M < 2) M = 2;
+
+        HPEN pen_body = CreatePen(PS_SOLID, 1, RGB(35, 43, 45));
+        HPEN pen_purple = CreatePen(PS_SOLID, 1, RGB(168, 107, 239));
+        HPEN pen_white = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+
+        for (size_t i = 0; i < M; ++i) {
+            size_t idx = (wp + N - M + i) % N;
+            float s_in = in_hist[idx];
+            float s_out = out_hist[idx];
+            float pt_gr = gr_hist[idx];
+
+            float in_db = (s_in > 1e-4f) ? 20.0f * std::log10(s_in) : -60.0f;
+            float out_db = (s_out > 1e-4f) ? 20.0f * std::log10(s_out) : -60.0f;
+
+            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(M - 1)) * pw);
+
+            if (in_db > guide_db) {
+                int y_top = db_to_y(in_db);
+                y_top = std::min(y_top, y_guide - 1);
+                SelectObject(hdc, pen_purple);
+                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_top);
+                SelectObject(hdc, pen_white);
+                MoveToEx(hdc, x - 1, y_top, NULL); LineTo(hdc, x + 2, y_top);
+            }
+
+            float drop_db = std::max(pt_gr, static_cast<float>(std::max(0.0f, in_db - out_db)));
+            if (drop_db > 0.05f || (in_db > guide_db - 3.0f && s_in > 0.01f)) {
+                float eff_gr = std::max(drop_db, std::max(0.0f, in_db - static_cast<float>(guide_db)));
+                float depth_px = std::clamp(eff_gr * 4.2f + 4.0f, 2.0f, ph * 0.70f);
+                float ripple = 1.0f + 0.12f * std::sin(static_cast<float>(i) * 1.5f);
+                int y_bot = std::min(static_cast<int>(y_guide + depth_px * ripple), static_cast<int>(p.bottom - 2));
+                SelectObject(hdc, pen_body);
+                MoveToEx(hdc, x, y_guide, NULL); LineTo(hdc, x, y_bot);
+            }
+        }
+
+        // Lime-Green line
+        HPEN pen_green = CreatePen(PS_SOLID, 2, RGB(100, 216, 44));
+        SelectObject(hdc, pen_green);
+        MoveToEx(hdc, p.left, y_guide, NULL); LineTo(hdc, p.right, y_guide);
+
+        SelectObject(hdc, old_pen);
+        DeleteObject(pen_body);
+        DeleteObject(pen_purple);
+        DeleteObject(pen_white);
+        DeleteObject(pen_green);
+
+        SelectClipRgn(hdc, NULL);
+        DeleteObject(rgn);
+
+        if (font_small) {
+            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
+            std::string st_str = std::string(guide_label) + ": " + format_1dec(guide_db) + " dB   |   " + gr_str;
+            RECT st_rc{p.left + 10, p.top + 6, p.left + 260, p.top + 24};
+            GuiRenderer::draw_text(hdc, st_str, st_rc, RGB(35, 43, 45), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
     static void render_comp_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
                                       plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent,
                                       IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
         if (!rt || !dev) return;
-        (void)font_bold;
         double thresh = dev->get_plain(4);
-        double ratio = dev->get_plain(5);
-        double knee = dev->get_plain(8);
-        double makeup = dev->get_plain(9);
-        float gr = dev->gain_reduction_db(0);
-
-        float pw = p.right - p.left;
-        float ph = p.bottom - p.top;
-        float mid_y = (p.top + p.bottom) * 0.5f;
-        float half_h = ph * 0.44f;
-
-        // Subtle Background Transfer Curve
-        ID2D1SolidColorBrush* br_curve = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.20f), &br_curve);
-        if (br_curve) {
-            float prev_x = p.left, prev_y = p.bottom;
-            bool first = true;
-            for (int i = 0; i <= 100; ++i) {
-                double t = static_cast<double>(i) / 100.0;
-                double db = -60.0 + 60.0 * t;
-                double red = xaudio::reduction(db, thresh, ratio, knee);
-                double v = 1.0 - std::clamp((db - red + makeup + 60.0) / 60.0, 0.0, 1.0);
-                float cx = p.left + pw * static_cast<float>(t);
-                float cy = p.top + ph * static_cast<float>(v);
-                if (!first) rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(cx, cy), br_curve, 1.2f);
-                prev_x = cx; prev_y = cy; first = false;
-            }
-            br_curve->Release();
-        }
-
-        // Threshold Horizontal Guidelines
-        float thresh_amp = static_cast<float>(xaudio::dbGain(thresh));
-        float y_th_top = mid_y - std::clamp(thresh_amp, 0.0f, 1.0f) * half_h;
-        float y_th_bot = mid_y + std::clamp(thresh_amp, 0.0f, 1.0f) * half_h;
-
-        ID2D1SolidColorBrush* br_thresh = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.85f, 0.88f, 0.92f, 0.28f), &br_thresh);
-        if (br_thresh) {
-            rt->DrawLine(D2D1::Point2F(p.left, y_th_top), D2D1::Point2F(p.right, y_th_top), br_thresh, 1.0f);
-            rt->DrawLine(D2D1::Point2F(p.left, y_th_bot), D2D1::Point2F(p.right, y_th_bot), br_thresh, 1.0f);
-            br_thresh->Release();
-        }
-
-        // Live Audio Waveform Signal (Input uncompressed + Output compressed)
-        const float* in_data = dev->vis_in_data();
-        const float* out_data = dev->vis_out_data();
-        size_t wp = dev->vis_write_pos();
-        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
-        constexpr size_t wave_pts = 256;
-
-        ID2D1SolidColorBrush* br_in = nullptr;
-        ID2D1SolidColorBrush* br_out = nullptr;
-        ID2D1SolidColorBrush* br_gr = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.42f, 0.50f, 0.58f, 0.35f), &br_in);
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f), &br_out);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.40f, 0.32f, 0.55f), &br_gr);
-
-        if (br_in && br_out) {
-            float prev_in_x = p.left, prev_in_y = mid_y;
-            float prev_out_x = p.left, prev_out_y = mid_y;
-            bool first = true;
-
-            for (size_t i = 0; i < wave_pts; ++i) {
-                size_t idx = (wp + N - wave_pts + i) % N;
-                float s_in = in_data[idx];
-                float s_out = out_data[idx];
-
-                float x = p.left + (static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw;
-                float y_in = mid_y - std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h;
-                float y_out = mid_y - std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h;
-
-                if (!first) {
-                    rt->DrawLine(D2D1::Point2F(prev_in_x, prev_in_y), D2D1::Point2F(x, y_in), br_in, 1.0f);
-                    rt->DrawLine(D2D1::Point2F(prev_out_x, prev_out_y), D2D1::Point2F(x, y_out), br_out, 2.0f);
-
-                    if (br_gr && std::abs(s_in) > std::abs(s_out) + 0.03f) {
-                        rt->DrawLine(D2D1::Point2F(x, y_in), D2D1::Point2F(x, y_out), br_gr, 1.5f);
-                    }
-                }
-                prev_in_x = x; prev_in_y = y_in;
-                prev_out_x = x; prev_out_y = y_out;
-                first = false;
-            }
-        }
-        if (br_in) br_in->Release();
-        if (br_out) br_out->Release();
-        if (br_gr) br_gr->Release();
-
-        // Badges & Readouts
-        if (font_small) {
-            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
-            D2D1_RECT_F gr_rc = D2D1::RectF(p.left + 12.0f, p.top + 6.0f, p.left + 230.0f, p.top + 24.0f);
-            D2DRenderer::draw_text(rt, font_small, "WAVEFORM SIGNAL   |   " + gr_str, gr_rc,
-                                   (gr > 0.1f) ? D2D1::ColorF(1.0f, 0.45f, 0.35f, 0.95f) : D2D1::ColorF(accent.r, accent.g, accent.b, 0.85f));
-
-            D2D1_RECT_F leg_rc = D2D1::RectF(p.right - 230.0f, p.top + 6.0f, p.right - 10.0f, p.top + 24.0f);
-            D2DRenderer::draw_text(rt, font_small, "▬ IN SIGNAL   ▬ OUT (COMPRESSED)", leg_rc,
-                                   D2D1::ColorF(0xab / 255.f, 0xb3 / 255.f, 0xc0 / 255.f));
-        }
+        render_analysis_history_display_d2d(rt, p, dev, thresh, "THRESH", accent, font_bold, font_small);
     }
 
     static void render_comp_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
@@ -1389,63 +1546,7 @@ public:
                                       HFONT font_small = NULL) {
         if (!hdc || !dev) return;
         double thresh = dev->get_plain(4);
-        float gr = dev->gain_reduction_db(0);
-
-        int pw = p.right - p.left;
-        int ph = p.bottom - p.top;
-        int mid_y = (p.top + p.bottom) / 2;
-        int half_h = static_cast<int>(ph * 0.44f);
-
-        float thresh_amp = static_cast<float>(xaudio::dbGain(thresh));
-        int y_th_top = mid_y - static_cast<int>(std::clamp(thresh_amp, 0.0f, 1.0f) * half_h);
-        int y_th_bot = mid_y + static_cast<int>(std::clamp(thresh_amp, 0.0f, 1.0f) * half_h);
-
-        HPEN pen_th = CreatePen(PS_DOT, 1, RGB(90, 105, 120));
-        HGDIOBJ old_pen = SelectObject(hdc, pen_th);
-        MoveToEx(hdc, p.left, y_th_top, NULL); LineTo(hdc, p.right, y_th_top);
-        MoveToEx(hdc, p.left, y_th_bot, NULL); LineTo(hdc, p.right, y_th_bot);
-        DeleteObject(pen_th);
-
-        const float* in_data = dev->vis_in_data();
-        const float* out_data = dev->vis_out_data();
-        size_t wp = dev->vis_write_pos();
-        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
-        constexpr size_t wave_pts = 200;
-
-        HPEN pen_in = CreatePen(PS_SOLID, 1, RGB(80, 95, 110));
-        HPEN pen_out = CreatePen(PS_SOLID, 2, accent);
-
-        SelectObject(hdc, pen_in);
-        for (size_t i = 0; i < wave_pts; ++i) {
-            size_t idx = (wp + N - wave_pts + i) % N;
-            float s_in = in_data[idx];
-            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
-            int y = mid_y - static_cast<int>(std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h);
-            if (i == 0) MoveToEx(hdc, x, y, NULL);
-            else LineTo(hdc, x, y);
-        }
-
-        SelectObject(hdc, pen_out);
-        for (size_t i = 0; i < wave_pts; ++i) {
-            size_t idx = (wp + N - wave_pts + i) % N;
-            float s_out = out_data[idx];
-            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
-            int y = mid_y - static_cast<int>(std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h);
-            if (i == 0) MoveToEx(hdc, x, y, NULL);
-            else LineTo(hdc, x, y);
-        }
-
-        SelectObject(hdc, old_pen);
-        DeleteObject(pen_in);
-        DeleteObject(pen_out);
-
-        if (font_small) {
-            SelectObject(hdc, font_small);
-            std::string gr_str = (gr > 0.1f) ? ("GR: -" + format_1dec(gr) + " dB") : "GR: 0.0 dB";
-            RECT gr_rc{p.left + 12, p.top + 6, p.left + 230, p.top + 24};
-            GuiRenderer::draw_text(hdc, "WAVEFORM SIGNAL   |   " + gr_str, gr_rc,
-                                   (gr > 0.1f) ? RGB(255, 115, 90) : accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
+        render_analysis_history_display_gdi(hdc, p, dev, thresh, "THRESH", accent, font_small);
     }
 
     // ------------------------------------------------------------------------
@@ -1949,87 +2050,14 @@ public:
     }
 
     // ------------------------------------------------------------------------
-    // 4. Limiter Waveform Signal & Peak Ceiling Visualizer
+    // 4. Limiter Waveform Signal & Peak Ceiling Visualizer (Analysis Display)
     // ------------------------------------------------------------------------
     static void render_limiter_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
                                         plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent,
                                         IDWriteTextFormat* font_bold, IDWriteTextFormat* font_small) {
         if (!rt || !dev) return;
-        (void)font_bold;
         double ceiling = dev->get_plain(5);
-        float gr = dev->gain_reduction_db(0);
-
-        float pw = p.right - p.left;
-        float ph = p.bottom - p.top;
-        float mid_y = (p.top + p.bottom) * 0.5f;
-        float half_h = ph * 0.44f;
-
-        float ceil_amp = static_cast<float>(xaudio::dbGain(ceiling));
-        float y_ceil_top = mid_y - std::clamp(ceil_amp, 0.0f, 1.0f) * half_h;
-        float y_ceil_bot = mid_y + std::clamp(ceil_amp, 0.0f, 1.0f) * half_h;
-
-        ID2D1SolidColorBrush* br_ceil = nullptr;
-        ID2D1SolidColorBrush* br_wave = nullptr;
-        ID2D1SolidColorBrush* br_clip = nullptr;
-        ID2D1SolidColorBrush* br_atten = nullptr;
-
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.35f, 0.30f, 0.85f), &br_ceil);
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f), &br_wave);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.22f, 0.22f, 0.95f), &br_clip);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.40f, 0.35f, 0.40f), &br_atten);
-
-        if (br_ceil) {
-            rt->DrawLine(D2D1::Point2F(p.left, y_ceil_top), D2D1::Point2F(p.right, y_ceil_top), br_ceil, 1.5f);
-            rt->DrawLine(D2D1::Point2F(p.left, y_ceil_bot), D2D1::Point2F(p.right, y_ceil_bot), br_ceil, 1.5f);
-        }
-
-        const float* in_data = dev->vis_in_data();
-        const float* out_data = dev->vis_out_data();
-        size_t wp = dev->vis_write_pos();
-        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
-        constexpr size_t wave_pts = 256;
-
-        if (br_wave && br_clip) {
-            float prev_x = p.left, prev_y = mid_y;
-            bool first = true;
-
-            for (size_t i = 0; i < wave_pts; ++i) {
-                size_t idx = (wp + N - wave_pts + i) % N;
-                float s_in = in_data[idx];
-                float s_out = out_data[idx];
-
-                float x = p.left + (static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw;
-                float y = mid_y - std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h;
-                float y_raw = mid_y - std::clamp(s_in * 1.5f, -1.2f, 1.2f) * half_h;
-
-                bool is_clamped = (std::abs(s_in * 1.5f) > ceil_amp || (gr > 0.1f && std::abs(s_in) > std::abs(s_out) + 0.01f));
-
-                if (!first) {
-                    rt->DrawLine(D2D1::Point2F(prev_x, prev_y), D2D1::Point2F(x, y), is_clamped ? br_clip : br_wave, is_clamped ? 2.5f : 1.8f);
-                    if (is_clamped && br_atten) {
-                        rt->DrawLine(D2D1::Point2F(x, y), D2D1::Point2F(x, y_raw), br_atten, 1.5f);
-                    }
-                }
-                prev_x = x; prev_y = y;
-                first = false;
-            }
-        }
-
-        if (font_small) {
-            std::string gr_text = (gr > 0.1f) ? ("LIMITING: -" + format_1dec(gr) + " dB") : "CLEAN (NO LIMITING)";
-            D2D1_RECT_F st_rc = D2D1::RectF(p.left + 12.0f, p.top + 6.0f, p.left + 260.0f, p.top + 24.0f);
-            D2DRenderer::draw_text(rt, font_small, "WAVEFORM SIGNAL   |   " + gr_text, st_rc,
-                                   (gr > 0.1f) ? D2D1::ColorF(1.0f, 0.40f, 0.32f) : D2D1::ColorF(accent.r, accent.g, accent.b, 0.90f));
-
-            std::string ceil_str = "CEIL: " + format_1dec(ceiling) + " dB";
-            D2D1_RECT_F ceil_rc = D2D1::RectF(p.right - 140.0f, y_ceil_top - 18.0f, p.right - 8.0f, y_ceil_top);
-            D2DRenderer::draw_text(rt, font_small, ceil_str, ceil_rc, D2D1::ColorF(1.0f, 0.45f, 0.40f, 0.90f));
-        }
-
-        if (br_ceil) br_ceil->Release();
-        if (br_wave) br_wave->Release();
-        if (br_clip) br_clip->Release();
-        if (br_atten) br_atten->Release();
+        render_analysis_history_display_d2d(rt, p, dev, ceiling, "CEIL", accent, font_bold, font_small);
     }
 
     static void render_limiter_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
@@ -2042,49 +2070,7 @@ public:
                                         HFONT font_small = NULL) {
         if (!hdc || !dev) return;
         double ceiling = dev->get_plain(5);
-        float gr = dev->gain_reduction_db(0);
-
-        int pw = p.right - p.left;
-        int ph = p.bottom - p.top;
-        int mid_y = (p.top + p.bottom) / 2;
-        int half_h = static_cast<int>(ph * 0.44f);
-
-        float ceil_amp = static_cast<float>(xaudio::dbGain(ceiling));
-        int y_ceil_top = mid_y - static_cast<int>(std::clamp(ceil_amp, 0.0f, 1.0f) * half_h);
-        int y_ceil_bot = mid_y + static_cast<int>(std::clamp(ceil_amp, 0.0f, 1.0f) * half_h);
-
-        HPEN pen_ceil = CreatePen(PS_SOLID, 1, RGB(255, 90, 75));
-        HGDIOBJ old_pen = SelectObject(hdc, pen_ceil);
-        MoveToEx(hdc, p.left, y_ceil_top, NULL); LineTo(hdc, p.right, y_ceil_top);
-        MoveToEx(hdc, p.left, y_ceil_bot, NULL); LineTo(hdc, p.right, y_ceil_bot);
-
-        const float* out_data = dev->vis_out_data();
-        size_t wp = dev->vis_write_pos();
-        constexpr size_t N = plugins::XAudioEffectDevice::kVisBufSize;
-        constexpr size_t wave_pts = 200;
-
-        HPEN pen_wave = CreatePen(PS_SOLID, 2, accent);
-        SelectObject(hdc, pen_wave);
-        for (size_t i = 0; i < wave_pts; ++i) {
-            size_t idx = (wp + N - wave_pts + i) % N;
-            float s_out = out_data[idx];
-            int x = p.left + static_cast<int>((static_cast<float>(i) / static_cast<float>(wave_pts - 1)) * pw);
-            int y = mid_y - static_cast<int>(std::clamp(s_out * 1.5f, -1.2f, 1.2f) * half_h);
-            if (i == 0) MoveToEx(hdc, x, y, NULL);
-            else LineTo(hdc, x, y);
-        }
-
-        SelectObject(hdc, old_pen);
-        DeleteObject(pen_ceil);
-        DeleteObject(pen_wave);
-
-        if (font_small) {
-            SelectObject(hdc, font_small);
-            std::string gr_text = (gr > 0.1f) ? ("LIMITING: -" + format_1dec(gr) + " dB") : "CLEAN";
-            RECT st_rc{p.left + 12, p.top + 6, p.left + 260, p.top + 24};
-            GuiRenderer::draw_text(hdc, "WAVEFORM SIGNAL   |   " + gr_text, st_rc,
-                                   (gr > 0.1f) ? RGB(255, 115, 90) : accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
+        render_analysis_history_display_gdi(hdc, p, dev, ceiling, "CEIL", accent, font_small);
     }
 
     // ========================================================================
@@ -2467,80 +2453,12 @@ public:
         DeleteObject(pen_out);
     }
 
-    // 2. Real-Time Signal Indicator for X-Compressor
-    static void render_comp_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
-                                       plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
-        if (!rt || !dev) return;
-        float m_in = dev->meter_in();
-        if (m_in < 0.001f) return;
+    // 2. Real-Time Signal Indicator for X-Compressor (Handled cleanly in analysis display)
+    static void render_comp_signal_d2d(ID2D1RenderTarget* /*rt*/, const D2D1_RECT_F& /*p*/,
+                                       plugins::XAudioEffectDevice* /*dev*/, D2D1_COLOR_F /*accent*/) {}
 
-        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 0.0);
-        double thresh = dev->get_plain(4);
-        double ratio = dev->get_plain(5);
-        double knee = dev->get_plain(8);
-        double makeup = dev->get_plain(9);
-
-        double red = xaudio::reduction(in_db, thresh, ratio, knee);
-        double out_db = std::clamp(in_db - red + makeup, -60.0, 0.0);
-
-        float pw = p.right - p.left;
-        float ph = p.bottom - p.top;
-        float x = p.left + static_cast<float>((in_db + 60.0) / 60.0) * pw;
-        float y = p.bottom - static_cast<float>((out_db + 60.0) / 60.0) * ph;
-
-        // Dynamic indicator ball with halo on transfer curve
-        ID2D1SolidColorBrush* br_halo = nullptr;
-        ID2D1SolidColorBrush* br_dot = nullptr;
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.25f), &br_halo);
-        rt->CreateSolidColorBrush(D2D1::ColorF(accent.r, accent.g, accent.b, 0.95f), &br_dot);
-
-        if (br_halo && br_dot) {
-            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 12.0f, 12.0f), br_halo);
-            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 5.5f, 5.5f), br_dot);
-
-            // If gain reduction is occurring, draw an active reduction drop line
-            if (red > 0.5) {
-                float uncomp_y = p.bottom - static_cast<float>((in_db + 60.0) / 60.0) * ph;
-                ID2D1SolidColorBrush* br_red = nullptr;
-                rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 0.45f, 0.35f, 0.70f), &br_red);
-                if (br_red) {
-                    rt->DrawLine(D2D1::Point2F(x, uncomp_y), D2D1::Point2F(x, y), br_red, 2.0f);
-                    br_red->Release();
-                }
-            }
-        }
-        if (br_halo) br_halo->Release();
-        if (br_dot) br_dot->Release();
-    }
-
-    static void render_comp_signal_gdi(HDC hdc, const RECT& p,
-                                       plugins::XAudioEffectDevice* dev, COLORREF accent) {
-        if (!hdc || !dev) return;
-        float m_in = dev->meter_in();
-        if (m_in < 0.001f) return;
-
-        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 0.0);
-        double thresh = dev->get_plain(4);
-        double ratio = dev->get_plain(5);
-        double knee = dev->get_plain(8);
-        double makeup = dev->get_plain(9);
-
-        double red = xaudio::reduction(in_db, thresh, ratio, knee);
-        double out_db = std::clamp(in_db - red + makeup, -60.0, 0.0);
-
-        int pw = p.right - p.left;
-        int ph = p.bottom - p.top;
-        int x = p.left + static_cast<int>((in_db + 60.0) / 60.0 * pw);
-        int y = p.bottom - static_cast<int>((out_db + 60.0) / 60.0 * ph);
-
-        HBRUSH br_dot = CreateSolidBrush(accent);
-        HGDIOBJ old_br = SelectObject(hdc, br_dot);
-        HGDIOBJ old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        Ellipse(hdc, x - 5, y - 5, x + 6, y + 6);
-        SelectObject(hdc, old_br);
-        SelectObject(hdc, old_pen);
-        DeleteObject(br_dot);
-    }
+    static void render_comp_signal_gdi(HDC /*hdc*/, const RECT& /*p*/,
+                                       plugins::XAudioEffectDevice* /*dev*/, COLORREF /*accent*/) {}
 
     // 3. Real-Time Signal Indicator for X-Distortion
     static void render_distortion_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
@@ -2601,62 +2519,12 @@ public:
         DeleteObject(br);
     }
 
-    // 4. Real-Time Signal Indicator for X-Limiter
-    static void render_limiter_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
-                                         plugins::XAudioEffectDevice* dev, D2D1_COLOR_F accent) {
-        if (!rt || !dev) return;
-        float m_in = dev->meter_in();
-        if (m_in < 0.001f) return;
+    // 4. Real-Time Signal Indicator for X-Limiter (Handled cleanly in analysis display)
+    static void render_limiter_signal_d2d(ID2D1RenderTarget* /*rt*/, const D2D1_RECT_F& /*p*/,
+                                         plugins::XAudioEffectDevice* /*dev*/, D2D1_COLOR_F /*accent*/) {}
 
-        double ceiling = dev->get_plain(5);
-        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 6.0);
-        float pw = p.right - p.left;
-        float ph = p.bottom - p.top;
-
-        float x = p.left + static_cast<float>(std::clamp((in_db + 60.0) / 66.0, 0.0, 1.0)) * pw;
-        float y = p.bottom - static_cast<float>(std::clamp((std::min(in_db, ceiling) + 60.0) / 60.0, 0.0, 1.0)) * ph;
-
-        bool is_limiting = (in_db >= ceiling - 0.2);
-        D2D1_COLOR_F dot_col = is_limiting ? D2D1::ColorF(1.0f, 0.35f, 0.30f, 0.95f) : accent;
-
-        ID2D1SolidColorBrush* br_dot = nullptr;
-        ID2D1SolidColorBrush* br_halo = nullptr;
-        rt->CreateSolidColorBrush(dot_col, &br_dot);
-        rt->CreateSolidColorBrush(D2D1::ColorF(dot_col.r, dot_col.g, dot_col.b, is_limiting ? 0.35f : 0.18f), &br_halo);
-
-        if (br_dot && br_halo) {
-            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), is_limiting ? 14.0f : 8.0f, is_limiting ? 14.0f : 8.0f), br_halo);
-            rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, y), 5.0f, 5.0f), br_dot);
-        }
-        if (br_dot) br_dot->Release();
-        if (br_halo) br_halo->Release();
-    }
-
-    static void render_limiter_signal_gdi(HDC hdc, const RECT& p,
-                                         plugins::XAudioEffectDevice* dev, COLORREF accent) {
-        if (!hdc || !dev) return;
-        float m_in = dev->meter_in();
-        if (m_in < 0.001f) return;
-
-        double ceiling = dev->get_plain(5);
-        double in_db = std::clamp(xaudio::gainDb(m_in), -60.0, 6.0);
-        int pw = p.right - p.left;
-        int ph = p.bottom - p.top;
-
-        int x = p.left + static_cast<int>(std::clamp((in_db + 60.0) / 66.0, 0.0, 1.0) * pw);
-        int y = p.bottom - static_cast<int>(std::clamp((std::min(in_db, ceiling) + 60.0) / 60.0, 0.0, 1.0) * ph);
-
-        bool is_limiting = (in_db >= ceiling - 0.2);
-        COLORREF dot_col = is_limiting ? RGB(255, 90, 75) : accent;
-
-        HBRUSH br = CreateSolidBrush(dot_col);
-        HGDIOBJ ob = SelectObject(hdc, br);
-        HGDIOBJ op = SelectObject(hdc, GetStockObject(NULL_PEN));
-        Ellipse(hdc, x - 5, y - 5, x + 6, y + 6);
-        SelectObject(hdc, ob);
-        SelectObject(hdc, op);
-        DeleteObject(br);
-    }
+    static void render_limiter_signal_gdi(HDC /*hdc*/, const RECT& /*p*/,
+                                         plugins::XAudioEffectDevice* /*dev*/, COLORREF /*accent*/) {}
 
     // 5. Real-Time Signal Indicator for X-Reverb
     static void render_reverb_signal_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& p,
