@@ -9,8 +9,10 @@
 #include "dpi_awareness.hpp"
 #include "audioclip_editor.hpp"
 #include "xaudio_editor.hpp"
+#include "xosc_editor.hpp"
 #include "../plugins/audioclip_device.hpp"
 #include "../plugins/xaudio_devices.hpp"
+#include "../plugins/xosc_device.hpp"
 #include "../../app/usecases/sample_library.hpp"
 #include "../../app/ports/config_store.hpp"
 #include <windows.h>
@@ -1296,6 +1298,7 @@ private:
                 dragging_channel_target_track_idx_ = -1;
                 dragging_clipper_knob_ = ClipperKnobId::None;
                 dragging_xsynth_param_idx_ = -1;
+                dragging_xosc_param_idx_ = -1;
                 dragging_effect_param_idx_ = -1;
                 note_drag_mode_ = NoteDragMode::None;
                 if (clip_drag_mode_ != ClipDragMode::None) {
@@ -1350,6 +1353,18 @@ private:
                         }
                         effect_editor_scroll_idx_ = std::max(0, effect_editor_scroll_idx_ - steps);
                         InvalidateRect(hwnd, &effect_editor_bounds_, FALSE);
+                        break;
+                    }
+                }
+
+                if (active_editor_channel_ != 0 &&
+                    mouse_pt.x >= editor_bounds_.left && mouse_pt.x <= editor_bounds_.right &&
+                    mouse_pt.y >= editor_bounds_.top && mouse_pt.y <= editor_bounds_.bottom) {
+                    auto* dev = get_active_channel_synth();
+                    auto* xosc_dev = dynamic_cast<plugins::XOSCDevice*>(dev);
+                    if (xosc_dev) {
+                        XOSCEditor::handle_wheel(xosc_dev, editor_bounds_, mouse_pt.x, mouse_pt.y, steps, status_message_, xosc_active_tab_);
+                        InvalidateRect(hwnd, &editor_bounds_, FALSE);
                         break;
                     }
                 }
@@ -3554,6 +3569,17 @@ private:
             return;
         }
 
+        auto* xosc_dev = dynamic_cast<plugins::XOSCDevice*>(dev);
+        if (xosc_dev) {
+            float mw = std::min(1080.0f, static_cast<float>(client_w_) - 40.0f);
+            float mh = std::min(720.0f, static_cast<float>(client_h_) - 60.0f);
+            float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+            float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+            editor_bounds_ = {static_cast<LONG>(mx), static_cast<LONG>(my), static_cast<LONG>(mx + mw), static_cast<LONG>(my + mh)};
+            XOSCEditor::render_d2d(d2d_target_, dwrite_bold_, dwrite_small_, xosc_dev, editor_bounds_, xosc_active_tab_);
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -5194,6 +5220,17 @@ private:
             return;
         }
 
+        auto* xosc_dev = dynamic_cast<plugins::XOSCDevice*>(dev);
+        if (xosc_dev) {
+            int mw = std::min(1080, client_w_ - 40);
+            int mh = std::min(720, client_h_ - 60);
+            int mx = (client_w_ - mw) / 2;
+            int my = (client_h_ - mh) / 2;
+            editor_bounds_ = RECT{mx, my, mx + mw, my + mh};
+            XOSCEditor::render_gdi(mem_dc_, font_bold_, font_small_, xosc_dev, editor_bounds_, xosc_active_tab_);
+            return;
+        }
+
         const auto& t = get_theme();
 
         int mw = 680;
@@ -6028,6 +6065,7 @@ private:
                 AppendMenuA(hMenu, MF_STRING, 2004, "4. FPC Drum Machine");
                 AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
                 AppendMenuA(hMenu, MF_STRING, 2010, "5. X-Synth Synthesizer");
+                AppendMenuA(hMenu, MF_STRING, 2011, "6. XOSC Synthesizer");
                 int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd_, nullptr);
                 DestroyMenu(hMenu);
                 if (cmd == 2001) add_channel_with_uid("core.generator.audioclip", "Clipper");
@@ -6035,6 +6073,7 @@ private:
                 else if (cmd == 2003) add_channel_with_uid("core.generator.sampler", "DirectWave Sampler");
                 else if (cmd == 2004) add_channel_with_uid("core.generator.drum_sampler", "FPC Drum Machine");
                 else if (cmd == 2010) add_channel_with_uid("core.generator.x_synth", "X-Synth");
+                else if (cmd == 2011) add_channel_with_uid("core.generator.xosc", "XOSC");
                 return;
             }
             return;
@@ -7724,6 +7763,16 @@ private:
             }
         }
 
+        if (active_editor_channel_ != 0 && dragging_xosc_param_idx_ >= 0) {
+            auto* dev = get_active_channel_synth();
+            auto* xosc_dev = dynamic_cast<plugins::XOSCDevice*>(dev);
+            if (xosc_dev) {
+                XOSCEditor::handle_drag(xosc_dev, dragging_xosc_param_idx_,
+                                        drag_xosc_start_y_, drag_xosc_orig_val_, y, status_message_);
+                return;
+            }
+        }
+
         if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0 && dragging_effect_param_idx_ >= 0) {
             auto* track = engine_.session().project().mixer_graph().get_track(static_cast<uint32_t>(active_editor_effect_track_));
             if (track && static_cast<size_t>(active_editor_effect_slot_) < track->inserts().size()) {
@@ -8234,6 +8283,19 @@ private:
             return;
         }
 
+        auto* xosc_dev = dynamic_cast<plugins::XOSCDevice*>(dev);
+        if (xosc_dev) {
+            bool should_close = XOSCEditor::handle_click(
+                hwnd_, xosc_dev, editor_bounds_, x, y,
+                xosc_active_tab_, dragging_xosc_param_idx_, drag_xosc_start_y_, drag_xosc_orig_val_,
+                status_message_, [this](uint8_t pitch) { audition_note(pitch); });
+            if (should_close) {
+                active_editor_channel_ = 0;
+                dragging_xosc_param_idx_ = -1;
+            }
+            return;
+        }
+
         auto* synth = dynamic_cast<plugins::Synth3xOsc*>(dev);
         if (!synth) return;
 
@@ -8558,6 +8620,10 @@ private:
     int dragging_xsynth_param_idx_{-1};
     int drag_xsynth_start_y_{0};
     float drag_xsynth_orig_val_{0.0f};
+    int xosc_active_tab_{0}; // 0 = Osc+Filters, 1 = Env+Routing, 2 = FX+Perf
+    int dragging_xosc_param_idx_{-1};
+    int drag_xosc_start_y_{0};
+    float drag_xosc_orig_val_{0.0f};
     int clipper_active_tab_{0}; // 0 = Sample, 1 = Env/Inst, 2 = Misc
     int clipper_env_subtab_{1}; // 0=Pan, 1=Vol (Default!), 2=ModX, 3=ModY, 4=Pitch
     ClipperKnobId dragging_clipper_knob_{ClipperKnobId::None};

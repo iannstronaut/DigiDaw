@@ -8,6 +8,7 @@
 #include "../../adapters/plugins/audioclip_device.hpp"
 #include "../../adapters/plugins/limiter_device.hpp"
 #include "../../adapters/plugins/xaudio_devices.hpp"
+#include "../../adapters/plugins/xosc_device.hpp"
 #include <unordered_map>
 #include <functional>
 #include <memory>
@@ -96,6 +97,11 @@ private:
         register_factory(
             "core.fx.limiter", "Master Limiter", domain::DeviceCategory::Effect,
             []() { return std::make_shared<adapters::plugins::LimiterDevice>(); });
+
+        // --- XOSC Ported Instrument (Built-in) ---
+        register_factory(
+            "core.generator.xosc", "XOSC", domain::DeviceCategory::Generator,
+            []() { return std::make_shared<adapters::plugins::XOSCDevice>(); });
 
         // --- XAudio Ported Devices (Built-in) ---
         register_factory(

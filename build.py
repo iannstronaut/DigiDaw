@@ -61,6 +61,7 @@ def main():
         os.path.join(root_dir, "tests", "unit", "test_crash_handler.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_licensing.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_xaudio_plugins.cpp"),
+        os.path.join(root_dir, "tests", "unit", "test_xosc_plugin.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_project_odp.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_offline_renderer.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_bridge_and_scanner.cpp"),
