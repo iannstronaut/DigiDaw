@@ -1319,6 +1319,10 @@ private:
                         audition_sample(sample_library_.samples()[sample_down_idx_].path);
                     }
                 }
+                if (active_audition_pitch_ >= 0) {
+                    stop_audition_note(static_cast<uint8_t>(active_audition_pitch_));
+                    active_audition_pitch_ = -1;
+                }
                 ReleaseCapture();
                 InvalidateRect(hwnd, NULL, FALSE);
                 return 0;
@@ -8373,7 +8377,16 @@ private:
 
     void audition_note(uint8_t pitch) {
         domain::ChannelId cid = (active_editor_channel_ != 0) ? active_editor_channel_ : piano_roll_channel_;
+        active_audition_pitch_ = pitch;
         engine_.audition_note(cid, pitch, 100);
+    }
+
+    void stop_audition_note(uint8_t pitch) {
+        domain::ChannelId cid = (active_editor_channel_ != 0) ? active_editor_channel_ : piano_roll_channel_;
+        engine_.stop_audition_note(cid, pitch);
+        if (active_audition_pitch_ == static_cast<int>(pitch)) {
+            active_audition_pitch_ = -1;
+        }
     }
 
     domain::IDevice* get_active_channel_synth() {
@@ -8630,6 +8643,7 @@ private:
     int drag_clipper_start_y_{0};
     float drag_clipper_orig_val_{0.0f};
     bool is_mouse_down_{false};
+    int active_audition_pitch_{-1};
     bool dragging_spm_{false};
     int dragging_mixer_track_{-1};
     int dragging_mixer_pan_track_{-1};

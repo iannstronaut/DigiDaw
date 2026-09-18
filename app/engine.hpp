@@ -64,6 +64,18 @@ public:
         pending_audition_notes_.push_back({cid, pitch, static_cast<size_t>(44100.0 * 0.35)});
     }
 
+    void stop_audition_note(domain::ChannelId cid, uint8_t pitch) {
+        std::lock_guard<std::mutex> lock(audition_mutex_);
+        audition_queue_.push_back({cid, domain::MidiEvent::make_note_off(0, 0, pitch)});
+        for (auto it = pending_audition_notes_.begin(); it != pending_audition_notes_.end(); ) {
+            if (it->cid == cid && it->pitch == pitch) {
+                it = pending_audition_notes_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     void preview_sample_data(std::vector<float> left, std::vector<float> right) {
         std::lock_guard<std::mutex> lock(preview_mutex_);
         preview_l_ = std::move(left);
@@ -224,6 +236,17 @@ public:
                         }
                     }
                     pending_audition_notes_.clear();
+                }
+                for (const auto& [aid, ev] : cur_auditions_scratch_) {
+                    if (ev.is_note_off()) {
+                        for (auto it = live_auditions_.begin(); it != live_auditions_.end(); ) {
+                            if (it->cid == aid && it->pitch == ev.note_number()) {
+                                it = live_auditions_.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                    }
                 }
             }
 

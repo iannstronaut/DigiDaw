@@ -647,5 +647,216 @@ TEST_CASE(UnitXOSC, EngineAuditionRapidNotesDecayCleanlyWithoutPanic) {
     ASSERT_NEAR(quiet_r, 0.0f, 0.0001f);
 }
 
+// ============================================================================
+// 14. High Sustain and High Release with 3x Rapid Note Re-triggers (Same Pitch)
+// ============================================================================
+
+TEST_CASE(UnitXOSC, HighSustainAndReleaseRapidRetriggerDecaysWithoutStaticOrHangs) {
+    digidaw::app::Engine engine;
+
+    ChannelSettings s;
+    s.name = "XOSC Synth";
+    s.volume = 1.0f;
+    s.mixer_track = 1;
+    ChannelId ch_id = engine.session().project().add_channel("core.generator.xosc", s);
+
+    auto dev = engine.get_or_create_channel_device(ch_id);
+    ASSERT_TRUE(dev != nullptr);
+    auto xosc_dev = std::dynamic_pointer_cast<XOSCDevice>(dev);
+    ASSERT_TRUE(xosc_dev != nullptr);
+
+    // Set high sustain and long release on amp envelope
+    xosc_dev->set_param_by_id("a0_sustain", 1.0f);
+    xosc_dev->set_param_by_id("a0_release", 0.5f); // 500 ms release
+
+    // Enable Filter 1 with resonance to test SVF stability under re-triggering
+    xosc_dev->set_param_by_id("f0_on", 1.0f);
+    xosc_dev->set_param_by_id("f0_route0", 1.0f);
+    xosc_dev->set_param_by_id("f0_cutoff", 3500.0f);
+    xosc_dev->set_param_by_id("f0_res", 4.0f);
+
+    OwningAudioBuffer out_buf(512);
+    auto view = out_buf.view();
+
+    // Trigger the SAME pitch (C4, 60) 3 times rapidly (e.g. within 50ms)
+    // Reproduces user scenario: 3x note clicked on VST with high sustain & release
+    for (int i = 0; i < 3; ++i) {
+        engine.audition_note(ch_id, 60, 100);
+        engine.process_realtime_audio(view);
+        // Verify audio is valid and not NaN/Inf/static during sounding
+        for (size_t smp = 0; smp < 512; ++smp) {
+            ASSERT_FALSE(std::isnan(view.left[smp]));
+            ASSERT_FALSE(std::isnan(view.right[smp]));
+            ASSERT_FALSE(std::isinf(view.left[smp]));
+            ASSERT_FALSE(std::isinf(view.right[smp]));
+            // No rail-to-rail static slamming (tanh rail is 1.0)
+            ASSERT_TRUE(std::abs(view.left[smp]) < 1.0f || std::abs(view.left[smp]) <= 1.0001f);
+        }
+    }
+
+    // Voice de-duplication ensures rapid re-triggering of the same pitch reuses the voice
+    // rather than accumulating 3 separate voices playing the same note simultaneously
+    ASSERT_EQ(xosc_dev->active_voices(), 1);
+
+    // Advance audio blocks through the audition hold (350ms) + release (500ms) + safety margin
+    // Total duration ~1.1 seconds = ~95 blocks of 512 samples at 44.1kHz
+    for (int b = 0; b < 95; ++b) {
+        engine.process_realtime_audio(view);
+        for (size_t smp = 0; smp < 512; ++smp) {
+            ASSERT_FALSE(std::isnan(view.left[smp]));
+            ASSERT_FALSE(std::isnan(view.right[smp]));
+            ASSERT_FALSE(std::isinf(view.left[smp]));
+            ASSERT_FALSE(std::isinf(view.right[smp]));
+        }
+    }
+
+    // All voices MUST have cleanly decayed to idle (active_voices == 0) without hanging or requiring panic!
+    ASSERT_EQ(xosc_dev->active_voices(), 0);
+
+    // Audio must have decayed cleanly to zero (no residual static buzzing)
+    auto [quiet_l, quiet_r] = view.compute_peak();
+    ASSERT_NEAR(quiet_l, 0.0f, 0.0001f);
+    ASSERT_NEAR(quiet_r, 0.0f, 0.0001f);
+}
+
+// ============================================================================
+// 15. Unison Saw Anti-Aliasing, PolyBLEP and Nyquist Foldback Protection
+// ============================================================================
+
+TEST_CASE(UnitXOSC, UnisonSawPolyBLEPNyquistFoldbackCleanSpectrum) {
+    XOSCDevice dev;
+    dev.prepare(44100.0, 512);
+
+    // Configure Oscillator 0: Saw wave, 8 unison voices, detuned with stereo spread
+    dev.set_param_by_id("o0_on", 1.0f);
+    dev.set_param_by_id("o0_wave", 2.0f); // Sawtooth
+    dev.set_param_by_id("o0_voices", 7.0f); // 8 voices
+    dev.set_param_by_id("o0_detune", 35.0f); // 35 cents detune spread
+    dev.set_param_by_id("o0_stereo", 0.75f); // 75% stereo spread
+    dev.set_param_by_id("a0_attack", 0.005f);
+    dev.set_param_by_id("a0_decay", 0.2f);
+    dev.set_param_by_id("a0_sustain", 0.8f);
+
+    OwningAudioBuffer buf(512);
+    auto view = buf.view();
+
+    // 1. Play high register note: C7 (pitch 96, ~2093 Hz fundamental)
+    // Higher harmonics of 8 detuned saw sub-voices approach and cross Nyquist (22.05 kHz)
+    MidiEvent ev_c7{0, 0x90, 96, 100};
+    MidiEvent ev_arr1[1] = {ev_c7};
+    dev.process(view, std::span<const MidiEvent>(ev_arr1, 1));
+
+    // Verify signal is stable, non-zero, well-normalized, and free of NaN/Inf
+    auto [p1_l, p1_r] = view.compute_peak();
+    ASSERT_TRUE(p1_l > 0.01f);
+    ASSERT_TRUE(p1_r > 0.01f);
+    // Unison gain normalization ensures 8 voices do not severely overdrive into clipping
+    ASSERT_TRUE(p1_l < 1.5f);
+    ASSERT_TRUE(p1_r < 1.5f);
+
+    // 2. Play note with dt > 0.25: Pitch 125 (~11,839 Hz fundamental at 44.1 kHz, dt = 0.268)
+    // Specifically exercises PolyBLEP Nyquist foldback crossfade with correct in-phase fundamental
+    buf.clear();
+    MidiEvent ev_p125{0, 0x90, 125, 100};
+    MidiEvent ev_arr2[1] = {ev_p125};
+    dev.process(view, std::span<const MidiEvent>(ev_arr2, 1));
+
+    auto [p2_l, p2_r] = view.compute_peak();
+    // Fundamental is in-phase and NOT cancelled out by destructive crossfade
+    ASSERT_TRUE(p2_l > 0.01f);
+    ASSERT_TRUE(p2_r > 0.01f);
+    for (size_t i = 0; i < 512; ++i) {
+        ASSERT_FALSE(std::isnan(view.left[i]));
+        ASSERT_FALSE(std::isnan(view.right[i]));
+        ASSERT_FALSE(std::isinf(view.left[i]));
+        ASSERT_FALSE(std::isinf(view.right[i]));
+    }
+
+    // 3. Play extreme note approaching Nyquist (dt > 0.45) with pitch transposition
+    dev.set_param_by_id("o0_tune", 12.0f); // +1 octave
+    buf.clear();
+    MidiEvent ev_extreme{0, 0x90, 120, 100};
+    MidiEvent ev_arr3[1] = {ev_extreme};
+    dev.process(view, std::span<const MidiEvent>(ev_arr3, 1));
+    for (size_t i = 0; i < 512; ++i) {
+        ASSERT_FALSE(std::isnan(view.left[i]));
+        ASSERT_FALSE(std::isnan(view.right[i]));
+        ASSERT_FALSE(std::isinf(view.left[i]));
+        ASSERT_FALSE(std::isinf(view.right[i]));
+    }
+
+    // 4. Fast Note Off and decay to zero
+    dev.set_param_by_id("o0_tune", 0.0f);
+    dev.set_param_by_id("a0_release", 0.02f);
+    buf.clear();
+    MidiEvent off1{0, 0x80, 96, 0};
+    MidiEvent off2{0, 0x80, 125, 0};
+    MidiEvent off3{0, 0x80, 120, 0};
+    MidiEvent off_arr[3] = {off1, off2, off3};
+    dev.process(view, std::span<const MidiEvent>(off_arr, 3));
+
+    std::span<const MidiEvent> empty_midi{};
+    for (int b = 0; b < 25; ++b) {
+        buf.clear();
+        dev.process(view, empty_midi);
+    }
+    ASSERT_EQ(dev.active_voices(), 0);
+    auto [ql, qr] = view.compute_peak();
+    ASSERT_NEAR(ql, 0.0f, 0.0001f);
+    ASSERT_NEAR(qr, 0.0f, 0.0001f);
+}
+
+// ============================================================================
+// 16. Voice De-duplication Retriggers Releasing Voice Without Voice Pile-up
+// ============================================================================
+
+TEST_CASE(UnitXOSC, VoiceDeduplicationRetriggersReleasingVoice) {
+    XOSCDevice dev;
+    dev.prepare(44100.0, 512);
+
+    // Long release so voice stays active after NoteOff
+    dev.set_param_by_id("a0_release", 2.0f);
+    dev.set_param_by_id("a0_sustain", 1.0f);
+
+    OwningAudioBuffer buf(512);
+    auto view = buf.view();
+
+    // 1. Play Note 60
+    MidiEvent on1{0, 0x90, 60, 100};
+    MidiEvent on1_arr[1] = {on1};
+    dev.process(view, std::span<const MidiEvent>(on1_arr, 1));
+    ASSERT_EQ(dev.active_voices(), 1);
+
+    // 2. Release Note 60 (voice enters long release)
+    buf.clear();
+    MidiEvent off1{0, 0x80, 60, 0};
+    MidiEvent off1_arr[1] = {off1};
+    dev.process(view, std::span<const MidiEvent>(off1_arr, 1));
+    // Voice is still active in release stage
+    ASSERT_EQ(dev.active_voices(), 1);
+
+    // 3. Re-trigger Note 60 while voice is in release
+    // Voice de-duplication MUST re-use the releasing voice rather than allocating a 2nd voice
+    buf.clear();
+    MidiEvent on2{0, 0x90, 60, 100};
+    MidiEvent on2_arr[1] = {on2};
+    dev.process(view, std::span<const MidiEvent>(on2_arr, 1));
+    ASSERT_EQ(dev.active_voices(), 1); // Not 2!
+
+    // 4. Play a DIFFERENT note (Note 64) -> allocates a second voice
+    buf.clear();
+    MidiEvent on3{0, 0x90, 64, 100};
+    MidiEvent on3_arr[1] = {on3};
+    dev.process(view, std::span<const MidiEvent>(on3_arr, 1));
+    ASSERT_EQ(dev.active_voices(), 2);
+
+    // Clean up
+    dev.panic();
+    buf.clear();
+    std::span<const MidiEvent> empty{};
+    dev.process(view, empty);
+    ASSERT_EQ(dev.active_voices(), 0);
+}
+
 
 

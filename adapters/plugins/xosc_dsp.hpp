@@ -285,26 +285,52 @@ inline float lerp(float a, float b, float t) {
 }
 
 inline float blep(float t, float dt) {
+    if (dt <= 0.0f) return 0.0f;
     if (t < dt) {
-        t /= dt;
-        return t + t - t * t - 1;
+        float x = t / dt;
+        return 2.0f * x - x * x - 1.0f;
     }
-    if (t > 1 - dt) {
-        t = (t - 1) / dt;
-        return t * t + t + t + 1;
+    if (t > 1.0f - dt) {
+        float x = (t - 1.0f) / dt;
+        return x * x + 2.0f * x + 1.0f;
     }
-    return 0;
+    return 0.0f;
 }
 
 inline float wave(float t, float dt, int w) {
+    dt = std::clamp(dt, 1e-8f, 0.499f);
     if (w == 0)
-        return std::sin(2 * pi * t);
-    if (w == 2)
-        return 2 * t - 1 - blep(t, dt);
-    float u = t + .5f;
-    if (u >= 1)
-        u -= 1;
-    return (t < .5f ? 1.f : -1.f) + blep(t, dt) - blep(u, dt);
+        return std::sin(2.0f * pi * t);
+    if (w == 2) {
+        // High quality PolyBLEP sawtooth with Nyquist foldback protection:
+        // As frequency approaches Nyquist (dt > 0.25, i.e. f > fs / 4), higher saw harmonics
+        // cross fs/2 and fold back across the audible spectrum causing harsh metallic aliasing.
+        // We smoothly crossfade into the bandlimited fundamental sine wave matching saw phase.
+        float saw = 2.0f * t - 1.0f - blep(t, dt);
+        if (dt > 0.25f) {
+            float blend = std::clamp((dt - 0.25f) / 0.20f, 0.0f, 1.0f);
+            // Fourier fundamental component of rising saw (2t - 1) is -(2/pi) * sin(2*pi*t)
+            float fund = -(2.0f / pi) * std::sin(2.0f * pi * t);
+            saw = lerp(saw, fund, blend);
+        }
+        if (dt > 0.45f) {
+            saw *= std::clamp((0.50f - dt) / 0.05f, 0.0f, 1.0f);
+        }
+        return saw;
+    }
+    float u = t + 0.5f;
+    if (u >= 1.0f)
+        u -= 1.0f;
+    float sq = (t < 0.5f ? 1.0f : -1.0f) + blep(t, dt) - blep(u, dt);
+    if (dt > 0.25f) {
+        float blend = std::clamp((dt - 0.25f) / 0.20f, 0.0f, 1.0f);
+        float fund = (4.0f / pi) * std::sin(2.0f * pi * t);
+        sq = lerp(sq, fund, blend);
+    }
+    if (dt > 0.45f) {
+        sq *= std::clamp((0.50f - dt) / 0.05f, 0.0f, 1.0f);
+    }
+    return sq;
 }
 
 struct ADSR {
@@ -316,32 +342,34 @@ struct ADSR {
         release
     };
     Stage stage = idle;
-    float value = 0, releaseStep = 0;
+    float value = 0.0f, releaseStep = 0.0f;
     void on() {
         stage = attack;
-        value = 0;
+        value = 0.0f;
+        releaseStep = 0.0f;
     }
     void off(const Env& e, float sr) {
         if (stage != idle && stage != release) {
             stage = release;
-            float total = std::max(1.f, e.release * sr);
-            releaseStep = std::max(value / total, 1.f / (12.f * sr));
+            float total = std::max(1.0f, e.release * sr);
+            float safe_val = std::clamp(value, 0.0f, 2.0f);
+            releaseStep = std::max(safe_val / total, 1.0f / (30.0f * sr));
         }
     }
     float tick(const Env& e, float sr) {
         switch (stage) {
         case idle:
-            value = 0;
+            value = 0.0f;
             break;
         case attack:
-            value += 1 / std::max(1.f, e.attack * sr);
-            if (value >= 1) {
-                value = 1;
+            value += 1.0f / std::max(1.0f, e.attack * sr);
+            if (value >= 1.0f) {
+                value = 1.0f;
                 stage = decay;
             }
             break;
         case decay:
-            value -= (1 - e.sustain) / std::max(1.f, e.decay * sr);
+            value -= (1.0f - e.sustain) / std::max(1.0f, e.decay * sr);
             if (value <= e.sustain + 1e-5f) {
                 value = e.sustain;
                 stage = sustain;
@@ -353,35 +381,60 @@ struct ADSR {
         case release:
             value -= releaseStep;
             if (value <= 1e-5f) {
-                value = 0;
+                value = 0.0f;
                 stage = idle;
             }
             break;
+        }
+        if (!std::isfinite(value)) {
+            value = 0.0f;
+            stage = idle;
         }
         return value;
     }
 };
 
 struct SVF {
-    float s1 = 0, s2 = 0, g = 0, k = 1.414f, a1 = 1, a2 = 0, a3 = 0;
+    float s1 = 0.0f, s2 = 0.0f, g = 0.0f, k = 1.414f, a1 = 1.0f, a2 = 0.0f, a3 = 0.0f;
     int type = 0;
     void set(float freq, float q, int t, float sr) {
-        g = std::tan(pi * std::clamp(freq, 20.f, sr * .44f) / sr);
-        k = 1 / std::clamp(q, .5f, 8.f);
-        a1 = 1 / (1 + g * (g + k));
+        float f_clamped = std::clamp(freq, 20.0f, sr * 0.44f);
+        g = std::tan(pi * f_clamped / sr);
+        k = 1.0f / std::clamp(q, 0.5f, 8.0f);
+        a1 = 1.0f / (1.0f + g * (g + k));
         a2 = g * a1;
         a3 = g * a2;
         type = t;
     }
     float tick(float x) {
-        float v3 = x - s2, v1 = a1 * s1 + a2 * v3, v2 = s2 + a2 * s1 + a3 * v3;
-        s1 = 2 * v1 - s1;
-        s2 = 2 * v2 - s2;
+        if (!std::isfinite(x)) x = 0.0f;
+        if (!std::isfinite(s1) || !std::isfinite(s2)) {
+            s1 = 0.0f;
+            s2 = 0.0f;
+        }
+        // State bounding and soft non-linear damping to prevent runaway limit cycles and blowup
+        s1 = std::clamp(s1, -16.0f, 16.0f);
+        s2 = std::clamp(s2, -16.0f, 16.0f);
+        float v3 = x - s2;
+        float v1 = a1 * s1 + a2 * v3;
+        float v2 = s2 + a2 * s1 + a3 * v3;
+        s1 = 2.0f * v1 - s1;
+        s2 = 2.0f * v2 - s2;
+        // Soft saturate states at extremes to ensure absolute numerical stability under high Q
+        if (s1 > 8.0f || s1 < -8.0f) s1 = std::tanh(s1 * 0.125f) * 8.0f;
+        if (s2 > 8.0f || s2 < -8.0f) s2 = std::tanh(s2 * 0.125f) * 8.0f;
         float hp = x - k * v1 - v2;
-        return type == 0 ? v2 : type == 1 ? hp : type == 2 ? v1 : v2 + hp;
+        float out = type == 0 ? v2 : type == 1 ? hp : type == 2 ? v1 : (v2 + hp);
+        if (!std::isfinite(out)) {
+            s1 = 0.0f;
+            s2 = 0.0f;
+            return 0.0f;
+        }
+        return std::clamp(out, -16.0f, 16.0f);
     }
     void reset() {
-        s1 = s2 = 0;
+        s1 = 0.0f;
+        s2 = 0.0f;
     }
 };
 
@@ -397,9 +450,19 @@ struct Biquad {
         a2 = (1 - alpha / a) * norm;
     }
     float tick(float x) {
+        if (!std::isfinite(x)) x = 0.0f;
+        if (!std::isfinite(z1) || !std::isfinite(z2)) {
+            z1 = 0.0f;
+            z2 = 0.0f;
+        }
         float y = b0 * x + z1;
         z1 = b1 * x - a1 * y + z2;
         z2 = b2 * x - a2 * y;
+        if (!std::isfinite(y)) {
+            z1 = 0.0f;
+            z2 = 0.0f;
+            return 0.0f;
+        }
         return y;
     }
 };
@@ -489,8 +552,8 @@ struct Voice {
     std::array<std::array<float, 4>, 2> filterWet{};
     std::array<float, 2> filterDrive{1.0f, 1.0f};
     void start(int n, int ch, float vel, uint64_t a, const Patch& p) {
-        stealL = lastL;
-        stealR = lastR;
+        stealL = std::isfinite(lastL) ? std::clamp(lastL, -2.0f, 2.0f) : 0.0f;
+        stealR = std::isfinite(lastR) ? std::clamp(lastR, -2.0f, 2.0f) : 0.0f;
         stealRemaining = active ? 64 : 0;
         active = held = true;
         sustained = false;
@@ -499,21 +562,38 @@ struct Voice {
         glideRemaining = 0;
         channel = ch;
         age = a;
-        velocity = vel;
+        velocity = std::clamp(vel, 0.0f, 1.0f);
         gate = 0;
         oscGate.fill(0);
         filterDrive.fill(1.0f);
-        for (auto& w : filterWet)
-            w.fill(0);
+        for (int f = 0; f < 2; ++f) {
+            for (int o = 0; o < 4; ++o) {
+                bool enabled = p.filter[f].on && p.filter[f].route[o];
+                filterWet[f][o] = enabled ? 1.0f : 0.0f;
+            }
+        }
         for (auto& e : env)
             e.on();
         for (auto& e : amp)
             e.on();
-        for (int o = 0; o < 4; ++o)
+        for (int o = 0; o < 4; ++o) {
+            float base_ph = p.osc[o].phase / 360.f;
+            int n_vc = p.osc[o].voices;
+            uint32_t seed = static_cast<uint32_t>(a * 1664525u + (o + 1) * 1013904223u + 13579u);
+            seed = seed * 1664525u + 1013904223u;
+            float note_rnd = static_cast<float>(seed & 0x00FFFFFF) / static_cast<float>(0x01000000);
             for (int u = 0; u < 12; ++u) {
-                float x = p.osc[o].phase / 360.f + (u ? float(u) * .61803398875f : 0);
+                // Decorrelated initial phase: golden ratio offset per sub-voice + randomized per-note offset
+                float rnd = 0.0f;
+                if (n_vc > 1) {
+                    rnd = float(u) * 0.618033988749895f + note_rnd;
+                } else if (u > 0) {
+                    rnd = float(u) * 0.618033988749895f;
+                }
+                float x = base_ph + rnd;
                 phase[o][u] = x - std::floor(x);
             }
+        }
         for (auto& f : filters)
             for (auto& o : f)
                 for (auto& c : o)
@@ -594,12 +674,21 @@ public:
 
         Voice* pick = nullptr;
 
-        // 1. If this note is ALREADY playing on this channel (held or releasing or sustained),
-        // retrigger that voice directly so we don't leak voices or dangle sustain.
+        // 1. Voice de-duplication: If this note is already active on this channel, retrigger it directly.
+        // First check for a currently held voice of this pitch:
         for (int i = 0; i < p.polyphony; ++i) {
-            if (voices[i].active && voices[i].channel == channel && voices[i].note == note) {
+            if (voices[i].active && voices[i].channel == channel && voices[i].note == note && voices[i].held) {
                 pick = &voices[i];
                 break;
+            }
+        }
+        // If not currently held, check if an existing voice of this pitch is in release or sustain:
+        if (!pick) {
+            for (int i = 0; i < p.polyphony; ++i) {
+                if (voices[i].active && voices[i].channel == channel && voices[i].note == note) {
+                    pick = &voices[i];
+                    break;
+                }
             }
         }
 
@@ -638,12 +727,12 @@ public:
             pick = &voices[best_idx];
         }
 
-        // Terminate any other duplicate voices for this note/channel to avoid hanging states
+        // Cleanly release any other active voices for this note/channel to avoid dangling active states
         for (int i = 0; i < 32; ++i) {
             if (&voices[i] != pick && voices[i].active && voices[i].channel == channel && voices[i].note == note) {
-                voices[i].active = false;
                 voices[i].held = false;
                 voices[i].sustained = false;
+                voices[i].release(p, sr);
             }
         }
 
@@ -998,14 +1087,18 @@ private:
                                 pan_mod += m;
                         }
                     int n = p.osc[o].voices;
-                    float norm = 1 / std::sqrt(float(n));
+                    float norm = 1.0f / std::sqrt(float(n));
                     for (int u = 0; u < n; ++u) {
-                        float spread = n == 1 ? 0 : 2.f * float(u) / float(n - 1) - 1;
-                        v.inc[o][u] = std::clamp(
-                            base * std::exp2((pitch + spread * osc.detune * .01f) / 12) / sr, 1e-8f,
-                            .45f);
-                        float pan = std::clamp(osc.pan + pan_mod + spread * osc.stereo, -1.f, 1.f);
-                        float angle = (pan + 1) * pi * .25f;
+                        float x = n == 1 ? 0.0f : (2.0f * float(u) / float(n - 1) - 1.0f);
+                        // Smooth non-linear JP-8000 style SuperSaw cubic detune distribution
+                        // Spreads center voice at 0, inner voices tighter, outer voices smoothly expanded
+                        // Prevents periodic beating and stationary comb filtering
+                        float spread = n == 1 ? 0.0f : (x * (0.35f + 0.65f * x * x));
+                        float detuned_pitch = pitch + spread * osc.detune * 0.01f;
+                        float f = base * std::exp2(detuned_pitch / 12.0f);
+                        v.inc[o][u] = std::clamp(f / sr, 1e-8f, 0.49f);
+                        float pan = std::clamp(osc.pan + pan_mod + x * osc.stereo, -1.0f, 1.0f);
+                        float angle = (pan + 1.0f) * pi * 0.25f;
                         v.left[o][u] = std::cos(angle) * norm;
                         v.right[o][u] = std::sin(angle) * norm;
                     }
@@ -1071,12 +1164,21 @@ private:
         a = {mid + side, mid - side};
         master += std::clamp(masterTarget - master, -1 / (sr * .02f), 1 / (sr * .02f));
         for (int c = 0; c < 2; ++c) {
-            float x = a[c] * master, y = x - previousX[c] + dcCoeff * previousY[c];
+            float x = a[c] * master;
+            if (!std::isfinite(x)) x = 0.0f;
+            if (!std::isfinite(previousX[c]) || !std::isfinite(previousY[c])) {
+                previousX[c] = 0.0f;
+                previousY[c] = 0.0f;
+            }
+            float y = x - previousX[c] + dcCoeff * previousY[c];
             previousX[c] = x;
             previousY[c] = y;
             a[c] = std::tanh(y);
-            if (!std::isfinite(a[c]))
-                a[c] = 0;
+            if (!std::isfinite(a[c])) {
+                a[c] = 0.0f;
+                previousX[c] = 0.0f;
+                previousY[c] = 0.0f;
+            }
         }
         return a;
     }
