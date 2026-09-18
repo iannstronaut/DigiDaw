@@ -77,7 +77,7 @@ public:
         float cx = (rc.left + rc.right) * 0.5f;
         float cy = rc.top + 16.0f + (rc.bottom - rc.top - 34.0f) * 0.5f;
         float max_r = std::min((rc.right - rc.left) * 0.5f - 4.0f, (rc.bottom - rc.top - 34.0f) * 0.5f - 2.0f);
-        float radius = std::clamp(max_r, 12.0f, 22.0f);
+        float radius = std::clamp(max_r, 8.0f, 22.0f);
 
         // Title above knob
         D2D1_RECT_F title_rc = D2D1::RectF(rc.left, rc.top, rc.right, rc.top + 15.0f);
@@ -170,7 +170,7 @@ public:
         int cx = (rc.left + rc.right) / 2;
         int cy = rc.top + 16 + (rc.bottom - rc.top - 34) / 2;
         int max_r = std::min((rc.right - rc.left) / 2 - 4, (rc.bottom - rc.top - 34) / 2 - 2);
-        int radius = std::clamp(max_r, 12, 22);
+        int radius = std::clamp(max_r, 8, 22);
 
         SelectObject(hdc, font_small);
         RECT title_rc{rc.left, rc.top, rc.right, rc.top + 15};
@@ -221,6 +221,257 @@ public:
 
         RECT val_rc{rc.left, rc.bottom - 16, rc.right, rc.bottom};
         GuiRenderer::draw_text(hdc, val_str, val_rc, disabled ? RGB(100, 100, 100) : gdi_accent(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // ========================================================================
+    // Illuminated Radio/LED Style Toggle Switch (Direct2D)
+    // ========================================================================
+    static void draw_toggle_led_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc, bool on) {
+        if (!rt) return;
+        float h = rc.bottom - rc.top;
+        float radius = h * 0.5f;
+        D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(rc, radius, radius);
+        ID2D1SolidColorBrush* br_track = nullptr;
+        ID2D1SolidColorBrush* br_border = nullptr;
+        rt->CreateSolidColorBrush(D2D1::ColorF(0x18 / 255.f, 0x1a / 255.f, 0x17 / 255.f), &br_track);
+        rt->CreateSolidColorBrush(on ? D2D1::ColorF(0x80 / 255.f, 0x60 / 255.f, 0x30 / 255.f)
+                                     : D2D1::ColorF(0x38 / 255.f, 0x3a / 255.f, 0x35 / 255.f), &br_border);
+        if (br_track && br_border) {
+            rt->FillRoundedRectangle(pill, br_track);
+            rt->DrawRoundedRectangle(pill, br_border, 1.0f);
+        }
+
+        float bead_r = std::max(2.5f, radius - 2.5f);
+        float cx = on ? (rc.right - radius) : (rc.left + radius);
+        float cy = (rc.top + rc.bottom) * 0.5f;
+        D2D1_ELLIPSE el = D2D1::Ellipse(D2D1::Point2F(cx, cy), bead_r, bead_r);
+
+        if (on) {
+            ID2D1SolidColorBrush* br_glow = nullptr;
+            rt->CreateSolidColorBrush(D2D1::ColorF(0xe9 / 255.f, 0xac / 255.f, 0x55 / 255.f, 0.40f), &br_glow);
+            if (br_glow) {
+                D2D1_ELLIPSE glow_el = D2D1::Ellipse(D2D1::Point2F(cx, cy), bead_r + 2.5f, bead_r + 2.5f);
+                rt->FillEllipse(glow_el, br_glow);
+                br_glow->Release();
+            }
+            ID2D1SolidColorBrush* br_bead = nullptr;
+            rt->CreateSolidColorBrush(col_accent(), &br_bead);
+            if (br_bead) {
+                rt->FillEllipse(el, br_bead);
+                br_bead->Release();
+            }
+        } else {
+            ID2D1SolidColorBrush* br_bead = nullptr;
+            rt->CreateSolidColorBrush(D2D1::ColorF(0x32 / 255.f, 0x34 / 255.f, 0x30 / 255.f), &br_bead);
+            if (br_bead) {
+                rt->FillEllipse(el, br_bead);
+                br_bead->Release();
+            }
+        }
+
+        if (br_track) br_track->Release();
+        if (br_border) br_border->Release();
+    }
+
+    // ========================================================================
+    // Illuminated Radio/LED Style Toggle Switch (GDI Fallback)
+    // ========================================================================
+    static void draw_toggle_led_gdi(HDC hdc, const RECT& rc, bool on) {
+        if (!hdc) return;
+        int h = rc.bottom - rc.top;
+        int radius = h / 2;
+        HBRUSH br_track = CreateSolidBrush(RGB(24, 26, 23));
+        HPEN pen_border = CreatePen(PS_SOLID, 1, on ? RGB(128, 96, 48) : RGB(56, 58, 53));
+        HBRUSH old_b = static_cast<HBRUSH>(SelectObject(hdc, br_track));
+        HPEN old_p = static_cast<HPEN>(SelectObject(hdc, pen_border));
+        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, h, h);
+
+        int bead_r = std::max(2, radius - 3);
+        int cx = on ? (rc.right - radius) : (rc.left + radius);
+        int cy = (rc.top + rc.bottom) / 2;
+        HBRUSH br_bead = CreateSolidBrush(on ? RGB(233, 172, 85) : RGB(50, 52, 48));
+        HPEN pen_bead = CreatePen(PS_SOLID, 1, on ? RGB(255, 200, 120) : RGB(30, 32, 28));
+        SelectObject(hdc, br_bead);
+        SelectObject(hdc, pen_bead);
+        Ellipse(hdc, cx - bead_r, cy - bead_r, cx + bead_r, cy + bead_r);
+
+        SelectObject(hdc, old_b);
+        SelectObject(hdc, old_p);
+        DeleteObject(br_track);
+        DeleteObject(pen_border);
+        DeleteObject(br_bead);
+        DeleteObject(pen_bead);
+    }
+
+    // ========================================================================
+    // Crisp Vector Waveform Shapes (Direct2D & GDI)
+    // ========================================================================
+    static void draw_wave_icon_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc, int wave, bool active) {
+        if (!rt) return;
+        D2D1_COLOR_F bg_col = active ? D2D1::ColorF(0x38 / 255.f, 0x30 / 255.f, 0x22 / 255.f)
+                                     : D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f);
+        D2D1_COLOR_F border_col = active ? col_accent() : D2D1::ColorF(0x35 / 255.f, 0x36 / 255.f, 0x32 / 255.f);
+        D2DRenderer::draw_rounded_box(rt, rc, bg_col, border_col, 2.5f, active ? 1.5f : 1.0f);
+
+        ID2D1SolidColorBrush* br_stroke = nullptr;
+        rt->CreateSolidColorBrush(active ? col_accent() : col_ink(), &br_stroke);
+        if (!br_stroke) return;
+
+        float cx0 = rc.left + 4.0f;
+        float cx1 = rc.right - 4.0f;
+        float cy = (rc.top + rc.bottom) * 0.5f;
+        float amp = (rc.bottom - rc.top) * 0.28f;
+        float w = cx1 - cx0;
+
+        if (wave == 0) {
+            constexpr int kPts = 16;
+            D2D1_POINT_2F pts[kPts];
+            for (int i = 0; i < kPts; ++i) {
+                float t = static_cast<float>(i) / static_cast<float>(kPts - 1);
+                pts[i] = D2D1::Point2F(cx0 + t * w, cy - amp * std::sin(t * 6.2831853f));
+            }
+            for (int i = 0; i < kPts - 1; ++i)
+                rt->DrawLine(pts[i], pts[i + 1], br_stroke, active ? 2.0f : 1.4f);
+        } else if (wave == 1) {
+            float mid_x = (cx0 + cx1) * 0.5f;
+            rt->DrawLine(D2D1::Point2F(cx0, cy - amp), D2D1::Point2F(mid_x, cy - amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x, cy - amp), D2D1::Point2F(mid_x, cy + amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x, cy + amp), D2D1::Point2F(cx1, cy + amp), br_stroke, active ? 2.0f : 1.4f);
+        } else {
+            rt->DrawLine(D2D1::Point2F(cx0, cy + amp), D2D1::Point2F(cx1 - 1.5f, cy - amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(cx1 - 1.5f, cy - amp), D2D1::Point2F(cx1 - 1.5f, cy + amp), br_stroke, active ? 2.0f : 1.4f);
+        }
+        br_stroke->Release();
+    }
+
+    static void draw_wave_icon_gdi(HDC hdc, const RECT& rc, int wave, bool active) {
+        if (!hdc) return;
+        COLORREF bg_col = active ? RGB(56, 48, 34) : RGB(32, 34, 31);
+        COLORREF border_col = active ? gdi_accent() : RGB(53, 54, 50);
+        GuiRenderer::draw_rounded_box(hdc, rc, bg_col, border_col, 2);
+
+        HPEN pen_stroke = CreatePen(PS_SOLID, active ? 2 : 1, active ? gdi_accent() : gdi_ink());
+        HPEN old_p = static_cast<HPEN>(SelectObject(hdc, pen_stroke));
+
+        int cx0 = rc.left + 4;
+        int cx1 = rc.right - 4;
+        int cy = (rc.top + rc.bottom) / 2;
+        int amp = static_cast<int>((rc.bottom - rc.top) * 0.28f);
+        int w = cx1 - cx0;
+
+        if (wave == 0) {
+            constexpr int kPts = 16;
+            for (int i = 0; i < kPts - 1; ++i) {
+                float t1 = static_cast<float>(i) / static_cast<float>(kPts - 1);
+                float t2 = static_cast<float>(i + 1) / static_cast<float>(kPts - 1);
+                MoveToEx(hdc, cx0 + static_cast<int>(t1 * w), cy - static_cast<int>(amp * std::sin(t1 * 6.2831853f)), nullptr);
+                LineTo(hdc, cx0 + static_cast<int>(t2 * w), cy - static_cast<int>(amp * std::sin(t2 * 6.2831853f)));
+            }
+        } else if (wave == 1) {
+            int mid_x = (cx0 + cx1) / 2;
+            MoveToEx(hdc, cx0, cy - amp, nullptr);
+            LineTo(hdc, mid_x, cy - amp);
+            LineTo(hdc, mid_x, cy + amp);
+            LineTo(hdc, cx1, cy + amp);
+        } else {
+            MoveToEx(hdc, cx0, cy + amp, nullptr);
+            LineTo(hdc, cx1 - 1, cy - amp);
+            LineTo(hdc, cx1 - 1, cy + amp);
+        }
+        SelectObject(hdc, old_p);
+        DeleteObject(pen_stroke);
+    }
+
+    // ========================================================================
+    // Crisp Vector Filter Curves (Direct2D & GDI)
+    // ========================================================================
+    static void draw_filter_curve_d2d(ID2D1RenderTarget* rt, const D2D1_RECT_F& rc, int type, bool active) {
+        if (!rt) return;
+        D2D1_COLOR_F bg_col = active ? D2D1::ColorF(0x38 / 255.f, 0x30 / 255.f, 0x22 / 255.f)
+                                     : D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f);
+        D2D1_COLOR_F border_col = active ? col_accent() : D2D1::ColorF(0x35 / 255.f, 0x36 / 255.f, 0x32 / 255.f);
+        D2DRenderer::draw_rounded_box(rt, rc, bg_col, border_col, 2.5f, active ? 1.5f : 1.0f);
+
+        ID2D1SolidColorBrush* br_stroke = nullptr;
+        rt->CreateSolidColorBrush(active ? col_accent() : col_ink(), &br_stroke);
+        if (!br_stroke) return;
+
+        float cx0 = rc.left + 5.0f;
+        float cx1 = rc.right - 5.0f;
+        float cy = (rc.top + rc.bottom) * 0.5f;
+        float amp = (rc.bottom - rc.top) * 0.28f;
+        float mid_x = (cx0 + cx1) * 0.5f;
+
+        if (type == 0) {
+            D2D1_POINT_2F pts[4] = {
+                D2D1::Point2F(cx0, cy - amp),
+                D2D1::Point2F(cx0 + (cx1 - cx0) * 0.45f, cy - amp),
+                D2D1::Point2F(cx0 + (cx1 - cx0) * 0.55f, cy - amp - 2.0f),
+                D2D1::Point2F(cx1, cy + amp)
+            };
+            rt->DrawLine(pts[0], pts[1], br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(pts[1], pts[2], br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(pts[2], pts[3], br_stroke, active ? 2.0f : 1.4f);
+        } else if (type == 1) {
+            D2D1_POINT_2F pts[4] = {
+                D2D1::Point2F(cx0, cy + amp),
+                D2D1::Point2F(cx0 + (cx1 - cx0) * 0.45f, cy - amp - 2.0f),
+                D2D1::Point2F(cx0 + (cx1 - cx0) * 0.55f, cy - amp),
+                D2D1::Point2F(cx1, cy - amp)
+            };
+            rt->DrawLine(pts[0], pts[1], br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(pts[1], pts[2], br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(pts[2], pts[3], br_stroke, active ? 2.0f : 1.4f);
+        } else if (type == 2) {
+            rt->DrawLine(D2D1::Point2F(cx0, cy + amp), D2D1::Point2F(mid_x, cy - amp - 2.0f), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x, cy - amp - 2.0f), D2D1::Point2F(cx1, cy + amp), br_stroke, active ? 2.0f : 1.4f);
+        } else {
+            rt->DrawLine(D2D1::Point2F(cx0, cy - amp), D2D1::Point2F(mid_x - 3.0f, cy - amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x - 3.0f, cy - amp), D2D1::Point2F(mid_x, cy + amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x, cy + amp), D2D1::Point2F(mid_x + 3.0f, cy - amp), br_stroke, active ? 2.0f : 1.4f);
+            rt->DrawLine(D2D1::Point2F(mid_x + 3.0f, cy - amp), D2D1::Point2F(cx1, cy - amp), br_stroke, active ? 2.0f : 1.4f);
+        }
+        br_stroke->Release();
+    }
+
+    static void draw_filter_curve_gdi(HDC hdc, const RECT& rc, int type, bool active) {
+        if (!hdc) return;
+        COLORREF bg_col = active ? RGB(56, 48, 34) : RGB(32, 34, 31);
+        COLORREF border_col = active ? gdi_accent() : RGB(53, 54, 50);
+        GuiRenderer::draw_rounded_box(hdc, rc, bg_col, border_col, 2);
+
+        HPEN pen_stroke = CreatePen(PS_SOLID, active ? 2 : 1, active ? gdi_accent() : gdi_ink());
+        HPEN old_p = static_cast<HPEN>(SelectObject(hdc, pen_stroke));
+
+        int cx0 = rc.left + 5;
+        int cx1 = rc.right - 5;
+        int cy = (rc.top + rc.bottom) / 2;
+        int amp = static_cast<int>((rc.bottom - rc.top) * 0.28f);
+        int mid_x = (cx0 + cx1) / 2;
+
+        if (type == 0) {
+            MoveToEx(hdc, cx0, cy - amp, nullptr);
+            LineTo(hdc, cx0 + static_cast<int>((cx1 - cx0) * 0.45f), cy - amp);
+            LineTo(hdc, cx0 + static_cast<int>((cx1 - cx0) * 0.55f), cy - amp - 2);
+            LineTo(hdc, cx1, cy + amp);
+        } else if (type == 1) {
+            MoveToEx(hdc, cx0, cy + amp, nullptr);
+            LineTo(hdc, cx0 + static_cast<int>((cx1 - cx0) * 0.45f), cy - amp - 2);
+            LineTo(hdc, cx0 + static_cast<int>((cx1 - cx0) * 0.55f), cy - amp);
+            LineTo(hdc, cx1, cy - amp);
+        } else if (type == 2) {
+            MoveToEx(hdc, cx0, cy + amp, nullptr);
+            LineTo(hdc, mid_x, cy - amp - 2);
+            LineTo(hdc, cx1, cy + amp);
+        } else {
+            MoveToEx(hdc, cx0, cy - amp, nullptr);
+            LineTo(hdc, mid_x - 3, cy - amp);
+            LineTo(hdc, mid_x, cy + amp);
+            LineTo(hdc, mid_x + 3, cy - amp);
+            LineTo(hdc, cx1, cy - amp);
+        }
+        SelectObject(hdc, old_p);
+        DeleteObject(pen_stroke);
     }
 
     // ========================================================================
@@ -386,11 +637,25 @@ public:
         float grid_y = my + 94.0f;
         float grid_w = mixer_x - grid_x - 12.0f;
         float grid_h = mixer_h;
+        float top_h = (grid_h - 10.0f) * 0.64f;
+        float flt_y = grid_y + top_h + 10.0f;
+        float flt_h = grid_h - top_h - 10.0f;
+        float osc_total_w = (grid_w - 10.0f) * 0.64f;
+        float amp_x = grid_x + osc_total_w + 10.0f;
+        float amp_w = grid_w - osc_total_w - 10.0f;
+        float osc_col_w = (osc_total_w - 8.0f) * 0.5f;
+        float osc_row_h = (top_h - 8.0f) * 0.5f;
+        float flt_col_w = (grid_w - 10.0f) * 0.5f;
+
+        float mod_col_w = (grid_w - 10.0f) * 0.5f;
+        float mod_row_h = (grid_h - 8.0f) * 0.5f;
+
+        // Legacy col_w / row_h for Tab 2
         float col_w = (grid_w - 10.0f) * 0.5f;
         float row_h = (grid_h - 12.0f) / 3.0f;
 
         // 4. Tabs Bar (aligned with grid_w)
-        const char* tab_names[3] = {"OSCILLATORS + FILTERS", "ENVELOPES + ROUTING", "EFFECTS + PERFORMANCE"};
+        const char* tab_names[3] = {"OSCILLATORS + FILTERS", "MOD ENVELOPES + ROUTING", "EFFECTS + PERFORMANCE"};
         float tab_w = (grid_w - 16.0f) / 3.0f;
         for (int t = 0; t < 3; ++t) {
             float tx = grid_x + static_cast<float>(t) * (tab_w + 8.0f);
@@ -406,11 +671,13 @@ public:
         D2D1_RECT_F mixer_rc = D2D1::RectF(mixer_x, mixer_y, mixer_x + mixer_w, mixer_y + mixer_h);
         draw_module_panel_d2d(rt, font_bold, font_small, mixer_rc, "OUTPUT MIXER", "Post FX / soft ceiling");
 
-        // Mixer Power
+        // Mixer Power (Illuminated Radio/LED Switch)
         bool m_on = synth->get_param_by_id("master_on") > 0.5f;
-        D2D1_RECT_F m_pwr_rc = D2D1::RectF(mixer_x + 20.0f, mixer_y + 48.0f, mixer_x + mixer_w - 20.0f, mixer_y + 74.0f);
-        D2DRenderer::draw_button(rt, font_bold, m_pwr_rc, m_on ? "OUTPUT ON" : "MUTED", m_on, col_accent(),
-                                 D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 3.0f);
+        D2D1_RECT_F m_pwr_rc = D2D1::RectF(mixer_x + 20.0f, mixer_y + 48.0f, mixer_x + 50.0f, mixer_y + 66.0f);
+        draw_toggle_led_d2d(rt, m_pwr_rc, m_on);
+        D2D1_RECT_F m_lbl_rc = D2D1::RectF(mixer_x + 56.0f, mixer_y + 48.0f, mixer_x + mixer_w - 20.0f, mixer_y + 66.0f);
+        D2DRenderer::draw_text(rt, font_small, m_on ? "OUTPUT ON" : "MUTED", m_lbl_rc, m_on ? col_accent() : col_muted(),
+                               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         // Master Gain Knob
         float m_gain = synth->get_param_by_id("master_gain");
@@ -438,142 +705,171 @@ public:
                                      D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 3.0f);
         }
 
-        auto render_osc = [&](int osc_idx, float px, float py) {
+        auto render_osc = [&](int osc_idx, float px, float py, float pw, float ph) {
             std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
-            D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
+            D2D1_RECT_F prc = D2D1::RectF(px, py, px + pw, py + ph);
             draw_module_panel_d2d(rt, font_bold, font_small, prc,
-                                  "OSC " + std::to_string(osc_idx + 1), "PolyBLEP / unison 1-12");
+                                  "OSC " + std::to_string(osc_idx + 1), "PolyBLEP / 1-12 voices");
 
             bool on = synth->get_param_by_id(o_prefix + "on") > 0.5f;
-            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 44.0f, px + 44.0f, py + 68.0f);
-            D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(),
-                                     D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 6.0f, py + 42.0f, px + 34.0f, py + 60.0f);
+            draw_toggle_led_d2d(rt, pwr_rc, on);
 
-            // Wave buttons: Sine, Square, Saw
+            // Wave buttons: Sine, Square, Saw (vector icons)
             int wave = static_cast<int>(std::round(synth->get_param_by_id(o_prefix + "wave")));
-            const char* w_names[3] = {"SIN", "SQR", "SAW"};
             for (int w = 0; w < 3; ++w) {
-                float wx = px + 48.0f + static_cast<float>(w) * 32.0f;
-                D2D1_RECT_F wrc = D2D1::RectF(wx, py + 44.0f, wx + 29.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, wrc, w_names[w], (w == wave), col_accent(),
-                                         D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                float wx = px + 38.0f + static_cast<float>(w) * 24.0f;
+                D2D1_RECT_F wrc = D2D1::RectF(wx, py + 40.0f, wx + 21.0f, py + 62.0f);
+                draw_wave_icon_d2d(rt, wrc, w, (w == wave));
             }
 
-            // Unison counter: [-] N [+]
+            // Unison counter: [-] U N [+]
             int voices = static_cast<int>(std::round(synth->get_param_by_id(o_prefix + "voices"))) + 1;
-            D2D1_RECT_F uni_dn = D2D1::RectF(px + 152.0f, py + 44.0f, px + 170.0f, py + 68.0f);
-            D2D1_RECT_F uni_val = D2D1::RectF(px + 172.0f, py + 44.0f, px + 214.0f, py + 68.0f);
-            D2D1_RECT_F uni_up = D2D1::RectF(px + 216.0f, py + 44.0f, px + 234.0f, py + 68.0f);
+            D2D1_RECT_F uni_dn = D2D1::RectF(px + 112.0f, py + 40.0f, px + 128.0f, py + 62.0f);
+            D2D1_RECT_F uni_val = D2D1::RectF(px + 130.0f, py + 40.0f, px + 158.0f, py + 62.0f);
+            D2D1_RECT_F uni_up = D2D1::RectF(px + 160.0f, py + 40.0f, px + 176.0f, py + 62.0f);
             D2DRenderer::draw_button(rt, font_bold, uni_dn, "-", false, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
             D2DRenderer::draw_rounded_box(rt, uni_val, D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), D2D1::ColorF(0x35 / 255.f, 0x36 / 255.f, 0x32 / 255.f), 2.5f);
-            D2DRenderer::draw_text(rt, font_small, "U " + std::to_string(voices), uni_val, col_ink(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            D2DRenderer::draw_text(rt, font_small, "U " + std::to_string(voices), uni_val, col_ink(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             D2DRenderer::draw_button(rt, font_bold, uni_up, "+", false, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
 
             // Responsive Tune & Phase Knobs
-            float tune_x = px + 238.0f;
-            float rem_w = std::max(60.0f, (px + col_w - 6.0f) - tune_x);
+            float tune_x = px + 180.0f;
+            float rem_w = std::max(40.0f, (px + pw - 4.0f) - tune_x);
             float half_w = rem_w * 0.5f;
 
             int tune_idx = xosc::index(o_prefix + "tune");
             float tune_val = synth->get_param_by_id(o_prefix + "tune");
-            D2D1_RECT_F tune_rc = D2D1::RectF(tune_x, py + 38.0f, tune_x + half_w - 2.0f, py + 98.0f);
+            D2D1_RECT_F tune_rc = D2D1::RectF(tune_x, py + 36.0f, tune_x + half_w - 2.0f, py + 92.0f);
             draw_knob_d2d(rt, font_bold, font_small, tune_rc, synth->get_parameter(static_cast<uint32_t>(tune_idx)),
                           "TUNE", format_param_val(xosc::specs()[tune_idx], tune_val), !on);
 
             int phase_idx = xosc::index(o_prefix + "phase");
             float phase_val = synth->get_param_by_id(o_prefix + "phase");
-            D2D1_RECT_F phase_rc = D2D1::RectF(tune_x + half_w + 2.0f, py + 38.0f, px + col_w - 6.0f, py + 98.0f);
+            D2D1_RECT_F phase_rc = D2D1::RectF(tune_x + half_w + 2.0f, py + 36.0f, px + pw - 4.0f, py + 92.0f);
             draw_knob_d2d(rt, font_bold, font_small, phase_rc, synth->get_parameter(static_cast<uint32_t>(phase_idx)),
                           "PHASE", format_param_val(xosc::specs()[phase_idx], phase_val), !on);
 
             // Bottom Knobs: Vol, Pan, Detune, Stereo
-            float k_w = (col_w - 20.0f) * 0.25f;
+            float k_w = (pw - 12.0f) * 0.25f;
             const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
             const char* osc_knob_titles[4] = {"VOL", "PAN", "DETUNE", "STEREO"};
             for (int k = 0; k < 4; ++k) {
                 int kidx = xosc::index(o_prefix + osc_knob_ids[k]);
                 float kval = synth->get_param_by_id(o_prefix + osc_knob_ids[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 96.0f, kx + k_w, py + row_h - 4.0f);
+                float kx = px + 6.0f + static_cast<float>(k) * k_w;
+                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 94.0f, kx + k_w, py + ph - 4.0f);
                 draw_knob_d2d(rt, font_bold, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
                               osc_knob_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
             }
         };
 
-        auto render_filter = [&](int flt_idx, float px, float py) {
+        auto render_amp_env = [&](int amp_idx, float px, float py, float pw, float ph) {
+            std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
+            D2D1_RECT_F prc = D2D1::RectF(px, py, px + pw, py + ph);
+            draw_module_panel_d2d(rt, font_bold, font_small, prc,
+                                  "AMP ENV " + std::to_string(amp_idx + 1),
+                                  "After filters / multiple envelopes multiply");
+
+            bool on = synth->get_param_by_id(a_prefix + "on") > 0.5f;
+            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+            draw_toggle_led_d2d(rt, pwr_rc, on);
+
+            // OSC Routing: [O1] [O2] [O3] [O4]
+            float r_start = px + 44.0f;
+            for (int r = 0; r < 4; ++r) {
+                bool routed = synth->get_param_by_id(a_prefix + "route" + std::to_string(r)) > 0.5f;
+                float rx = r_start + static_cast<float>(r) * 34.0f;
+                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 40.0f, rx + 30.0f, py + 62.0f);
+                D2DRenderer::draw_button(rt, font_small, r_rc, "O" + std::to_string(r + 1), routed, col_accent(),
+                                         D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+            }
+
+            // ADSR Knobs
+            float k_w = (pw - 16.0f) * 0.25f;
+            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+            const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
+            for (int k = 0; k < 4; ++k) {
+                int kidx = xosc::index(a_prefix + env_knobs[k]);
+                float kval = synth->get_param_by_id(a_prefix + env_knobs[k]);
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 68.0f, kx + k_w, py + ph - 4.0f);
+                draw_knob_d2d(rt, font_bold, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
+                              env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
+            }
+        };
+
+        auto render_filter = [&](int flt_idx, float px, float py, float pw, float ph) {
             std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
-            D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
+            D2D1_RECT_F prc = D2D1::RectF(px, py, px + pw, py + ph);
             draw_module_panel_d2d(rt, font_bold, font_small, prc,
                                   "FILTER " + std::to_string(flt_idx + 1),
                                   flt_idx == 0 ? "Per oscillator / before Filter 2" : "Per oscillator / after Filter 1");
 
             bool on = synth->get_param_by_id(f_prefix + "on") > 0.5f;
-            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-            D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(),
-                                     D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+            draw_toggle_led_d2d(rt, pwr_rc, on);
 
-            // Filter Type: [LP] [HP] [BP] [NOTCH]
+            // Filter Type: [LP] [HP] [BP] [NOTCH] (vector curve icons)
             int type = static_cast<int>(std::round(synth->get_param_by_id(f_prefix + "type")));
-            const char* type_names[4] = {"LP", "HP", "BP", "NOTCH"};
             for (int t = 0; t < 4; ++t) {
-                float tx = px + 54.0f + static_cast<float>(t) * 38.0f;
-                D2D1_RECT_F trc = D2D1::RectF(tx, py + 44.0f, tx + 34.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, trc, type_names[t], (t == type), col_accent(),
-                                         D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                float tx = px + 44.0f + static_cast<float>(t) * 34.0f;
+                D2D1_RECT_F trc = D2D1::RectF(tx, py + 40.0f, tx + 30.0f, py + 62.0f);
+                draw_filter_curve_d2d(rt, trc, t, (t == type));
             }
 
             // OSC Routing: [O1] [O2] [O3] [O4]
-            float r_start = px + 215.0f;
+            float r_start = px + 186.0f;
             for (int r = 0; r < 4; ++r) {
                 bool routed = synth->get_param_by_id(f_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 44.0f;
-                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 44.0f, rx + 38.0f, py + 68.0f);
+                float rx = r_start + static_cast<float>(r) * 34.0f;
+                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 40.0f, rx + 30.0f, py + 62.0f);
                 D2DRenderer::draw_button(rt, font_small, r_rc, "O" + std::to_string(r + 1), routed, col_accent(),
                                          D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
             }
 
             // Knobs: Cutoff, Resonance, Drive
-            float k_w = (col_w - 20.0f) / 3.0f;
+            float k_w = (pw - 16.0f) / 3.0f;
             const char* flt_knobs[3] = {"cutoff", "res", "drive"};
             const char* flt_titles[3] = {"CUTOFF", "RESONANCE", "DRIVE"};
             for (int k = 0; k < 3; ++k) {
                 int kidx = xosc::index(f_prefix + flt_knobs[k]);
                 float kval = synth->get_param_by_id(f_prefix + flt_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 96.0f, kx + k_w, py + row_h - 4.0f);
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 68.0f, kx + k_w, py + ph - 4.0f);
                 draw_knob_d2d(rt, font_bold, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
                               flt_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
             }
         };
 
-        auto render_mod_env = [&](int env_idx, float px, float py) {
+        auto render_mod_env = [&](int env_idx, float px, float py, float pw, float ph) {
             std::string e_prefix = "e" + std::to_string(env_idx) + "_";
-            D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
+            D2D1_RECT_F prc = D2D1::RectF(px, py, px + pw, py + ph);
             draw_module_panel_d2d(rt, font_bold, font_small, prc,
                                   "MOD ENV " + std::to_string(env_idx + 1),
-                                  "Target + bipolar mix / select OSC destinations");
+                                  "Target dropdown + mix / select destinations");
 
             bool on = synth->get_param_by_id(e_prefix + "on") > 0.5f;
-            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-            D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(),
-                                     D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+            draw_toggle_led_d2d(rt, pwr_rc, on);
 
-            // Target [VOL] [PITCH] [CUT]
-            int target = static_cast<int>(std::round(synth->get_param_by_id(e_prefix + "target")));
-            const char* tgt_names[3] = {"VOL", "PIT", "CUT"};
-            for (int t = 0; t < 3; ++t) {
-                float tx = px + 54.0f + static_cast<float>(t) * 36.0f;
-                D2D1_RECT_F trc = D2D1::RectF(tx, py + 44.0f, tx + 32.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, trc, tgt_names[t], (t == target), col_accent(),
-                                         D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
-            }
+            // Target dropdown selector
+            int target = std::clamp(static_cast<int>(std::round(synth->get_param_by_id(e_prefix + "target"))), 0, 8);
+            const char* tgt_names[9] = {
+                "Osc Volume", "Osc Pitch", "Cutoff", "Flt 1 Cutoff",
+                "Flt 1 Res", "Flt 2 Cutoff", "Flt 2 Res", "Filter Drive", "Osc Pan"
+            };
+            D2D1_RECT_F dd_rc = D2D1::RectF(px + 42.0f, py + 40.0f, px + 175.0f, py + 62.0f);
+            std::string dd_label = std::string(tgt_names[target]) + "  ▼";
+            D2DRenderer::draw_button(rt, font_small, dd_rc, dd_label, on, col_accent(),
+                             D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
 
             // OSC Routing: [O1] [O2] [O3] [O4]
-            float r_start = px + 170.0f;
+            float r_start = px + 182.0f;
             for (int r = 0; r < 4; ++r) {
                 bool routed = synth->get_param_by_id(e_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 38.0f;
-                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 44.0f, rx + 33.0f, py + 68.0f);
+                float rx = r_start + static_cast<float>(r) * 32.0f;
+                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 40.0f, rx + 28.0f, py + 62.0f);
                 D2DRenderer::draw_button(rt, font_small, r_rc, "O" + std::to_string(r + 1), routed, col_accent(),
                                          D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
             }
@@ -581,76 +877,42 @@ public:
             // Mix Knob
             int mix_idx = xosc::index(e_prefix + "mix");
             float mix_val = synth->get_param_by_id(e_prefix + "mix");
-            D2D1_RECT_F mix_rc = D2D1::RectF(px + 330.0f, py + 38.0f, px + col_w - 6.0f, py + 98.0f);
+            D2D1_RECT_F mix_rc = D2D1::RectF(px + 316.0f, py + 36.0f, px + pw - 8.0f, py + 92.0f);
             draw_knob_d2d(rt, font_bold, font_small, mix_rc, synth->get_parameter(static_cast<uint32_t>(mix_idx)),
                           "MIX", format_param_val(xosc::specs()[mix_idx], mix_val), !on);
 
             // ADSR Knobs
-            float k_w = (col_w - 20.0f) * 0.25f;
+            float k_w = (pw - 16.0f) * 0.25f;
             const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
             const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
             for (int k = 0; k < 4; ++k) {
                 int kidx = xosc::index(e_prefix + env_knobs[k]);
                 float kval = synth->get_param_by_id(e_prefix + env_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 96.0f, kx + k_w, py + row_h - 4.0f);
-                draw_knob_d2d(rt, font_bold, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
-                              env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
-            }
-        };
-
-        auto render_amp_env = [&](int amp_idx, float px, float py) {
-            std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
-            D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
-            draw_module_panel_d2d(rt, font_bold, font_small, prc,
-                                  "AMP ENV " + std::to_string(amp_idx + 1),
-                                  "After filters / multiple envelopes multiply");
-
-            bool on = synth->get_param_by_id(a_prefix + "on") > 0.5f;
-            D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-            D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(),
-                                     D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
-
-            // OSC Routing: [O1] [O2] [O3] [O4]
-            float r_start = px + 60.0f;
-            for (int r = 0; r < 4; ++r) {
-                bool routed = synth->get_param_by_id(a_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 44.0f;
-                D2D1_RECT_F r_rc = D2D1::RectF(rx, py + 44.0f, rx + 38.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, r_rc, "OSC " + std::to_string(r + 1), routed, col_accent(),
-                                         D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
-            }
-
-            // ADSR Knobs
-            float k_w = (col_w - 20.0f) * 0.25f;
-            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-            const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
-            for (int k = 0; k < 4; ++k) {
-                int kidx = xosc::index(a_prefix + env_knobs[k]);
-                float kval = synth->get_param_by_id(a_prefix + env_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 96.0f, kx + k_w, py + row_h - 4.0f);
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                D2D1_RECT_F k_rc = D2D1::RectF(kx, py + 96.0f, kx + k_w, py + ph - 6.0f);
                 draw_knob_d2d(rt, font_bold, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
                               env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
             }
         };
 
         if (active_tab == 0) {
-            // OSCILLATORS + FILTERS
-            render_osc(0, grid_x, grid_y);
-            render_osc(1, grid_x + col_w + 10.0f, grid_y);
-            render_osc(2, grid_x, grid_y + row_h + 6.0f);
-            render_osc(3, grid_x + col_w + 10.0f, grid_y + row_h + 6.0f);
-            render_filter(0, grid_x, grid_y + (row_h + 6.0f) * 2.0f);
-            render_filter(1, grid_x + col_w + 10.0f, grid_y + (row_h + 6.0f) * 2.0f);
+            // OSCILLATORS + FILTERS (Layout: 2x2 Osc on left, 2 Amp Envs on right, 2 Filters underneath)
+            render_osc(0, grid_x, grid_y, osc_col_w, osc_row_h);
+            render_osc(1, grid_x + osc_col_w + 8.0f, grid_y, osc_col_w, osc_row_h);
+            render_osc(2, grid_x, grid_y + osc_row_h + 8.0f, osc_col_w, osc_row_h);
+            render_osc(3, grid_x + osc_col_w + 8.0f, grid_y + osc_row_h + 8.0f, osc_col_w, osc_row_h);
+
+            render_amp_env(0, amp_x, grid_y, amp_w, osc_row_h);
+            render_amp_env(1, amp_x, grid_y + osc_row_h + 8.0f, amp_w, osc_row_h);
+
+            render_filter(0, grid_x, flt_y, flt_col_w, flt_h);
+            render_filter(1, grid_x + flt_col_w + 10.0f, flt_y, flt_col_w, flt_h);
         } else if (active_tab == 1) {
-            // ENVELOPES + ROUTING
-            render_mod_env(0, grid_x, grid_y);
-            render_mod_env(1, grid_x + col_w + 10.0f, grid_y);
-            render_mod_env(2, grid_x, grid_y + row_h + 6.0f);
-            render_mod_env(3, grid_x + col_w + 10.0f, grid_y + row_h + 6.0f);
-            render_amp_env(0, grid_x, grid_y + (row_h + 6.0f) * 2.0f);
-            render_amp_env(1, grid_x + col_w + 10.0f, grid_y + (row_h + 6.0f) * 2.0f);
+            // MOD ENVELOPES + ROUTING (2x2 Grid)
+            render_mod_env(0, grid_x, grid_y, mod_col_w, mod_row_h);
+            render_mod_env(1, grid_x + mod_col_w + 10.0f, grid_y, mod_col_w, mod_row_h);
+            render_mod_env(2, grid_x, grid_y + mod_row_h + 8.0f, mod_col_w, mod_row_h);
+            render_mod_env(3, grid_x + mod_col_w + 10.0f, grid_y + mod_row_h + 8.0f, mod_col_w, mod_row_h);
         } else {
             // EFFECTS + PERFORMANCE
             // Panel 1: DISTORTION
@@ -660,8 +922,8 @@ public:
                 D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "01 / DISTORTION", "Warm saturation / parallel mix");
                 bool on = synth->get_param_by_id("dist_on") > 0.5f;
-                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+                draw_toggle_led_d2d(rt, pwr_rc, on);
 
                 int d_idx = xosc::index("dist_drive");
                 int m_idx = xosc::index("dist_mix");
@@ -680,8 +942,8 @@ public:
                 D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "02 / EQ", "Three broad tone bands");
                 bool on = synth->get_param_by_id("eq_on") > 0.5f;
-                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+                draw_toggle_led_d2d(rt, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* eq_ids[3] = {"eq_low", "eq_mid", "eq_high"};
@@ -702,8 +964,8 @@ public:
                 D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "03 / COMPRESSOR", "Stereo linked / peak detection");
                 bool on = synth->get_param_by_id("comp_on") > 0.5f;
-                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+                draw_toggle_led_d2d(rt, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 5.0f;
                 const char* comp_ids[5] = {"comp_threshold", "comp_ratio", "comp_attack", "comp_release", "comp_makeup"};
@@ -724,8 +986,8 @@ public:
                 D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "04 / DELAY", "Stereo / time in seconds");
                 bool on = synth->get_param_by_id("delay_on") > 0.5f;
-                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+                draw_toggle_led_d2d(rt, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* dly_ids[3] = {"delay_time", "delay_feedback", "delay_mix"};
@@ -746,8 +1008,8 @@ public:
                 D2D1_RECT_F prc = D2D1::RectF(px, py, px + col_w, py + row_h);
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "05 / REVERB", "Stereo room / damped decay");
                 bool on = synth->get_param_by_id("reverb_on") > 0.5f;
-                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 10.0f, py + 44.0f, px + 48.0f, py + 68.0f);
-                D2DRenderer::draw_button(rt, font_small, pwr_rc, on ? "ON" : "OFF", on, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F pwr_rc = D2D1::RectF(px + 8.0f, py + 42.0f, px + 36.0f, py + 60.0f);
+                draw_toggle_led_d2d(rt, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* rev_ids[3] = {"reverb_size", "reverb_damp", "reverb_mix"};
@@ -769,12 +1031,18 @@ public:
                 draw_module_panel_d2d(rt, font_bold, font_small, prc, "06 / PERFORMANCE", "N: every transition / S: overlapping keys");
 
                 bool mono = synth->get_param_by_id("mono_legato") > 0.5f;
-                D2D1_RECT_F mono_rc = D2D1::RectF(px + 14.0f, py + 44.0f, px + 130.0f, py + 70.0f);
-                D2DRenderer::draw_button(rt, font_small, mono_rc, "MONO LEGATO", mono, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F mono_rc = D2D1::RectF(px + 14.0f, py + 46.0f, px + 42.0f, py + 64.0f);
+                draw_toggle_led_d2d(rt, mono_rc, mono);
+                D2D1_RECT_F mono_lbl = D2D1::RectF(px + 46.0f, py + 44.0f, px + 130.0f, py + 66.0f);
+                D2DRenderer::draw_text(rt, font_small, "MONO LEGATO", mono_lbl, mono ? col_accent() : col_muted(),
+                                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
                 bool glide = synth->get_param_by_id("glide_on") > 0.5f;
-                D2D1_RECT_F glide_rc = D2D1::RectF(px + 136.0f, py + 44.0f, px + 250.0f, py + 70.0f);
-                D2DRenderer::draw_button(rt, font_small, glide_rc, "PORTAMENTO", glide, col_accent(), D2D1::ColorF(0x20 / 255.f, 0x22 / 255.f, 0x1f / 255.f), 2.5f);
+                D2D1_RECT_F glide_rc = D2D1::RectF(px + 136.0f, py + 46.0f, px + 164.0f, py + 64.0f);
+                draw_toggle_led_d2d(rt, glide_rc, glide);
+                D2D1_RECT_F glide_lbl = D2D1::RectF(px + 168.0f, py + 44.0f, px + 250.0f, py + 66.0f);
+                D2DRenderer::draw_text(rt, font_small, "PORTAMENTO", glide_lbl, glide ? col_accent() : col_muted(),
+                                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
                 // Glide mode [N] [S]
                 int gmode = static_cast<int>(std::round(synth->get_param_by_id("glide_mode")));
@@ -899,11 +1167,25 @@ public:
         float grid_y = static_cast<float>(my + 94);
         float grid_w = static_cast<float>(mixer_x - (mx + 20) - 12);
         float grid_h = static_cast<float>(mixer_h);
+        float top_h = (grid_h - 10.0f) * 0.64f;
+        float flt_y = grid_y + top_h + 10.0f;
+        float flt_h = grid_h - top_h - 10.0f;
+        float osc_total_w = (grid_w - 10.0f) * 0.64f;
+        float amp_x = grid_x + osc_total_w + 10.0f;
+        float amp_w = grid_w - osc_total_w - 10.0f;
+        float osc_col_w = (osc_total_w - 8.0f) * 0.5f;
+        float osc_row_h = (top_h - 8.0f) * 0.5f;
+        float flt_col_w = (grid_w - 10.0f) * 0.5f;
+
+        float mod_col_w = (grid_w - 10.0f) * 0.5f;
+        float mod_row_h = (grid_h - 8.0f) * 0.5f;
+
+        // Legacy col_w / row_h for Tab 2
         float col_w = (grid_w - 10.0f) * 0.5f;
         float row_h = (grid_h - 12.0f) / 3.0f;
 
         // Tabs
-        const char* tab_names[3] = {"OSCILLATORS + FILTERS", "ENVELOPES + ROUTING", "EFFECTS + PERFORMANCE"};
+        const char* tab_names[3] = {"OSCILLATORS + FILTERS", "MOD ENVELOPES + ROUTING", "EFFECTS + PERFORMANCE"};
         float tab_w = (grid_w - 16.0f) / 3.0f;
         for (int t = 0; t < 3; ++t) {
             int tx = static_cast<int>(grid_x + static_cast<float>(t) * (tab_w + 8.0f));
@@ -920,8 +1202,10 @@ public:
         draw_module_panel_gdi(hdc, font_bold, font_small, mixer_rc, "OUTPUT MIXER", "Post FX / soft ceiling");
 
         bool m_on = synth->get_param_by_id("master_on") > 0.5f;
-        RECT m_pwr_rc{mixer_x + 20, mixer_y + 48, mixer_x + mixer_w - 20, mixer_y + 74};
-        GuiRenderer::draw_button(hdc, m_pwr_rc, m_on ? "OUTPUT ON" : "MUTED", m_on, gdi_accent(), RGB(32, 34, 31));
+        RECT m_pwr_rc{mixer_x + 20, mixer_y + 48, mixer_x + 50, mixer_y + 66};
+        draw_toggle_led_gdi(hdc, m_pwr_rc, m_on);
+        RECT m_lbl_rc{mixer_x + 56, mixer_y + 48, mixer_x + mixer_w - 20, mixer_y + 66};
+        GuiRenderer::draw_text(hdc, m_on ? "OUTPUT ON" : "MUTED", m_lbl_rc, m_on ? gdi_accent() : gdi_muted(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         float m_gain = synth->get_param_by_id("master_gain");
         int m_gain_idx = xosc::index("master_gain");
@@ -947,193 +1231,195 @@ public:
         }
 
         // Module panel rendering helpers for GDI
-        auto render_osc_gdi = [&](int osc_idx, float px, float py) {
+        auto render_osc_gdi = [&](int osc_idx, float px, float py, float pw, float ph) {
             std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
-            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
+            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + pw), static_cast<int>(py + ph)};
             draw_module_panel_gdi(hdc, font_bold, font_small, prc,
-                                  "OSC " + std::to_string(osc_idx + 1), "PolyBLEP / unison 1-12");
+                                  "OSC " + std::to_string(osc_idx + 1), "PolyBLEP / 1-12 voices");
 
             bool on = synth->get_param_by_id(o_prefix + "on") > 0.5f;
-            RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 44.0f), static_cast<int>(py + 68.0f)};
-            GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+            RECT pwr_rc{static_cast<int>(px + 6.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 34.0f), static_cast<int>(py + 60.0f)};
+            draw_toggle_led_gdi(hdc, pwr_rc, on);
 
             int wave_idx = static_cast<int>(std::round(synth->get_param_by_id(o_prefix + "wave")));
-            const char* wave_names[3] = {"SIN", "SQR", "SAW"};
             for (int w = 0; w < 3; ++w) {
-                float wx = px + 50.0f + static_cast<float>(w) * 36.0f;
-                RECT wrc{static_cast<int>(wx), static_cast<int>(py + 44.0f), static_cast<int>(wx + 32.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, wrc, wave_names[w], (w == wave_idx), gdi_accent(), RGB(32, 34, 31));
+                float wx = px + 38.0f + static_cast<float>(w) * 24.0f;
+                RECT wrc{static_cast<int>(wx), static_cast<int>(py + 40.0f), static_cast<int>(wx + 21.0f), static_cast<int>(py + 62.0f)};
+                draw_wave_icon_gdi(hdc, wrc, w, (w == wave_idx));
             }
 
             int voices = static_cast<int>(std::round(synth->get_param_by_id(o_prefix + "voices"))) + 1;
-            RECT uni_down{static_cast<int>(px + 162.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 182.0f), static_cast<int>(py + 68.0f)};
-            RECT uni_txt{static_cast<int>(px + 184.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 214.0f), static_cast<int>(py + 68.0f)};
-            RECT uni_up{static_cast<int>(px + 216.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 236.0f), static_cast<int>(py + 68.0f)};
+            RECT uni_down{static_cast<int>(px + 112.0f), static_cast<int>(py + 40.0f), static_cast<int>(px + 128.0f), static_cast<int>(py + 62.0f)};
+            RECT uni_txt{static_cast<int>(px + 130.0f), static_cast<int>(py + 40.0f), static_cast<int>(px + 158.0f), static_cast<int>(py + 62.0f)};
+            RECT uni_up{static_cast<int>(px + 160.0f), static_cast<int>(py + 40.0f), static_cast<int>(px + 176.0f), static_cast<int>(py + 62.0f)};
             GuiRenderer::draw_button(hdc, uni_down, "-", false, gdi_accent(), RGB(32, 34, 31));
-            GuiRenderer::draw_text(hdc, std::to_string(voices) + "U", uni_txt, gdi_ink(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            GuiRenderer::draw_rounded_box(hdc, uni_txt, RGB(32, 34, 31), RGB(53, 54, 50), 2);
+            GuiRenderer::draw_text(hdc, "U " + std::to_string(voices), uni_txt, gdi_ink(), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             GuiRenderer::draw_button(hdc, uni_up, "+", false, gdi_accent(), RGB(32, 34, 31));
 
-            float tune_x = px + 238.0f;
-            float rem_w = std::max(60.0f, (px + col_w - 6.0f) - tune_x);
+            float tune_x = px + 180.0f;
+            float rem_w = std::max(40.0f, (px + pw - 4.0f) - tune_x);
             float half_w = rem_w * 0.5f;
 
             int tune_idx = xosc::index(o_prefix + "tune");
             float tune_val = synth->get_param_by_id(o_prefix + "tune");
-            RECT tune_rc{static_cast<int>(tune_x), static_cast<int>(py + 38.0f), static_cast<int>(tune_x + half_w - 2.0f), static_cast<int>(py + 98.0f)};
+            RECT tune_rc{static_cast<int>(tune_x), static_cast<int>(py + 36.0f), static_cast<int>(tune_x + half_w - 2.0f), static_cast<int>(py + 92.0f)};
             draw_knob_gdi(hdc, font_small, tune_rc, synth->get_parameter(static_cast<uint32_t>(tune_idx)),
                           "TUNE", format_param_val(xosc::specs()[tune_idx], tune_val), !on);
 
             int phase_idx = xosc::index(o_prefix + "phase");
             float phase_val = synth->get_param_by_id(o_prefix + "phase");
-            RECT phase_rc{static_cast<int>(tune_x + half_w + 2.0f), static_cast<int>(py + 38.0f), static_cast<int>(px + col_w - 6.0f), static_cast<int>(py + 98.0f)};
+            RECT phase_rc{static_cast<int>(tune_x + half_w + 2.0f), static_cast<int>(py + 36.0f), static_cast<int>(px + pw - 4.0f), static_cast<int>(py + 92.0f)};
             draw_knob_gdi(hdc, font_small, phase_rc, synth->get_parameter(static_cast<uint32_t>(phase_idx)),
                           "PHASE", format_param_val(xosc::specs()[phase_idx], phase_val), !on);
 
-            float k_w = (col_w - 20.0f) * 0.25f;
+            float k_w = (pw - 12.0f) * 0.25f;
             const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
             const char* osc_knob_titles[4] = {"VOL", "PAN", "DETUNE", "STEREO"};
             for (int k = 0; k < 4; ++k) {
                 int kidx = xosc::index(o_prefix + osc_knob_ids[k]);
                 float kval = synth->get_param_by_id(o_prefix + osc_knob_ids[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 96.0f), static_cast<int>(kx + k_w), static_cast<int>(py + row_h - 4.0f)};
+                float kx = px + 6.0f + static_cast<float>(k) * k_w;
+                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 94.0f), static_cast<int>(kx + k_w), static_cast<int>(py + ph - 4.0f)};
                 draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
                               osc_knob_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
             }
         };
 
-        auto render_filter_gdi = [&](int flt_idx, float px, float py) {
-            std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
-            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
-            draw_module_panel_gdi(hdc, font_bold, font_small, prc,
-                                  "FILTER " + std::to_string(flt_idx + 1),
-                                  flt_idx == 0 ? "Per oscillator / before Filter 2" : "Per oscillator / after Filter 1");
-
-            bool on = synth->get_param_by_id(f_prefix + "on") > 0.5f;
-            RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-            GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
-
-            int type = static_cast<int>(std::round(synth->get_param_by_id(f_prefix + "type")));
-            const char* type_names[4] = {"LP", "HP", "BP", "NOTCH"};
-            for (int t = 0; t < 4; ++t) {
-                float tx = px + 54.0f + static_cast<float>(t) * 38.0f;
-                RECT trc{static_cast<int>(tx), static_cast<int>(py + 44.0f), static_cast<int>(tx + 34.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, trc, type_names[t], (t == type), gdi_accent(), RGB(32, 34, 31));
-            }
-
-            float r_start = px + 215.0f;
-            for (int r = 0; r < 4; ++r) {
-                bool routed = synth->get_param_by_id(f_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 44.0f;
-                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 44.0f), static_cast<int>(rx + 38.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, r_rc, "O" + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
-            }
-
-            float k_w = (col_w - 20.0f) / 3.0f;
-            const char* flt_knobs[3] = {"cutoff", "res", "drive"};
-            const char* flt_titles[3] = {"CUTOFF", "RESONANCE", "DRIVE"};
-            for (int k = 0; k < 3; ++k) {
-                int kidx = xosc::index(f_prefix + flt_knobs[k]);
-                float kval = synth->get_param_by_id(f_prefix + flt_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 96.0f), static_cast<int>(kx + k_w), static_cast<int>(py + row_h - 4.0f)};
-                draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
-                              flt_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
-            }
-        };
-
-        auto render_mod_env_gdi = [&](int env_idx, float px, float py) {
-            std::string e_prefix = "e" + std::to_string(env_idx) + "_";
-            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
-            draw_module_panel_gdi(hdc, font_bold, font_small, prc,
-                                  "MOD ENV " + std::to_string(env_idx + 1),
-                                  "Target + bipolar mix / select OSC destinations");
-
-            bool on = synth->get_param_by_id(e_prefix + "on") > 0.5f;
-            RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-            GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
-
-            int target = static_cast<int>(std::round(synth->get_param_by_id(e_prefix + "target")));
-            const char* tgt_names[3] = {"VOL", "PIT", "CUT"};
-            for (int t = 0; t < 3; ++t) {
-                float tx = px + 54.0f + static_cast<float>(t) * 36.0f;
-                RECT trc{static_cast<int>(tx), static_cast<int>(py + 44.0f), static_cast<int>(tx + 32.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, trc, tgt_names[t], (t == target), gdi_accent(), RGB(32, 34, 31));
-            }
-
-            float r_start = px + 170.0f;
-            for (int r = 0; r < 4; ++r) {
-                bool routed = synth->get_param_by_id(e_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 38.0f;
-                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 44.0f), static_cast<int>(rx + 33.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, r_rc, "O" + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
-            }
-
-            int mix_idx = xosc::index(e_prefix + "mix");
-            float mix_val = synth->get_param_by_id(e_prefix + "mix");
-            RECT mix_rc{static_cast<int>(px + 330.0f), static_cast<int>(py + 38.0f), static_cast<int>(px + col_w - 6.0f), static_cast<int>(py + 98.0f)};
-            draw_knob_gdi(hdc, font_small, mix_rc, synth->get_parameter(static_cast<uint32_t>(mix_idx)),
-                          "MIX", format_param_val(xosc::specs()[mix_idx], mix_val), !on);
-
-            float k_w = (col_w - 20.0f) * 0.25f;
-            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-            const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
-            for (int k = 0; k < 4; ++k) {
-                int kidx = xosc::index(e_prefix + env_knobs[k]);
-                float kval = synth->get_param_by_id(e_prefix + env_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 96.0f), static_cast<int>(kx + k_w), static_cast<int>(py + row_h - 4.0f)};
-                draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
-                              env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
-            }
-        };
-
-        auto render_amp_env_gdi = [&](int amp_idx, float px, float py) {
+        auto render_amp_env_gdi = [&](int amp_idx, float px, float py, float pw, float ph) {
             std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
-            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
+            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + pw), static_cast<int>(py + ph)};
             draw_module_panel_gdi(hdc, font_bold, font_small, prc,
                                   "AMP ENV " + std::to_string(amp_idx + 1),
                                   "After filters / multiple envelopes multiply");
 
             bool on = synth->get_param_by_id(a_prefix + "on") > 0.5f;
-            RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-            GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+            RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+            draw_toggle_led_gdi(hdc, pwr_rc, on);
 
-            float r_start = px + 60.0f;
+            float r_start = px + 44.0f;
             for (int r = 0; r < 4; ++r) {
                 bool routed = synth->get_param_by_id(a_prefix + "route" + std::to_string(r)) > 0.5f;
-                float rx = r_start + static_cast<float>(r) * 44.0f;
-                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 44.0f), static_cast<int>(rx + 38.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, r_rc, "OSC " + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
+                float rx = r_start + static_cast<float>(r) * 34.0f;
+                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 40.0f), static_cast<int>(rx + 30.0f), static_cast<int>(py + 62.0f)};
+                GuiRenderer::draw_button(hdc, r_rc, "O" + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
             }
 
-            float k_w = (col_w - 20.0f) * 0.25f;
+            float k_w = (pw - 16.0f) * 0.25f;
             const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
             const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
             for (int k = 0; k < 4; ++k) {
                 int kidx = xosc::index(a_prefix + env_knobs[k]);
                 float kval = synth->get_param_by_id(a_prefix + env_knobs[k]);
-                float kx = px + 10.0f + static_cast<float>(k) * k_w;
-                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 96.0f), static_cast<int>(kx + k_w), static_cast<int>(py + row_h - 4.0f)};
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 68.0f), static_cast<int>(kx + k_w), static_cast<int>(py + ph - 4.0f)};
+                draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
+                              env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
+            }
+        };
+
+        auto render_filter_gdi = [&](int flt_idx, float px, float py, float pw, float ph) {
+            std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
+            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + pw), static_cast<int>(py + ph)};
+            draw_module_panel_gdi(hdc, font_bold, font_small, prc,
+                                  "FILTER " + std::to_string(flt_idx + 1),
+                                  flt_idx == 0 ? "Per oscillator / before Filter 2" : "Per oscillator / after Filter 1");
+
+            bool on = synth->get_param_by_id(f_prefix + "on") > 0.5f;
+            RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+            draw_toggle_led_gdi(hdc, pwr_rc, on);
+
+            int type = static_cast<int>(std::round(synth->get_param_by_id(f_prefix + "type")));
+            for (int t = 0; t < 4; ++t) {
+                float tx = px + 44.0f + static_cast<float>(t) * 34.0f;
+                RECT trc{static_cast<int>(tx), static_cast<int>(py + 40.0f), static_cast<int>(tx + 30.0f), static_cast<int>(py + 62.0f)};
+                draw_filter_curve_gdi(hdc, trc, t, (t == type));
+            }
+
+            float r_start = px + 186.0f;
+            for (int r = 0; r < 4; ++r) {
+                bool routed = synth->get_param_by_id(f_prefix + "route" + std::to_string(r)) > 0.5f;
+                float rx = r_start + static_cast<float>(r) * 34.0f;
+                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 40.0f), static_cast<int>(rx + 30.0f), static_cast<int>(py + 62.0f)};
+                GuiRenderer::draw_button(hdc, r_rc, "O" + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
+            }
+
+            float k_w = (pw - 16.0f) / 3.0f;
+            const char* flt_knobs[3] = {"cutoff", "res", "drive"};
+            const char* flt_titles[3] = {"CUTOFF", "RESONANCE", "DRIVE"};
+            for (int k = 0; k < 3; ++k) {
+                int kidx = xosc::index(f_prefix + flt_knobs[k]);
+                float kval = synth->get_param_by_id(f_prefix + flt_knobs[k]);
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 68.0f), static_cast<int>(kx + k_w), static_cast<int>(py + ph - 4.0f)};
+                draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
+                              flt_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
+            }
+        };
+
+        auto render_mod_env_gdi = [&](int env_idx, float px, float py, float pw, float ph) {
+            std::string e_prefix = "e" + std::to_string(env_idx) + "_";
+            RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + pw), static_cast<int>(py + ph)};
+            draw_module_panel_gdi(hdc, font_bold, font_small, prc,
+                                  "MOD ENV " + std::to_string(env_idx + 1),
+                                  "Target dropdown + mix / select destinations");
+
+            bool on = synth->get_param_by_id(e_prefix + "on") > 0.5f;
+            RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+            draw_toggle_led_gdi(hdc, pwr_rc, on);
+
+            int target = std::clamp(static_cast<int>(std::round(synth->get_param_by_id(e_prefix + "target"))), 0, 8);
+            const char* tgt_names[9] = {
+                "Osc Volume", "Osc Pitch", "Cutoff", "Flt 1 Cutoff",
+                "Flt 1 Res", "Flt 2 Cutoff", "Flt 2 Res", "Filter Drive", "Osc Pan"
+            };
+            RECT dd_rc{static_cast<int>(px + 42.0f), static_cast<int>(py + 40.0f), static_cast<int>(px + 175.0f), static_cast<int>(py + 62.0f)};
+            std::string dd_label = std::string(tgt_names[target]) + "  ▼";
+            GuiRenderer::draw_button(hdc, dd_rc, dd_label, on, gdi_accent(), RGB(32, 34, 31));
+
+            float r_start = px + 182.0f;
+            for (int r = 0; r < 4; ++r) {
+                bool routed = synth->get_param_by_id(e_prefix + "route" + std::to_string(r)) > 0.5f;
+                float rx = r_start + static_cast<float>(r) * 32.0f;
+                RECT r_rc{static_cast<int>(rx), static_cast<int>(py + 40.0f), static_cast<int>(rx + 28.0f), static_cast<int>(py + 62.0f)};
+                GuiRenderer::draw_button(hdc, r_rc, "O" + std::to_string(r + 1), routed, gdi_accent(), RGB(32, 34, 31));
+            }
+
+            int mix_idx = xosc::index(e_prefix + "mix");
+            float mix_val = synth->get_param_by_id(e_prefix + "mix");
+            RECT mix_rc{static_cast<int>(px + 316.0f), static_cast<int>(py + 36.0f), static_cast<int>(px + pw - 8.0f), static_cast<int>(py + 92.0f)};
+            draw_knob_gdi(hdc, font_small, mix_rc, synth->get_parameter(static_cast<uint32_t>(mix_idx)),
+                          "MIX", format_param_val(xosc::specs()[mix_idx], mix_val), !on);
+
+            float k_w = (pw - 16.0f) * 0.25f;
+            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+            const char* env_titles[4] = {"ATTACK", "DECAY", "SUSTAIN", "RELEASE"};
+            for (int k = 0; k < 4; ++k) {
+                int kidx = xosc::index(e_prefix + env_knobs[k]);
+                float kval = synth->get_param_by_id(e_prefix + env_knobs[k]);
+                float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                RECT k_rc{static_cast<int>(kx), static_cast<int>(py + 96.0f), static_cast<int>(kx + k_w), static_cast<int>(py + ph - 6.0f)};
                 draw_knob_gdi(hdc, font_small, k_rc, synth->get_parameter(static_cast<uint32_t>(kidx)),
                               env_titles[k], format_param_val(xosc::specs()[kidx], kval), !on);
             }
         };
 
         if (active_tab == 0) {
-            render_osc_gdi(0, grid_x, grid_y);
-            render_osc_gdi(1, grid_x + col_w + 10.0f, grid_y);
-            render_osc_gdi(2, grid_x, grid_y + row_h + 6.0f);
-            render_osc_gdi(3, grid_x + col_w + 10.0f, grid_y + row_h + 6.0f);
-            render_filter_gdi(0, grid_x, grid_y + (row_h + 6.0f) * 2.0f);
-            render_filter_gdi(1, grid_x + col_w + 10.0f, grid_y + (row_h + 6.0f) * 2.0f);
+            render_osc_gdi(0, grid_x, grid_y, osc_col_w, osc_row_h);
+            render_osc_gdi(1, grid_x + osc_col_w + 8.0f, grid_y, osc_col_w, osc_row_h);
+            render_osc_gdi(2, grid_x, grid_y + osc_row_h + 8.0f, osc_col_w, osc_row_h);
+            render_osc_gdi(3, grid_x + osc_col_w + 8.0f, grid_y + osc_row_h + 8.0f, osc_col_w, osc_row_h);
+
+            render_amp_env_gdi(0, amp_x, grid_y, amp_w, osc_row_h);
+            render_amp_env_gdi(1, amp_x, grid_y + osc_row_h + 8.0f, amp_w, osc_row_h);
+
+            render_filter_gdi(0, grid_x, flt_y, flt_col_w, flt_h);
+            render_filter_gdi(1, grid_x + flt_col_w + 10.0f, flt_y, flt_col_w, flt_h);
         } else if (active_tab == 1) {
-            render_mod_env_gdi(0, grid_x, grid_y);
-            render_mod_env_gdi(1, grid_x + col_w + 10.0f, grid_y);
-            render_mod_env_gdi(2, grid_x, grid_y + row_h + 6.0f);
-            render_mod_env_gdi(3, grid_x + col_w + 10.0f, grid_y + row_h + 6.0f);
-            render_amp_env_gdi(0, grid_x, grid_y + (row_h + 6.0f) * 2.0f);
-            render_amp_env_gdi(1, grid_x + col_w + 10.0f, grid_y + (row_h + 6.0f) * 2.0f);
+            render_mod_env_gdi(0, grid_x, grid_y, mod_col_w, mod_row_h);
+            render_mod_env_gdi(1, grid_x + mod_col_w + 10.0f, grid_y, mod_col_w, mod_row_h);
+            render_mod_env_gdi(2, grid_x, grid_y + mod_row_h + 8.0f, mod_col_w, mod_row_h);
+            render_mod_env_gdi(3, grid_x + mod_col_w + 10.0f, grid_y + mod_row_h + 8.0f, mod_col_w, mod_row_h);
         } else {
             // Tab 2: EFFECTS + PERFORMANCE
             // Panel 1: DISTORTION
@@ -1143,8 +1429,8 @@ public:
                 RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "01 / DISTORTION", "Warm saturation / parallel mix");
                 bool on = synth->get_param_by_id("dist_on") > 0.5f;
-                RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+                RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+                draw_toggle_led_gdi(hdc, pwr_rc, on);
 
                 int d_idx = xosc::index("dist_drive");
                 int m_idx = xosc::index("dist_mix");
@@ -1163,8 +1449,8 @@ public:
                 RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "02 / EQ", "Three broad tone bands");
                 bool on = synth->get_param_by_id("eq_on") > 0.5f;
-                RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+                RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+                draw_toggle_led_gdi(hdc, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* eq_ids[3] = {"eq_low", "eq_mid", "eq_high"};
@@ -1185,8 +1471,8 @@ public:
                 RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "03 / COMPRESSOR", "Stereo linked / peak detection");
                 bool on = synth->get_param_by_id("comp_on") > 0.5f;
-                RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+                RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+                draw_toggle_led_gdi(hdc, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 5.0f;
                 const char* comp_ids[5] = {"comp_threshold", "comp_ratio", "comp_attack", "comp_release", "comp_makeup"};
@@ -1207,8 +1493,8 @@ public:
                 RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "04 / DELAY", "Stereo / time in seconds");
                 bool on = synth->get_param_by_id("delay_on") > 0.5f;
-                RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+                RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+                draw_toggle_led_gdi(hdc, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* dly_ids[3] = {"delay_time", "delay_feedback", "delay_mix"};
@@ -1229,8 +1515,8 @@ public:
                 RECT prc{static_cast<int>(px), static_cast<int>(py), static_cast<int>(px + col_w), static_cast<int>(py + row_h)};
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "05 / REVERB", "Stereo room / damped decay");
                 bool on = synth->get_param_by_id("reverb_on") > 0.5f;
-                RECT pwr_rc{static_cast<int>(px + 10.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 48.0f), static_cast<int>(py + 68.0f)};
-                GuiRenderer::draw_button(hdc, pwr_rc, on ? "ON" : "OFF", on, gdi_accent(), RGB(32, 34, 31));
+                RECT pwr_rc{static_cast<int>(px + 8.0f), static_cast<int>(py + 42.0f), static_cast<int>(px + 36.0f), static_cast<int>(py + 60.0f)};
+                draw_toggle_led_gdi(hdc, pwr_rc, on);
 
                 float kw = (col_w - 20.0f) / 3.0f;
                 const char* rev_ids[3] = {"reverb_size", "reverb_damp", "reverb_mix"};
@@ -1252,12 +1538,16 @@ public:
                 draw_module_panel_gdi(hdc, font_bold, font_small, prc, "06 / PERFORMANCE", "N: every transition / S: overlapping keys");
 
                 bool mono = synth->get_param_by_id("mono_legato") > 0.5f;
-                RECT mono_rc{static_cast<int>(px + 14.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 130.0f), static_cast<int>(py + 70.0f)};
-                GuiRenderer::draw_button(hdc, mono_rc, "MONO LEGATO", mono, gdi_accent(), RGB(32, 34, 31));
+                RECT mono_rc{static_cast<int>(px + 14.0f), static_cast<int>(py + 46.0f), static_cast<int>(px + 42.0f), static_cast<int>(py + 64.0f)};
+                draw_toggle_led_gdi(hdc, mono_rc, mono);
+                RECT mono_lbl{static_cast<int>(px + 46.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 130.0f), static_cast<int>(py + 66.0f)};
+                GuiRenderer::draw_text(hdc, "MONO LEGATO", mono_lbl, mono ? gdi_accent() : gdi_muted(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
                 bool glide = synth->get_param_by_id("glide_on") > 0.5f;
-                RECT glide_rc{static_cast<int>(px + 136.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 250.0f), static_cast<int>(py + 70.0f)};
-                GuiRenderer::draw_button(hdc, glide_rc, "PORTAMENTO", glide, gdi_accent(), RGB(32, 34, 31));
+                RECT glide_rc{static_cast<int>(px + 136.0f), static_cast<int>(py + 46.0f), static_cast<int>(px + 164.0f), static_cast<int>(py + 64.0f)};
+                draw_toggle_led_gdi(hdc, glide_rc, glide);
+                RECT glide_lbl{static_cast<int>(px + 168.0f), static_cast<int>(py + 44.0f), static_cast<int>(px + 250.0f), static_cast<int>(py + 66.0f)};
+                GuiRenderer::draw_text(hdc, "PORTAMENTO", glide_lbl, glide ? gdi_accent() : gdi_muted(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
                 int gmode = static_cast<int>(std::round(synth->get_param_by_id("glide_mode")));
                 RECT gm_n{static_cast<int>(px + 14.0f), static_cast<int>(py + 86.0f), static_cast<int>(px + 126.0f), static_cast<int>(py + 112.0f)};
@@ -1430,232 +1720,321 @@ public:
         }
 
         // Grid Area Interaction
-        if (x >= grid_x && x <= grid_x + grid_w && y >= grid_y && y <= grid_y + grid_h) {
-            int col = (x < grid_x + col_w) ? 0 : 1;
-            int row = std::clamp(static_cast<int>((y - grid_y) / (row_h + 6.0f)), 0, 2);
-            float px = grid_x + static_cast<float>(col) * (col_w + 10.0f);
-            float py = grid_y + static_cast<float>(row) * (row_h + 6.0f);
+        float fx = static_cast<float>(x);
+        float fy = static_cast<float>(y);
+        float top_h = (grid_h - 10.0f) * 0.64f;
+        float flt_y = grid_y + top_h + 10.0f;
+        float flt_h = grid_h - top_h - 10.0f;
+        float osc_total_w = (grid_w - 10.0f) * 0.64f;
+        float amp_x = grid_x + osc_total_w + 10.0f;
+        float amp_w = grid_w - osc_total_w - 10.0f;
+        float osc_col_w = (osc_total_w - 8.0f) * 0.5f;
+        float osc_row_h = (top_h - 8.0f) * 0.5f;
+        float flt_col_w = (grid_w - 10.0f) * 0.5f;
+        float mod_col_w = (grid_w - 10.0f) * 0.5f;
+        float mod_row_h = (grid_h - 8.0f) * 0.5f;
 
-            if (active_tab == 0) {
-                if (row < 2) {
-                    // OSC 0..3
-                    int osc_idx = row * 2 + col;
-                    std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
+        if (active_tab == 0) {
+            // Tab 0: 2x2 Oscillators (top left), 2 Amp Envelopes (top right), 2 Filters (bottom)
+            if (fx >= grid_x && fx <= grid_x + osc_total_w && fy >= grid_y && fy <= grid_y + top_h) {
+                // 4 Oscillators
+                int c = (fx < grid_x + osc_col_w + 4.0f) ? 0 : 1;
+                int r = (fy < grid_y + osc_row_h + 4.0f) ? 0 : 1;
+                int osc_idx = r * 2 + c;
+                std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
+                float px = grid_x + (c == 0 ? 0.0f : (osc_col_w + 8.0f));
+                float py = grid_y + (r == 0 ? 0.0f : (osc_row_h + 8.0f));
+                float pw = osc_col_w;
+                float ph = osc_row_h;
 
-                    // Power toggle
-                    if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float cur = synth->get_param_by_id(o_prefix + "on");
-                        synth->set_param_by_id(o_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                // Power toggle (illuminated LED switch)
+                if (fx >= px + 4.0f && fx <= px + 36.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float cur = synth->get_param_by_id(o_prefix + "on");
+                    synth->set_param_by_id(o_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                    status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + ": " + (cur > 0.5f ? "OFF" : "ON");
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Wave buttons (Sine, Square, Saw)
+                for (int w = 0; w < 3; ++w) {
+                    float wx = px + 38.0f + static_cast<float>(w) * 24.0f;
+                    if (fx >= wx && fx <= wx + 23.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        synth->set_param_by_id(o_prefix + "wave", static_cast<float>(w));
+                        const char* wnames[3] = {"Sine", "Square", "Saw"};
+                        status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + " Wave: " + wnames[w];
                         InvalidateRect(hwnd, &bounds, FALSE);
                         return false;
-                    }
-                    // Waves
-                    for (int w = 0; w < 3; ++w) {
-                        float wx = px + 54.0f + static_cast<float>(w) * 36.0f;
-                        if (x >= wx && x <= wx + 32.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            synth->set_param_by_id(o_prefix + "wave", static_cast<float>(w));
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // Unison [-] and [+]
-                    if (x >= px + 168.0f && x <= px + 188.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float v = synth->get_param_by_id(o_prefix + "voices");
-                        synth->set_param_by_id(o_prefix + "voices", std::clamp(v - 1.0f, 0.0f, 11.0f));
-                        InvalidateRect(hwnd, &bounds, FALSE);
-                        return false;
-                    }
-                    if (x >= px + 244.0f && x <= px + 264.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float v = synth->get_param_by_id(o_prefix + "voices");
-                        synth->set_param_by_id(o_prefix + "voices", std::clamp(v + 1.0f, 0.0f, 11.0f));
-                        InvalidateRect(hwnd, &bounds, FALSE);
-                        return false;
-                    }
-                    // Responsive Tune & Phase Knobs
-                    float tune_x = px + 238.0f;
-                    float rem_w = std::max(60.0f, (px + col_w - 6.0f) - tune_x);
-                    float half_w = rem_w * 0.5f;
-
-                    if (static_cast<float>(x) >= tune_x && static_cast<float>(x) <= tune_x + half_w - 2.0f && y >= py + 38.0f && y <= py + 98.0f) {
-                        int idx = xosc::index(o_prefix + "tune");
-                        dragging_param_idx = idx;
-                        drag_start_y = y;
-                        drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                        return false;
-                    }
-                    if (static_cast<float>(x) >= tune_x + half_w + 2.0f && static_cast<float>(x) <= px + col_w - 6.0f && y >= py + 38.0f && y <= py + 98.0f) {
-                        int idx = xosc::index(o_prefix + "phase");
-                        dragging_param_idx = idx;
-                        drag_start_y = y;
-                        drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                        return false;
-                    }
-                    // Bottom knobs: vol, pan, detune, stereo
-                    float kw = (col_w - 20.0f) * 0.25f;
-                    const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
-                    for (int k = 0; k < 4; ++k) {
-                        float kx = px + 10.0f + static_cast<float>(k) * kw;
-                        if (x >= kx && x <= kx + kw && y >= py + 96.0f && y <= py + row_h - 4.0f) {
-                            int idx = xosc::index(o_prefix + osc_knob_ids[k]);
-                            dragging_param_idx = idx;
-                            drag_start_y = y;
-                            drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                            return false;
-                        }
-                    }
-                } else {
-                    // Filters 0..1
-                    int flt_idx = col;
-                    std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
-                    // Power
-                    if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float cur = synth->get_param_by_id(f_prefix + "on");
-                        synth->set_param_by_id(f_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
-                        InvalidateRect(hwnd, &bounds, FALSE);
-                        return false;
-                    }
-                    // Type
-                    for (int t = 0; t < 4; ++t) {
-                        float tx = px + 54.0f + static_cast<float>(t) * 38.0f;
-                        if (x >= tx && x <= tx + 34.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            synth->set_param_by_id(f_prefix + "type", static_cast<float>(t));
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // Routes
-                    float r_start = px + 215.0f;
-                    for (int r = 0; r < 4; ++r) {
-                        float rx = r_start + static_cast<float>(r) * 44.0f;
-                        if (x >= rx && x <= rx + 38.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            float cur = synth->get_param_by_id(f_prefix + "route" + std::to_string(r));
-                            synth->set_param_by_id(f_prefix + "route" + std::to_string(r), cur > 0.5f ? 0.0f : 1.0f);
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // Knobs: cutoff, res, drive
-                    float kw = (col_w - 20.0f) / 3.0f;
-                    const char* flt_knobs[3] = {"cutoff", "res", "drive"};
-                    for (int k = 0; k < 3; ++k) {
-                        float kx = px + 10.0f + static_cast<float>(k) * kw;
-                        if (x >= kx && x <= kx + kw && y >= py + 96.0f && y <= py + row_h - 4.0f) {
-                            int idx = xosc::index(f_prefix + flt_knobs[k]);
-                            dragging_param_idx = idx;
-                            drag_start_y = y;
-                            drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                            return false;
-                        }
                     }
                 }
-            } else if (active_tab == 1) {
-                if (row < 2) {
-                    // MOD ENV 0..3
-                    int env_idx = row * 2 + col;
-                    std::string e_prefix = "e" + std::to_string(env_idx) + "_";
-                    // Power
-                    if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float cur = synth->get_param_by_id(e_prefix + "on");
-                        synth->set_param_by_id(e_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
-                        InvalidateRect(hwnd, &bounds, FALSE);
-                        return false;
-                    }
-                    // Target
-                    for (int t = 0; t < 3; ++t) {
-                        float tx = px + 54.0f + static_cast<float>(t) * 36.0f;
-                        if (x >= tx && x <= tx + 32.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            synth->set_param_by_id(e_prefix + "target", static_cast<float>(t));
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // Routes
-                    float r_start = px + 170.0f;
-                    for (int r = 0; r < 4; ++r) {
-                        float rx = r_start + static_cast<float>(r) * 38.0f;
-                        if (x >= rx && x <= rx + 33.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            float cur = synth->get_param_by_id(e_prefix + "route" + std::to_string(r));
-                            synth->set_param_by_id(e_prefix + "route" + std::to_string(r), cur > 0.5f ? 0.0f : 1.0f);
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // Mix knob
-                    if (x >= px + 330.0f && x <= px + col_w - 6.0f && y >= py + 38.0f && y <= py + 98.0f) {
-                        int idx = xosc::index(e_prefix + "mix");
+                // Unison [-]
+                if (fx >= px + 108.0f && fx <= px + 129.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float v = synth->get_param_by_id(o_prefix + "voices");
+                    float nv = std::clamp(v - 1.0f, 0.0f, 11.0f);
+                    synth->set_param_by_id(o_prefix + "voices", nv);
+                    status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + " Unison: " + std::to_string(static_cast<int>(nv) + 1) + " voices";
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Unison [U N] middle value box (click left decrements, click right increments)
+                if (fx > px + 129.0f && fx < px + 159.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float v = synth->get_param_by_id(o_prefix + "voices");
+                    float nv = (fx < px + 144.0f) ? std::clamp(v - 1.0f, 0.0f, 11.0f) : std::clamp(v + 1.0f, 0.0f, 11.0f);
+                    synth->set_param_by_id(o_prefix + "voices", nv);
+                    status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + " Unison: " + std::to_string(static_cast<int>(nv) + 1) + " voices";
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Unison [+]
+                if (fx >= px + 159.0f && fx <= px + 178.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float v = synth->get_param_by_id(o_prefix + "voices");
+                    float nv = std::clamp(v + 1.0f, 0.0f, 11.0f);
+                    synth->set_param_by_id(o_prefix + "voices", nv);
+                    status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + " Unison: " + std::to_string(static_cast<int>(nv) + 1) + " voices";
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Tune knob
+                float tune_x = px + 180.0f;
+                float rem_w = std::max(40.0f, (px + pw - 4.0f) - tune_x);
+                float half_w = rem_w * 0.5f;
+                if (fx >= tune_x && fx <= tune_x + half_w - 2.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                    int idx = xosc::index(o_prefix + "tune");
+                    dragging_param_idx = idx;
+                    drag_start_y = y;
+                    drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                    return false;
+                }
+                // Phase knob
+                if (fx >= tune_x + half_w + 2.0f && fx <= px + pw - 2.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                    int idx = xosc::index(o_prefix + "phase");
+                    dragging_param_idx = idx;
+                    drag_start_y = y;
+                    drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                    return false;
+                }
+                // Bottom knobs: Vol, Pan, Detune, Stereo
+                float k_w = (pw - 12.0f) * 0.25f;
+                const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
+                for (int k = 0; k < 4; ++k) {
+                    float kx = px + 6.0f + static_cast<float>(k) * k_w;
+                    if (fx >= kx && fx <= kx + k_w && fy >= py + 94.0f && fy <= py + ph - 2.0f) {
+                        int idx = xosc::index(o_prefix + osc_knob_ids[k]);
                         dragging_param_idx = idx;
                         drag_start_y = y;
                         drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
                         return false;
                     }
-                    // ADSR knobs
-                    float kw = (col_w - 20.0f) * 0.25f;
-                    const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-                    for (int k = 0; k < 4; ++k) {
-                        float kx = px + 10.0f + static_cast<float>(k) * kw;
-                        if (x >= kx && x <= kx + kw && y >= py + 96.0f && y <= py + row_h - 4.0f) {
-                            int idx = xosc::index(e_prefix + env_knobs[k]);
-                            dragging_param_idx = idx;
-                            drag_start_y = y;
-                            drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                            return false;
-                        }
-                    }
-                } else {
-                    // AMP ENV 0..1
-                    int amp_idx = col;
-                    std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
-                    // Power
-                    if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                        float cur = synth->get_param_by_id(a_prefix + "on");
-                        synth->set_param_by_id(a_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                }
+            } else if (fx >= amp_x && fx <= amp_x + amp_w && fy >= grid_y && fy <= grid_y + top_h) {
+                // 2 Amp Envelopes
+                int r = (fy < grid_y + osc_row_h + 4.0f) ? 0 : 1;
+                int amp_idx = r;
+                std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
+                float px = amp_x;
+                float py = grid_y + (r == 0 ? 0.0f : (osc_row_h + 8.0f));
+                float pw = amp_w;
+                float ph = osc_row_h;
+
+                // Power toggle
+                if (fx >= px + 6.0f && fx <= px + 38.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float cur = synth->get_param_by_id(a_prefix + "on");
+                    synth->set_param_by_id(a_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                    status_msg = "XOSC Amp Env " + std::to_string(amp_idx + 1) + ": " + (cur > 0.5f ? "OFF" : "ON");
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // OSC Routing: [O1]..[O4]
+                float r_start = px + 44.0f;
+                for (int route = 0; route < 4; ++route) {
+                    float rx = r_start + static_cast<float>(route) * 34.0f;
+                    if (fx >= rx && fx <= rx + 32.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        float cur = synth->get_param_by_id(a_prefix + "route" + std::to_string(route));
+                        synth->set_param_by_id(a_prefix + "route" + std::to_string(route), cur > 0.5f ? 0.0f : 1.0f);
                         InvalidateRect(hwnd, &bounds, FALSE);
                         return false;
                     }
-                    // Routes
-                    float r_start = px + 60.0f;
-                    for (int r = 0; r < 4; ++r) {
-                        float rx = r_start + static_cast<float>(r) * 44.0f;
-                        if (x >= rx && x <= rx + 38.0f && y >= py + 44.0f && y <= py + 68.0f) {
-                            float cur = synth->get_param_by_id(a_prefix + "route" + std::to_string(r));
-                            synth->set_param_by_id(a_prefix + "route" + std::to_string(r), cur > 0.5f ? 0.0f : 1.0f);
-                            InvalidateRect(hwnd, &bounds, FALSE);
-                            return false;
-                        }
-                    }
-                    // ADSR knobs
-                    float kw = (col_w - 20.0f) * 0.25f;
-                    const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-                    for (int k = 0; k < 4; ++k) {
-                        float kx = px + 10.0f + static_cast<float>(k) * kw;
-                        if (x >= kx && x <= kx + kw && y >= py + 96.0f && y <= py + row_h - 4.0f) {
-                            int idx = xosc::index(a_prefix + env_knobs[k]);
-                            dragging_param_idx = idx;
-                            drag_start_y = y;
-                            drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
-                            return false;
-                        }
+                }
+                // ADSR knobs
+                float k_w = (pw - 16.0f) * 0.25f;
+                const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+                for (int k = 0; k < 4; ++k) {
+                    float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                    if (fx >= kx && fx <= kx + k_w && fy >= py + 66.0f && fy <= py + ph - 2.0f) {
+                        int idx = xosc::index(a_prefix + env_knobs[k]);
+                        dragging_param_idx = idx;
+                        drag_start_y = y;
+                        drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                        return false;
                     }
                 }
-            } else {
-                // Tab 2: EFFECTS + PERFORMANCE
+            } else if (fx >= grid_x && fx <= grid_x + grid_w && fy >= flt_y && fy <= flt_y + flt_h) {
+                // 2 Filters (bottom)
+                int c = (fx < grid_x + flt_col_w + 5.0f) ? 0 : 1;
+                int flt_idx = c;
+                std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
+                float px = grid_x + (c == 0 ? 0.0f : (flt_col_w + 10.0f));
+                float py = flt_y;
+                float pw = flt_col_w;
+                float ph = flt_h;
+
+                // Power toggle
+                if (fx >= px + 6.0f && fx <= px + 38.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float cur = synth->get_param_by_id(f_prefix + "on");
+                    synth->set_param_by_id(f_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                    status_msg = "XOSC Filter " + std::to_string(flt_idx + 1) + ": " + (cur > 0.5f ? "OFF" : "ON");
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Filter Types: [LP] [HP] [BP] [NOTCH]
+                for (int t = 0; t < 4; ++t) {
+                    float tx = px + 44.0f + static_cast<float>(t) * 34.0f;
+                    if (fx >= tx && fx <= tx + 32.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        synth->set_param_by_id(f_prefix + "type", static_cast<float>(t));
+                        const char* tnames[4] = {"Low-Pass", "High-Pass", "Band-Pass", "Notch"};
+                        status_msg = "XOSC Filter " + std::to_string(flt_idx + 1) + " Type: " + tnames[t];
+                        InvalidateRect(hwnd, &bounds, FALSE);
+                        return false;
+                    }
+                }
+                // Routes: [O1]..[O4]
+                float r_start = px + 186.0f;
+                for (int route = 0; route < 4; ++route) {
+                    float rx = r_start + static_cast<float>(route) * 34.0f;
+                    if (fx >= rx && fx <= rx + 32.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        float cur = synth->get_param_by_id(f_prefix + "route" + std::to_string(route));
+                        synth->set_param_by_id(f_prefix + "route" + std::to_string(route), cur > 0.5f ? 0.0f : 1.0f);
+                        InvalidateRect(hwnd, &bounds, FALSE);
+                        return false;
+                    }
+                }
+                // Knobs: Cutoff, Res, Drive
+                float k_w = (pw - 16.0f) / 3.0f;
+                const char* flt_knobs[3] = {"cutoff", "res", "drive"};
+                for (int k = 0; k < 3; ++k) {
+                    float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                    if (fx >= kx && fx <= kx + k_w && fy >= py + 66.0f && fy <= py + ph - 2.0f) {
+                        int idx = xosc::index(f_prefix + flt_knobs[k]);
+                        dragging_param_idx = idx;
+                        drag_start_y = y;
+                        drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                        return false;
+                    }
+                }
+            }
+        } else if (active_tab == 1) {
+            // Tab 1: 4 MOD ENVELOPES (2x2 Grid) with Target Dropdown & Destination List
+            if (fx >= grid_x && fx <= grid_x + grid_w && fy >= grid_y && fy <= grid_y + grid_h) {
+                int c = (fx < grid_x + mod_col_w + 5.0f) ? 0 : 1;
+                int r = (fy < grid_y + mod_row_h + 4.0f) ? 0 : 1;
+                int env_idx = r * 2 + c;
+                std::string e_prefix = "e" + std::to_string(env_idx) + "_";
+                float px = grid_x + (c == 0 ? 0.0f : (mod_col_w + 10.0f));
+                float py = grid_y + (r == 0 ? 0.0f : (mod_row_h + 8.0f));
+                float pw = mod_col_w;
+                float ph = mod_row_h;
+
+                // Power toggle
+                if (fx >= px + 6.0f && fx <= px + 38.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    float cur = synth->get_param_by_id(e_prefix + "on");
+                    synth->set_param_by_id(e_prefix + "on", cur > 0.5f ? 0.0f : 1.0f);
+                    status_msg = "XOSC Mod Env " + std::to_string(env_idx + 1) + ": " + (cur > 0.5f ? "OFF" : "ON");
+                    InvalidateRect(hwnd, &bounds, FALSE);
+                    return false;
+                }
+                // Target Dropdown Button [Target ▼]
+                if (fx >= px + 40.0f && fx <= px + 178.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                    const char* tgt_names[9] = {
+                        "Osc Volume", "Osc Pitch", "Cutoff (All)", "Filter 1 Cutoff",
+                        "Filter 1 Res", "Filter 2 Cutoff", "Filter 2 Res", "Filter Drive", "Osc Pan"
+                    };
+                    int cur_target = std::clamp(static_cast<int>(std::round(synth->get_param_by_id(e_prefix + "target"))), 0, 8);
+                    if (hwnd) {
+                        HMENU hMenu = CreatePopupMenu();
+                        if (hMenu) {
+                            for (int i = 0; i < 9; ++i) {
+                                UINT flags = MF_STRING;
+                                if (i == cur_target) flags |= MF_CHECKED;
+                                AppendMenuA(hMenu, flags, i + 1, tgt_names[i]);
+                            }
+                            POINT pt = { static_cast<LONG>(px + 42.0f), static_cast<LONG>(py + 64.0f) };
+                            ClientToScreen(hwnd, &pt);
+                            int selected = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd, NULL);
+                            DestroyMenu(hMenu);
+                            if (selected >= 1 && selected <= 9) {
+                                synth->set_param_by_id(e_prefix + "target", static_cast<float>(selected - 1));
+                                status_msg = "XOSC Mod Env " + std::to_string(env_idx + 1) + " Target: " + tgt_names[selected - 1];
+                                InvalidateRect(hwnd, &bounds, FALSE);
+                            }
+                            return false;
+                        }
+                    } else {
+                        // Fallback cycle when hwnd is not available
+                        int next_tgt = (cur_target + 1) % 9;
+                        synth->set_param_by_id(e_prefix + "target", static_cast<float>(next_tgt));
+                        status_msg = "XOSC Mod Env " + std::to_string(env_idx + 1) + " Target: " + tgt_names[next_tgt];
+                        InvalidateRect(hwnd, &bounds, FALSE);
+                        return false;
+                    }
+                }
+                // OSC Routing: [O1]..[O4]
+                float r_start = px + 182.0f;
+                for (int route = 0; route < 4; ++route) {
+                    float rx = r_start + static_cast<float>(route) * 32.0f;
+                    if (fx >= rx && fx <= rx + 30.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        float cur = synth->get_param_by_id(e_prefix + "route" + std::to_string(route));
+                        synth->set_param_by_id(e_prefix + "route" + std::to_string(route), cur > 0.5f ? 0.0f : 1.0f);
+                        InvalidateRect(hwnd, &bounds, FALSE);
+                        return false;
+                    }
+                }
+                // Mix knob
+                if (fx >= px + 316.0f && fx <= px + pw - 6.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                    int idx = xosc::index(e_prefix + "mix");
+                    dragging_param_idx = idx;
+                    drag_start_y = y;
+                    drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                    return false;
+                }
+                // ADSR knobs
+                float k_w = (pw - 16.0f) * 0.25f;
+                const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+                for (int k = 0; k < 4; ++k) {
+                    float kx = px + 8.0f + static_cast<float>(k) * k_w;
+                    if (fx >= kx && fx <= kx + k_w && fy >= py + 94.0f && fy <= py + ph - 4.0f) {
+                        int idx = xosc::index(e_prefix + env_knobs[k]);
+                        dragging_param_idx = idx;
+                        drag_start_y = y;
+                        drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
+                        return false;
+                    }
+                }
+            }
+        } else {
+            // Tab 2: EFFECTS + PERFORMANCE (2 Columns x 3 Rows)
+            if (fx >= grid_x && fx <= grid_x + grid_w && fy >= grid_y && fy <= grid_y + grid_h) {
+                int col = (fx < grid_x + col_w) ? 0 : 1;
+                int row = std::clamp(static_cast<int>((fy - grid_y) / (row_h + 6.0f)), 0, 2);
+                float px = grid_x + (col == 0 ? 0.0f : (col_w + 10.0f));
+                float py = grid_y + static_cast<float>(row) * (row_h + 6.0f);
+
                 if (row == 0) {
                     if (col == 0) {
                         // Distortion
-                        if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
+                        if (fx >= px + 6.0f && fx <= px + 40.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
                             float cur = synth->get_param_by_id("dist_on");
                             synth->set_param_by_id("dist_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Distortion: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
-                        if (x >= px + 60.0f && x <= px + 210.0f && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                        if (fx >= px + 60.0f && fx <= px + 210.0f && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                             int idx = xosc::index("dist_drive");
                             dragging_param_idx = idx;
                             drag_start_y = y;
                             drag_orig_val = synth->get_parameter(static_cast<uint32_t>(idx));
                             return false;
                         }
-                        if (x >= px + 220.0f && x <= px + col_w - 20.0f && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                        if (fx >= px + 220.0f && fx <= px + col_w - 20.0f && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                             int idx = xosc::index("dist_mix");
                             dragging_param_idx = idx;
                             drag_start_y = y;
@@ -1664,9 +2043,10 @@ public:
                         }
                     } else {
                         // EQ
-                        if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
+                        if (fx >= px + 6.0f && fx <= px + 40.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
                             float cur = synth->get_param_by_id("eq_on");
                             synth->set_param_by_id("eq_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC EQ: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
@@ -1674,7 +2054,7 @@ public:
                         const char* eq_ids[3] = {"eq_low", "eq_mid", "eq_high"};
                         for (int k = 0; k < 3; ++k) {
                             float kx = px + 10.0f + static_cast<float>(k) * kw;
-                            if (x >= kx && x <= kx + kw && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                            if (fx >= kx && fx <= kx + kw && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 int idx = xosc::index(eq_ids[k]);
                                 dragging_param_idx = idx;
                                 drag_start_y = y;
@@ -1686,9 +2066,10 @@ public:
                 } else if (row == 1) {
                     if (col == 0) {
                         // Compressor
-                        if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
+                        if (fx >= px + 6.0f && fx <= px + 40.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
                             float cur = synth->get_param_by_id("comp_on");
                             synth->set_param_by_id("comp_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Compressor: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
@@ -1696,7 +2077,7 @@ public:
                         const char* comp_ids[5] = {"comp_threshold", "comp_ratio", "comp_attack", "comp_release", "comp_makeup"};
                         for (int k = 0; k < 5; ++k) {
                             float kx = px + 10.0f + static_cast<float>(k) * kw;
-                            if (x >= kx && x <= kx + kw && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                            if (fx >= kx && fx <= kx + kw && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 int idx = xosc::index(comp_ids[k]);
                                 dragging_param_idx = idx;
                                 drag_start_y = y;
@@ -1706,9 +2087,10 @@ public:
                         }
                     } else {
                         // Delay
-                        if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
+                        if (fx >= px + 6.0f && fx <= px + 40.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
                             float cur = synth->get_param_by_id("delay_on");
                             synth->set_param_by_id("delay_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Delay: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
@@ -1716,7 +2098,7 @@ public:
                         const char* dly_ids[3] = {"delay_time", "delay_feedback", "delay_mix"};
                         for (int k = 0; k < 3; ++k) {
                             float kx = px + 10.0f + static_cast<float>(k) * kw;
-                            if (x >= kx && x <= kx + kw && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                            if (fx >= kx && fx <= kx + kw && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 int idx = xosc::index(dly_ids[k]);
                                 dragging_param_idx = idx;
                                 drag_start_y = y;
@@ -1728,9 +2110,10 @@ public:
                 } else {
                     if (col == 0) {
                         // Reverb
-                        if (x >= px + 10.0f && x <= px + 48.0f && y >= py + 44.0f && y <= py + 68.0f) {
+                        if (fx >= px + 6.0f && fx <= px + 40.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
                             float cur = synth->get_param_by_id("reverb_on");
                             synth->set_param_by_id("reverb_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Reverb: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
@@ -1738,7 +2121,7 @@ public:
                         const char* rev_ids[3] = {"reverb_size", "reverb_damp", "reverb_mix"};
                         for (int k = 0; k < 3; ++k) {
                             float kx = px + 10.0f + static_cast<float>(k) * kw;
-                            if (x >= kx && x <= kx + kw && y >= py + 70.0f && y <= py + row_h - 4.0f) {
+                            if (fx >= kx && fx <= kx + kw && fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 int idx = xosc::index(rev_ids[k]);
                                 dragging_param_idx = idx;
                                 drag_start_y = y;
@@ -1748,29 +2131,33 @@ public:
                         }
                     } else {
                         // Performance
-                        if (x >= px + 14.0f && x <= px + 130.0f && y >= py + 44.0f && y <= py + 70.0f) {
+                        if (fx >= px + 8.0f && fx <= px + 130.0f && fy >= py + 40.0f && fy <= py + 68.0f) {
                             float cur = synth->get_param_by_id("mono_legato");
                             synth->set_param_by_id("mono_legato", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Mono/Legato: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
-                        if (x >= px + 136.0f && x <= px + 250.0f && y >= py + 44.0f && y <= py + 70.0f) {
+                        if (fx >= px + 136.0f && fx <= px + 250.0f && fy >= py + 40.0f && fy <= py + 68.0f) {
                             float cur = synth->get_param_by_id("glide_on");
                             synth->set_param_by_id("glide_on", cur > 0.5f ? 0.0f : 1.0f);
+                            status_msg = "XOSC Glide: " + std::string(cur > 0.5f ? "OFF" : "ON");
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
-                        if (x >= px + 14.0f && x <= px + 126.0f && y >= py + 86.0f && y <= py + 112.0f) {
+                        if (fx >= px + 14.0f && fx <= px + 126.0f && fy >= py + 86.0f && fy <= py + 112.0f) {
                             synth->set_param_by_id("glide_mode", 0.0f);
+                            status_msg = "XOSC Glide Mode: Auto";
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
-                        if (x >= px + 14.0f && x <= px + 126.0f && y >= py + 116.0f && y <= py + 142.0f) {
+                        if (fx >= px + 14.0f && fx <= px + 126.0f && fy >= py + 116.0f && fy <= py + 142.0f) {
                             synth->set_param_by_id("glide_mode", 1.0f);
+                            status_msg = "XOSC Glide Mode: Always";
                             InvalidateRect(hwnd, &bounds, FALSE);
                             return false;
                         }
-                        if (x >= px + 150.0f && x <= px + col_w - 20.0f && y >= py + 76.0f && y <= py + row_h - 4.0f) {
+                        if (fx >= px + 150.0f && fx <= px + col_w - 20.0f && fy >= py + 76.0f && fy <= py + row_h - 4.0f) {
                             int idx = xosc::index("glide_time");
                             dragging_param_idx = idx;
                             drag_start_y = y;
@@ -1877,115 +2264,159 @@ public:
             target_idx = xosc::index("master_width");
         } else {
             // 2. Main Grid
+            float fx = static_cast<float>(x);
+            float fy = static_cast<float>(y);
             float grid_x = static_cast<float>(mx + 20);
             float grid_y = static_cast<float>(my + 94);
             float grid_w = static_cast<float>(mixer_x - (mx + 20) - 12);
             float grid_h = static_cast<float>(mixer_h);
+            float top_h = (grid_h - 10.0f) * 0.64f;
+            float flt_y = grid_y + top_h + 10.0f;
+            float flt_h = grid_h - top_h - 10.0f;
+            float osc_total_w = (grid_w - 10.0f) * 0.64f;
+            float amp_x = grid_x + osc_total_w + 10.0f;
+            float amp_w = grid_w - osc_total_w - 10.0f;
+            float osc_col_w = (osc_total_w - 8.0f) * 0.5f;
+            float osc_row_h = (top_h - 8.0f) * 0.5f;
+            float flt_col_w = (grid_w - 10.0f) * 0.5f;
+            float mod_col_w = (grid_w - 10.0f) * 0.5f;
+            float mod_row_h = (grid_h - 8.0f) * 0.5f;
             float col_w = (grid_w - 10.0f) * 0.5f;
             float row_h = (grid_h - 12.0f) / 3.0f;
 
-            if (static_cast<float>(x) >= grid_x && static_cast<float>(x) <= grid_x + grid_w &&
-                static_cast<float>(y) >= grid_y && static_cast<float>(y) <= grid_y + grid_h) {
-                int col = (static_cast<float>(x) < grid_x + col_w) ? 0 : 1;
-                int row = std::clamp(static_cast<int>((static_cast<float>(y) - grid_y) / (row_h + 6.0f)), 0, 2);
-                float px = grid_x + static_cast<float>(col) * (col_w + 10.0f);
-                float py = grid_y + static_cast<float>(row) * (row_h + 6.0f);
+            if (active_tab == 0) {
+                if (fx >= grid_x && fx <= grid_x + osc_total_w && fy >= grid_y && fy <= grid_y + top_h) {
+                    int c = (fx < grid_x + osc_col_w + 4.0f) ? 0 : 1;
+                    int r = (fy < grid_y + osc_row_h + 4.0f) ? 0 : 1;
+                    int osc_idx = r * 2 + c;
+                    std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
+                    float px = grid_x + (c == 0 ? 0.0f : (osc_col_w + 8.0f));
+                    float py = grid_y + (r == 0 ? 0.0f : (osc_row_h + 8.0f));
+                    float pw = osc_col_w;
+                    float ph = osc_row_h;
 
-                if (active_tab == 0) {
-                    if (row < 2) {
-                        int osc_idx = row * 2 + col;
-                        std::string o_prefix = "o" + std::to_string(osc_idx) + "_";
-                        float tune_x = px + 238.0f;
-                        float rem_w = std::max(60.0f, (px + col_w - 6.0f) - tune_x);
-                        float half_w = rem_w * 0.5f;
+                    // Unison area mouse wheel (direct increment / decrement!)
+                    if (fx >= px + 108.0f && fx <= px + 178.0f && fy >= py + 38.0f && fy <= py + 64.0f) {
+                        float v = synth->get_param_by_id(o_prefix + "voices");
+                        float nv = std::clamp(v + (steps > 0 ? 1.0f : -1.0f), 0.0f, 11.0f);
+                        synth->set_param_by_id(o_prefix + "voices", nv);
+                        status_msg = "XOSC Osc " + std::to_string(osc_idx + 1) + " Unison: " + std::to_string(static_cast<int>(nv) + 1) + " voices";
+                        return;
+                    }
 
-                        if (static_cast<float>(x) >= tune_x && static_cast<float>(x) <= tune_x + half_w - 2.0f &&
-                            static_cast<float>(y) >= py + 38.0f && static_cast<float>(y) <= py + 98.0f) {
-                            target_idx = xosc::index(o_prefix + "tune");
-                        } else if (static_cast<float>(x) >= tune_x + half_w + 2.0f && static_cast<float>(x) <= px + col_w - 6.0f &&
-                                   static_cast<float>(y) >= py + 38.0f && static_cast<float>(y) <= py + 98.0f) {
-                            target_idx = xosc::index(o_prefix + "phase");
-                        } else if (static_cast<float>(y) >= py + 96.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
-                            float kw = (col_w - 20.0f) * 0.25f;
-                            int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 3);
-                            const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
-                            target_idx = xosc::index(o_prefix + osc_knob_ids[k]);
-                        }
-                    } else {
-                        int flt_idx = col;
-                        std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
-                        if (static_cast<float>(y) >= py + 96.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
-                            float kw = (col_w - 20.0f) / 3.0f;
-                            int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 2);
-                            const char* flt_knobs[3] = {"cutoff", "res", "drive"};
-                            target_idx = xosc::index(f_prefix + flt_knobs[k]);
-                        }
+                    float tune_x = px + 180.0f;
+                    float rem_w = std::max(40.0f, (px + pw - 4.0f) - tune_x);
+                    float half_w = rem_w * 0.5f;
+
+                    if (fx >= tune_x && fx <= tune_x + half_w - 2.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                        target_idx = xosc::index(o_prefix + "tune");
+                    } else if (fx >= tune_x + half_w + 2.0f && fx <= px + pw - 2.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                        target_idx = xosc::index(o_prefix + "phase");
+                    } else if (fy >= py + 94.0f && fy <= py + ph - 2.0f) {
+                        float k_w = (pw - 12.0f) * 0.25f;
+                        int k = std::clamp(static_cast<int>((fx - (px + 6.0f)) / k_w), 0, 3);
+                        const char* osc_knob_ids[4] = {"vol", "pan", "detune", "stereo"};
+                        target_idx = xosc::index(o_prefix + osc_knob_ids[k]);
                     }
-                } else if (active_tab == 1) {
-                    if (row < 2) {
-                        int env_idx = row * 2 + col;
-                        std::string e_prefix = "e" + std::to_string(env_idx) + "_";
-                        if (static_cast<float>(x) >= px + 330.0f && static_cast<float>(x) <= px + col_w - 6.0f &&
-                            static_cast<float>(y) >= py + 38.0f && static_cast<float>(y) <= py + 98.0f) {
-                            target_idx = xosc::index(e_prefix + "mix");
-                        } else if (static_cast<float>(y) >= py + 96.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
-                            float kw = (col_w - 20.0f) * 0.25f;
-                            int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 3);
-                            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-                            target_idx = xosc::index(e_prefix + env_knobs[k]);
-                        }
-                    } else {
-                        int amp_idx = col;
-                        std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
-                        if (static_cast<float>(y) >= py + 96.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
-                            float kw = (col_w - 20.0f) * 0.25f;
-                            int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 3);
-                            const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
-                            target_idx = xosc::index(a_prefix + env_knobs[k]);
-                        }
+                } else if (fx >= amp_x && fx <= amp_x + amp_w && fy >= grid_y && fy <= grid_y + top_h) {
+                    int r = (fy < grid_y + osc_row_h + 4.0f) ? 0 : 1;
+                    int amp_idx = r;
+                    std::string a_prefix = "a" + std::to_string(amp_idx) + "_";
+                    float px = amp_x;
+                    float py = grid_y + (r == 0 ? 0.0f : (osc_row_h + 8.0f));
+                    float pw = amp_w;
+                    float ph = osc_row_h;
+
+                    if (fy >= py + 66.0f && fy <= py + ph - 2.0f) {
+                        float k_w = (pw - 16.0f) * 0.25f;
+                        int k = std::clamp(static_cast<int>((fx - (px + 8.0f)) / k_w), 0, 3);
+                        const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+                        target_idx = xosc::index(a_prefix + env_knobs[k]);
                     }
-                } else {
-                    // active_tab == 2 (Effects)
+                } else if (fx >= grid_x && fx <= grid_x + grid_w && fy >= flt_y && fy <= flt_y + flt_h) {
+                    int c = (fx < grid_x + flt_col_w + 5.0f) ? 0 : 1;
+                    int flt_idx = c;
+                    std::string f_prefix = "f" + std::to_string(flt_idx) + "_";
+                    float px = grid_x + (c == 0 ? 0.0f : (flt_col_w + 10.0f));
+                    float py = flt_y;
+                    float pw = flt_col_w;
+                    float ph = flt_h;
+
+                    if (fy >= py + 66.0f && fy <= py + ph - 2.0f) {
+                        float k_w = (pw - 16.0f) / 3.0f;
+                        int k = std::clamp(static_cast<int>((fx - (px + 8.0f)) / k_w), 0, 2);
+                        const char* flt_knobs[3] = {"cutoff", "res", "drive"};
+                        target_idx = xosc::index(f_prefix + flt_knobs[k]);
+                    }
+                }
+            } else if (active_tab == 1) {
+                if (fx >= grid_x && fx <= grid_x + grid_w && fy >= grid_y && fy <= grid_y + grid_h) {
+                    int c = (fx < grid_x + mod_col_w + 5.0f) ? 0 : 1;
+                    int r = (fy < grid_y + mod_row_h + 4.0f) ? 0 : 1;
+                    int env_idx = r * 2 + c;
+                    std::string e_prefix = "e" + std::to_string(env_idx) + "_";
+                    float px = grid_x + (c == 0 ? 0.0f : (mod_col_w + 10.0f));
+                    float py = grid_y + (r == 0 ? 0.0f : (mod_row_h + 8.0f));
+                    float pw = mod_col_w;
+                    float ph = mod_row_h;
+
+                    if (fx >= px + 316.0f && fx <= px + pw - 6.0f && fy >= py + 34.0f && fy <= py + 94.0f) {
+                        target_idx = xosc::index(e_prefix + "mix");
+                    } else if (fy >= py + 94.0f && fy <= py + ph - 4.0f) {
+                        float k_w = (pw - 16.0f) * 0.25f;
+                        int k = std::clamp(static_cast<int>((fx - (px + 8.0f)) / k_w), 0, 3);
+                        const char* env_knobs[4] = {"attack", "decay", "sustain", "release"};
+                        target_idx = xosc::index(e_prefix + env_knobs[k]);
+                    }
+                }
+            } else {
+                // Tab 2 (active_tab == 2: Effects & Performance)
+                if (fx >= grid_x && fx <= grid_x + grid_w && fy >= grid_y && fy <= grid_y + grid_h) {
+                    int col = (fx < grid_x + col_w) ? 0 : 1;
+                    int row = std::clamp(static_cast<int>((fy - grid_y) / (row_h + 6.0f)), 0, 2);
+                    float px = grid_x + (col == 0 ? 0.0f : (col_w + 10.0f));
+                    float py = grid_y + static_cast<float>(row) * (row_h + 6.0f);
+
                     if (row == 0) {
                         if (col == 0) {
-                            if (static_cast<float>(y) >= py + 70.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
-                                target_idx = (static_cast<float>(x) <= px + 215.0f) ? xosc::index("dist_drive") : xosc::index("dist_mix");
+                            if (fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
+                                target_idx = (fx <= px + 215.0f) ? xosc::index("dist_drive") : xosc::index("dist_mix");
                             }
                         } else {
-                            if (static_cast<float>(y) >= py + 70.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
+                            if (fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 float kw = (col_w - 20.0f) / 3.0f;
-                                int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 2);
+                                int k = std::clamp(static_cast<int>((fx - (px + 10.0f)) / kw), 0, 2);
                                 const char* eq_ids[3] = {"eq_low", "eq_mid", "eq_high"};
                                 target_idx = xosc::index(eq_ids[k]);
                             }
                         }
                     } else if (row == 1) {
                         if (col == 0) {
-                            if (static_cast<float>(y) >= py + 70.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
+                            if (fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 float kw = (col_w - 20.0f) / 5.0f;
-                                int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 4);
+                                int k = std::clamp(static_cast<int>((fx - (px + 10.0f)) / kw), 0, 4);
                                 const char* comp_ids[5] = {"comp_threshold", "comp_ratio", "comp_attack", "comp_release", "comp_makeup"};
                                 target_idx = xosc::index(comp_ids[k]);
                             }
                         } else {
-                            if (static_cast<float>(y) >= py + 70.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
+                            if (fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 float kw = (col_w - 20.0f) / 3.0f;
-                                int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 2);
+                                int k = std::clamp(static_cast<int>((fx - (px + 10.0f)) / kw), 0, 2);
                                 const char* dly_ids[3] = {"delay_time", "delay_feedback", "delay_mix"};
                                 target_idx = xosc::index(dly_ids[k]);
                             }
                         }
                     } else {
                         if (col == 0) {
-                            if (static_cast<float>(y) >= py + 70.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
+                            if (fy >= py + 70.0f && fy <= py + row_h - 4.0f) {
                                 float kw = (col_w - 20.0f) / 3.0f;
-                                int k = std::clamp(static_cast<int>((static_cast<float>(x) - (px + 10.0f)) / kw), 0, 2);
+                                int k = std::clamp(static_cast<int>((fx - (px + 10.0f)) / kw), 0, 2);
                                 const char* rev_ids[3] = {"reverb_size", "reverb_damp", "reverb_mix"};
                                 target_idx = xosc::index(rev_ids[k]);
                             }
                         } else {
-                            if (static_cast<float>(x) >= px + 150.0f && static_cast<float>(x) <= px + col_w - 20.0f &&
-                                static_cast<float>(y) >= py + 76.0f && static_cast<float>(y) <= py + row_h - 4.0f) {
+                            if (fx >= px + 150.0f && fx <= px + col_w - 20.0f &&
+                                fy >= py + 76.0f && fy <= py + row_h - 4.0f) {
                                 target_idx = xosc::index("glide_time");
                             }
                         }
@@ -1995,7 +2426,7 @@ public:
         }
 
         if (target_idx < 0) {
-            target_idx = xosc::index("master_gain");
+            return;
         }
 
         float cur = synth->get_parameter(static_cast<uint32_t>(target_idx));

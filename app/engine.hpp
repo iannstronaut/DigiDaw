@@ -61,8 +61,7 @@ public:
     void audition_note(domain::ChannelId cid, uint8_t pitch, uint8_t vel = 100) {
         std::lock_guard<std::mutex> lock(audition_mutex_);
         audition_queue_.push_back({cid, domain::MidiEvent::make_note_on(0, 0, pitch, vel)});
-        audition_frames_remaining_[cid] = static_cast<size_t>(44100.0 * 0.35); // 350ms note length
-        audition_pitch_[cid] = pitch;
+        pending_audition_notes_.push_back({cid, pitch, static_cast<size_t>(44100.0 * 0.35)});
     }
 
     void preview_sample_data(std::vector<float> left, std::vector<float> right) {
@@ -95,9 +94,9 @@ public:
         {
             std::lock_guard<std::mutex> alock(audition_mutex_);
             audition_queue_.clear();
-            audition_frames_remaining_.clear();
-            audition_pitch_.clear();
+            pending_audition_notes_.clear();
         }
+        live_auditions_.clear();
         {
             std::lock_guard<std::mutex> plock(preview_mutex_);
             preview_active_ = false;
@@ -210,6 +209,22 @@ public:
                     cur_auditions_scratch_ = std::move(audition_queue_);
                     audition_queue_.clear();
                 }
+                if (!pending_audition_notes_.empty()) {
+                    for (const auto& pa : pending_audition_notes_) {
+                        bool found = false;
+                        for (auto& la : live_auditions_) {
+                            if (la.cid == pa.cid && la.pitch == pa.pitch) {
+                                la.frames_remaining = pa.frames_remaining;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            live_auditions_.push_back(pa);
+                        }
+                    }
+                    pending_audition_notes_.clear();
+                }
             }
 
             // 3. Process each channel
@@ -217,8 +232,30 @@ public:
                 channel_scratch_buf_ = domain::OwningAudioBuffer(std::max(frames, size_t(2048)));
             }
 
+            // Prune auditions for deleted channels
+            for (auto it = live_auditions_.begin(); it != live_auditions_.end(); ) {
+                bool exists = false;
+                for (const auto& ch : proj.channels()) {
+                    if (ch.id() == it->cid) { exists = true; break; }
+                }
+                if (!exists) {
+                    it = live_auditions_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
             for (const auto& ch : proj.channels()) {
-                if (ch.settings().muted) continue;
+                if (ch.settings().muted) {
+                    for (auto it = live_auditions_.begin(); it != live_auditions_.end(); ) {
+                        if (it->cid == ch.id()) {
+                            it = live_auditions_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    continue;
+                }
 
                 auto dev = get_or_create_channel_device(ch.id());
                 if (!dev) continue;
@@ -238,15 +275,18 @@ public:
                     }
                 }
 
-                // Check audition NoteOff
-                auto it_rem = audition_frames_remaining_.find(ch.id());
-                if (it_rem != audition_frames_remaining_.end() && it_rem->second > 0) {
-                    if (it_rem->second <= frames) {
-                        it_rem->second = 0;
-                        ch_midi_scratch_.push_back(domain::MidiEvent::make_note_off(0, 0, audition_pitch_[ch.id()]));
-                    } else {
-                        it_rem->second -= frames;
+                // Check audition NoteOff for this channel
+                for (auto it = live_auditions_.begin(); it != live_auditions_.end(); ) {
+                    if (it->cid == ch.id()) {
+                        if (it->frames_remaining <= frames) {
+                            ch_midi_scratch_.push_back(domain::MidiEvent::make_note_off(0, 0, it->pitch));
+                            it = live_auditions_.erase(it);
+                            continue;
+                        } else {
+                            it->frames_remaining -= frames;
+                        }
                     }
+                    ++it;
                 }
 
                 // Synthesize using preallocated scratch buffer
@@ -452,10 +492,15 @@ private:
     std::mutex device_mutex_;
     std::unordered_map<domain::ChannelId, std::shared_ptr<domain::IDevice>> channel_devices_;
 
+    struct ActiveAudition {
+        domain::ChannelId cid{0};
+        uint8_t pitch{0};
+        size_t frames_remaining{0};
+    };
     std::mutex audition_mutex_;
     std::vector<std::pair<domain::ChannelId, domain::MidiEvent>> audition_queue_;
-    std::unordered_map<domain::ChannelId, size_t> audition_frames_remaining_;
-    std::unordered_map<domain::ChannelId, uint8_t> audition_pitch_;
+    std::vector<ActiveAudition> pending_audition_notes_;
+    std::vector<ActiveAudition> live_auditions_;
     static constexpr size_t MaxTrackPeaks = 64;
     std::array<std::atomic<float>, MaxTrackPeaks> track_peaks_l_{};
     std::array<std::atomic<float>, MaxTrackPeaks> track_peaks_r_{};

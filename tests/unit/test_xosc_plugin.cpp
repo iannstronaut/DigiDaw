@@ -1,6 +1,7 @@
 #include "../test_framework.hpp"
 #include "../../adapters/plugins/xosc_device.hpp"
 #include "../../app/usecases/plugin_manager.hpp"
+#include "../../app/engine.hpp"
 #include <cmath>
 #include <vector>
 
@@ -451,4 +452,200 @@ TEST_CASE(UnitXOSC, ParameterClampingAndSanitization) {
     ASSERT_FALSE(std::isinf(loaded_gain));
     ASSERT_TRUE(loaded_gain >= -60.0f && loaded_gain <= 6.0f);
 }
+
+// ============================================================================
+// 10. Unison Voice Configuration and Detuning
+// ============================================================================
+
+TEST_CASE(UnitXOSC, UnisonVoiceIncrementAndAudioDetune) {
+    XOSCDevice dev;
+    dev.prepare(44100.0, 512);
+
+    // Initial voices is 0 (which represents 1 voice)
+    ASSERT_EQ(dev.get_param_by_id("o0_voices"), 0.0f);
+
+    // Increment unison to 6 (7 voices)
+    dev.set_param_by_id("o0_voices", 6.0f);
+    ASSERT_EQ(dev.get_param_by_id("o0_voices"), 6.0f);
+
+    // Enable detune and stereo spread
+    dev.set_param_by_id("o0_detune", 25.0f); // 25 cents
+    dev.set_param_by_id("o0_stereo", 0.8f);  // 80% stereo spread
+
+    OwningAudioBuffer buf(512);
+    auto view = buf.view();
+
+    // Trigger note
+    MidiEvent ev_on{0, 0x90, 60, 100};
+    MidiEvent midi_on[1] = {ev_on};
+    dev.process(view, std::span<const MidiEvent>(midi_on, 1));
+
+    auto [pl, pr] = view.compute_peak();
+    ASSERT_TRUE(pl > 0.01f);
+    ASSERT_TRUE(pr > 0.01f);
+
+    // Process another block to let stereo detuned phases drift
+    buf.clear();
+    std::span<const MidiEvent> empty_midi{};
+    dev.process(view, empty_midi);
+
+    // Unison voices must render with non-zero output
+    auto [pl2, pr2] = view.compute_peak();
+    ASSERT_TRUE(pl2 > 0.01f);
+    ASSERT_TRUE(pr2 > 0.01f);
+}
+
+// ============================================================================
+// 11. Mod Envelope Filter Cutoff and Resonance Routing
+// ============================================================================
+
+TEST_CASE(UnitXOSC, ModEnvFilterCutoffAndResRouting) {
+    XOSCDevice dev;
+    dev.prepare(44100.0, 512);
+
+    // Set target to Flt 1 Cutoff (target 3)
+    dev.set_param_by_id("e0_on", 1.0f);
+    dev.set_param_by_id("e0_target", 3.0f);
+    ASSERT_EQ(dev.get_param_by_id("e0_target"), 3.0f);
+
+    // Set fast attack, long decay, mix 1.0
+    dev.set_param_by_id("e0_mix", 1.0f);
+    dev.set_param_by_id("e0_attack", 0.005f);
+    dev.set_param_by_id("e0_decay", 0.2f);
+    dev.set_param_by_id("e0_sustain", 0.0f);
+    dev.set_param_by_id("e0_release", 0.05f);
+
+    // Close Filter 1 base cutoff to 100 Hz so base sound without mod is muffled
+    dev.set_param_by_id("f0_on", 1.0f);
+    dev.set_param_by_id("f0_cutoff", 100.0f);
+    dev.set_param_by_id("f0_res", 2.0f);
+
+    OwningAudioBuffer buf(512);
+    auto view = buf.view();
+
+    // Trigger high note C5 (72) - with cutoff at 100 Hz, unmodulated it would be heavily filtered
+    MidiEvent ev_on{0, 0x90, 72, 100};
+    MidiEvent midi_on[1] = {ev_on};
+    dev.process(view, std::span<const MidiEvent>(midi_on, 1));
+
+    // Mod env opens the filter during attack, generating sound
+    auto [pl, pr] = view.compute_peak();
+    ASSERT_TRUE(pl > 0.005f);
+    ASSERT_TRUE(pr > 0.005f);
+
+    // Switch target to Flt 1 Res (target 4) and verify clamping within 0..8
+    dev.set_param_by_id("e0_target", 4.0f);
+    ASSERT_EQ(dev.get_param_by_id("e0_target"), 4.0f);
+
+    dev.set_param_by_id("e0_target", 8.0f); // Osc Pan
+    ASSERT_EQ(dev.get_param_by_id("e0_target"), 8.0f);
+
+    dev.set_param_by_id("e0_target", 99.0f);
+    ASSERT_EQ(dev.get_param_by_id("e0_target"), 8.0f);
+}
+
+// ============================================================================
+// 12. Rapid Note Playing Stress Test - No Hanging Voices
+// ============================================================================
+
+TEST_CASE(UnitXOSC, RapidNoteOnNoteOffStressNoDanglingVoices) {
+    XOSCDevice dev;
+    dev.prepare(44100.0, 256);
+
+    // Set short release on amp envelopes (20 ms)
+    dev.set_param_by_id("a0_release", 0.02f);
+    dev.set_param_by_id("a1_release", 0.02f);
+
+    OwningAudioBuffer buf(256);
+    auto view = buf.view();
+
+    // Rapidly play 40 notes in quick succession (like fast shredding or arpeggios)
+    for (int i = 0; i < 40; ++i) {
+        buf.clear();
+        uint8_t note = static_cast<uint8_t>(48 + (i % 24));
+        // Alternating note on
+        MidiEvent ev_on{0, 0x90, note, 100};
+        MidiEvent on_arr[1] = {ev_on};
+        dev.process(view, std::span<const MidiEvent>(on_arr, 1));
+
+        // Let play for 1 block
+        buf.clear();
+        std::span<const MidiEvent> empty_midi{};
+        dev.process(view, empty_midi);
+
+        // Note off
+        buf.clear();
+        MidiEvent ev_off{0, 0x80, note, 0};
+        MidiEvent off_arr[1] = {ev_off};
+        dev.process(view, std::span<const MidiEvent>(off_arr, 1));
+    }
+
+    // Process silence for 0.5 seconds (~86 blocks of 256 samples) to allow release envelopes to decay
+    std::span<const MidiEvent> empty_midi{};
+    for (int b = 0; b < 86; ++b) {
+        buf.clear();
+        dev.process(view, empty_midi);
+    }
+
+    // After decay time, all voices MUST be idle (active_voices == 0) without calling panic() or bulk all-notes-off!
+    ASSERT_EQ(dev.active_voices(), 0);
+
+    // Audio must have decayed to silence
+    auto [quiet_l, quiet_r] = view.compute_peak();
+    ASSERT_NEAR(quiet_l, 0.0f, 0.0001f);
+    ASSERT_NEAR(quiet_r, 0.0f, 0.0001f);
+}
+
+// ============================================================================
+// 13. Host Engine Audition Rapid Successive Notes - No Hanging Sustain
+// ============================================================================
+
+TEST_CASE(UnitXOSC, EngineAuditionRapidNotesDecayCleanlyWithoutPanic) {
+    digidaw::app::Engine engine;
+
+    // Create channel with XOSC
+    ChannelSettings s;
+    s.name = "XOSC Synth";
+    s.volume = 1.0f;
+    s.mixer_track = 1;
+    ChannelId ch_id = engine.session().project().add_channel("core.generator.xosc", s);
+
+    auto dev = engine.get_or_create_channel_device(ch_id);
+    ASSERT_TRUE(dev != nullptr);
+    auto xosc_dev = std::dynamic_pointer_cast<XOSCDevice>(dev);
+    ASSERT_TRUE(xosc_dev != nullptr);
+
+    // Set short release on amp envelopes (20 ms)
+    xosc_dev->set_param_by_id("a0_release", 0.02f);
+    xosc_dev->set_param_by_id("a1_release", 0.02f);
+
+    OwningAudioBuffer out_buf(512);
+    auto view = out_buf.view();
+
+    // Rapidly trigger 5 audition notes in quick succession (within 50ms)
+    // In the old bug, each audition_note() overwrote audition_pitch_[ch_id],
+    // so only the 5th note ever received a NoteOff; notes 1..4 sustained forever.
+    uint8_t pitches[5] = {60, 62, 64, 65, 67};
+    for (int i = 0; i < 5; ++i) {
+        engine.audition_note(ch_id, pitches[i], 100);
+        // Process 1 block (~11.6 ms at 44.1kHz) between notes
+        engine.process_realtime_audio(view);
+    }
+
+    // Advance audio blocks for ~0.6 seconds (about 55 blocks of 512 samples)
+    // Audition duration is 350ms (0.35s) + 20ms release + safety margin
+    for (int b = 0; b < 55; ++b) {
+        engine.process_realtime_audio(view);
+    }
+
+    // All auditioned notes MUST have expired and emitted their NoteOffs independently
+    ASSERT_EQ(xosc_dev->active_voices(), 0);
+
+    // Final output buffer must be completely quiet without calling panic()!
+    auto [quiet_l, quiet_r] = view.compute_peak();
+    ASSERT_NEAR(quiet_l, 0.0f, 0.0001f);
+    ASSERT_NEAR(quiet_r, 0.0f, 0.0001f);
+}
+
+
 

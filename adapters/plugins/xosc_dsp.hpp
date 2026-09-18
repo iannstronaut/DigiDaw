@@ -65,7 +65,9 @@ inline const std::vector<Spec>& specs() {
                 f(p + "sustain", "Sustain", 0, 1, family == 'a' ? .8f : .5f);
                 f(p + "release", "Release", .005f, 12, .35f, "s", .25f);
                 if (family == 'e') {
-                    c(p + "target", "Target", {"Volume", "Pitch", "Cutoff"});
+                    c(p + "target", "Target",
+                      {"Osc Volume", "Osc Pitch", "Cutoff", "Flt 1 Cutoff", "Flt 1 Res",
+                       "Flt 2 Cutoff", "Flt 2 Res", "Filter Drive", "Osc Pan"});
                     f(p + "mix", "Mix", -1, 1, .5f);
                 }
                 routes(p, family == 'a' && i == 0);
@@ -228,7 +230,7 @@ Patch decode(Read read) {
             e.sustain = v();
             e.release = v();
             if (mod) {
-                e.target = std::clamp(int(v()), 0, 2);
+                e.target = std::clamp(int(v()), 0, 8);
                 e.mix = v();
             }
             routes(e.route);
@@ -322,12 +324,14 @@ struct ADSR {
     void off(const Env& e, float sr) {
         if (stage != idle && stage != release) {
             stage = release;
-            releaseStep = value / std::max(1.f, e.release * sr);
+            float total = std::max(1.f, e.release * sr);
+            releaseStep = std::max(value / total, 1.f / (12.f * sr));
         }
     }
     float tick(const Env& e, float sr) {
         switch (stage) {
         case idle:
+            value = 0;
             break;
         case attack:
             value += 1 / std::max(1.f, e.attack * sr);
@@ -338,7 +342,7 @@ struct ADSR {
             break;
         case decay:
             value -= (1 - e.sustain) / std::max(1.f, e.decay * sr);
-            if (value <= e.sustain + 1e-7f) {
+            if (value <= e.sustain + 1e-5f) {
                 value = e.sustain;
                 stage = sustain;
             }
@@ -348,7 +352,7 @@ struct ADSR {
             break;
         case release:
             value -= releaseStep;
-            if (value <= 0) {
+            if (value <= 1e-5f) {
                 value = 0;
                 stage = idle;
             }
@@ -483,6 +487,7 @@ struct Voice {
     std::array<std::array<std::array<SVF, 2>, 4>, 2> filters{};
     std::array<float, 4> oscGate{};
     std::array<std::array<float, 4>, 2> filterWet{};
+    std::array<float, 2> filterDrive{1.0f, 1.0f};
     void start(int n, int ch, float vel, uint64_t a, const Patch& p) {
         stealL = lastL;
         stealR = lastR;
@@ -497,6 +502,7 @@ struct Voice {
         velocity = vel;
         gate = 0;
         oscGate.fill(0);
+        filterDrive.fill(1.0f);
         for (auto& w : filterWet)
             w.fill(0);
         for (auto& e : env)
@@ -585,19 +591,62 @@ public:
         bool overlap = false;
         for (const auto& v : voices)
             overlap = overlap || (v.held && v.channel == channel);
+
         Voice* pick = nullptr;
-        for (int i = 0; i < p.polyphony; ++i)
-            if (!voices[i].active) {
+
+        // 1. If this note is ALREADY playing on this channel (held or releasing or sustained),
+        // retrigger that voice directly so we don't leak voices or dangle sustain.
+        for (int i = 0; i < p.polyphony; ++i) {
+            if (voices[i].active && voices[i].channel == channel && voices[i].note == note) {
                 pick = &voices[i];
                 break;
             }
-        if (!pick) {
-            pick = &voices[0];
-            for (int i = 1; i < p.polyphony; ++i)
-                if ((!voices[i].held && pick->held) ||
-                    (voices[i].held == pick->held && voices[i].age < pick->age))
-                    pick = &voices[i];
         }
+
+        // 2. Otherwise look for an inactive voice slot
+        if (!pick) {
+            for (int i = 0; i < p.polyphony; ++i) {
+                if (!voices[i].active) {
+                    pick = &voices[i];
+                    break;
+                }
+            }
+        }
+
+        // 3. If all voices are active, steal the best candidate:
+        // Priority:
+        // Tier 2: Voices in release (!held && !sustained) -> steal oldest
+        // Tier 1: Sustained voices (!held && sustained) -> steal oldest
+        // Tier 0: Currently held voices (held) -> steal oldest
+        if (!pick) {
+            int best_tier = -1;
+            int best_idx = 0;
+            uint64_t oldest_age = UINT64_MAX;
+            for (int i = 0; i < p.polyphony; ++i) {
+                const auto& v = voices[i];
+                int tier = 0;
+                if (!v.held && !v.sustained) tier = 2;
+                else if (!v.held && v.sustained) tier = 1;
+                else tier = 0;
+
+                if (tier > best_tier || (tier == best_tier && v.age < oldest_age)) {
+                    best_tier = tier;
+                    best_idx = i;
+                    oldest_age = v.age;
+                }
+            }
+            pick = &voices[best_idx];
+        }
+
+        // Terminate any other duplicate voices for this note/channel to avoid hanging states
+        for (int i = 0; i < 32; ++i) {
+            if (&voices[i] != pick && voices[i].active && voices[i].channel == channel && voices[i].note == note) {
+                voices[i].active = false;
+                voices[i].held = false;
+                voices[i].sustained = false;
+            }
+        }
+
         float from = lastPitch[channel - 1];
         pick->start(note, channel, velocity, ++age, p);
         if (from >= 0 && p.glideOn && (p.glideMode == 0 || overlap))
@@ -618,12 +667,17 @@ public:
             return;
         }
         for (auto& v : voices)
-            if (v.active && v.note == note && v.channel == channel && v.held) {
-                v.held = false;
-                if (sustain[channel - 1])
-                    v.sustained = true;
-                else
+            if (v.active && v.note == note && v.channel == channel) {
+                if (v.held) {
+                    v.held = false;
+                    if (sustain[channel - 1])
+                        v.sustained = true;
+                    else
+                        v.release(p, sr);
+                } else if (v.sustained && !sustain[channel - 1]) {
+                    v.sustained = false;
                     v.release(p, sr);
+                }
             }
     }
     void pedal(bool down, int channel) {
@@ -637,10 +691,14 @@ public:
             refreshMono();
             return;
         }
-        if (!down)
+        if (!down) {
             for (auto& v : voices)
-                if (v.active && v.channel == channel && v.sustained)
-                    v.release(p, sr);
+                if (v.active && v.channel == channel && v.sustained) {
+                    v.sustained = false;
+                    if (!v.held)
+                        v.release(p, sr);
+                }
+        }
     }
     void pitchBend(float semitones, int channel) {
         if (channel < 1 || channel > 16)
@@ -659,10 +717,13 @@ public:
             }
         for (auto& v : voices)
             if (!channel || v.channel == channel) {
-                if (immediate)
+                if (immediate) {
                     v = Voice{};
-                else
+                } else {
+                    v.held = false;
+                    v.sustained = false;
                     v.release(p, sr);
+                }
             }
         if (channel)
             sustain[channel - 1] = false;
@@ -707,9 +768,11 @@ public:
             float vl = 0, vr = 0;
             bool key = v.held || v.sustained;
             v.gate += std::clamp((key ? 1.f : 0.f) - v.gate, -1 / (sr * .008f), 1 / (sr * .004f));
+            if (v.gate <= 1e-5f && !key) v.gate = 0.0f;
             for (int o = 0; o < 4; ++o) {
                 v.oscGate[o] += std::clamp((p.osc[o].on ? 1.f : 0.f) - v.oscGate[o],
                                            -1 / (sr * .005f), 1 / (sr * .005f));
+                if (v.oscGate[o] <= 1e-5f && !p.osc[o].on) v.oscGate[o] = 0.0f;
                 if (v.oscGate[o] <= 0)
                     continue;
                 float amp = 1;
@@ -721,7 +784,7 @@ public:
                     }
                 if (!count)
                     amp = v.gate;
-                if (amp > 1e-7f || key)
+                if (amp > 1e-5f || key)
                     sounding = true;
                 for (int e = 0; e < 4; ++e)
                     if (p.env[e].on && p.env[e].route[o] && p.env[e].target == 0)
@@ -747,7 +810,7 @@ public:
                             channel.reset();
                         continue;
                     }
-                    float dryL = ol, dryR = orr, g = filterDrive[f];
+                    float dryL = ol, dryR = orr, g = v.filterDrive[f];
                     if (g > 1.0001f) {
                         ol = std::tanh(ol * g) / std::sqrt(g);
                         orr = std::tanh(orr * g) / std::sqrt(g);
@@ -902,16 +965,37 @@ private:
         for (auto& v : voices)
             if (v.active) {
                 float base = 440 * std::exp2((float(v.note) - 69 + bend[v.channel - 1]) / 12);
+                float f1_cut_env = 0.f, f1_res_env = 0.f, f1_drv_env = 0.f;
+                float f2_cut_env = 0.f, f2_res_env = 0.f, f2_drv_env = 0.f;
+                for (int e = 0; e < 4; ++e) {
+                    if (p.env[e].on) {
+                        float m = v.env[e].value * smooth.env[e].mix;
+                        if (p.env[e].target == 3) f1_cut_env += m * 6.0f;
+                        else if (p.env[e].target == 4) f1_res_env += m * 4.0f;
+                        else if (p.env[e].target == 5) f2_cut_env += m * 6.0f;
+                        else if (p.env[e].target == 6) f2_res_env += m * 4.0f;
+                        else if (p.env[e].target == 7) {
+                            f1_drv_env += m * 18.0f;
+                            f2_drv_env += m * 18.0f;
+                        }
+                    }
+                }
+                for (int f = 0; f < 2; ++f) {
+                    float drv = smooth.filter[f].drive + (f == 0 ? f1_drv_env : f2_drv_env);
+                    v.filterDrive[f] = db(std::clamp(drv, 0.f, 40.f));
+                }
                 for (int o = 0; o < 4; ++o) {
                     auto& osc = smooth.osc[o];
-                    float pitch = osc.tune, cut = 0;
+                    float pitch = osc.tune, cut = 0, pan_mod = 0;
                     for (int e = 0; e < 4; ++e)
                         if (p.env[e].on && p.env[e].route[o]) {
                             float m = v.env[e].value * smooth.env[e].mix;
                             if (p.env[e].target == 1)
                                 pitch += m * 24;
-                            if (p.env[e].target == 2)
+                            else if (p.env[e].target == 2)
                                 cut += m * 6;
+                            else if (p.env[e].target == 8)
+                                pan_mod += m;
                         }
                     int n = p.osc[o].voices;
                     float norm = 1 / std::sqrt(float(n));
@@ -920,16 +1004,20 @@ private:
                         v.inc[o][u] = std::clamp(
                             base * std::exp2((pitch + spread * osc.detune * .01f) / 12) / sr, 1e-8f,
                             .45f);
-                        float pan = std::clamp(osc.pan + spread * osc.stereo, -1.f, 1.f);
+                        float pan = std::clamp(osc.pan + pan_mod + spread * osc.stereo, -1.f, 1.f);
                         float angle = (pan + 1) * pi * .25f;
                         v.left[o][u] = std::cos(angle) * norm;
                         v.right[o][u] = std::sin(angle) * norm;
                     }
                     for (int f = 0; f < 2; ++f)
-                        if ((p.filter[f].on && p.filter[f].route[o]) || v.filterWet[f][o] > 0)
+                        if ((p.filter[f].on && p.filter[f].route[o]) || v.filterWet[f][o] > 0) {
+                            float f_cut = (f == 0 ? f1_cut_env : f2_cut_env) + cut;
+                            float f_res = (f == 0 ? f1_res_env : f2_res_env);
+                            float cutoff = std::clamp(smooth.filter[f].cutoff * std::exp2(f_cut), 20.0f, sr * 0.44f);
+                            float res = std::clamp(smooth.filter[f].res + f_res, 0.5f, 8.0f);
                             for (auto& channel : v.filters[f][o])
-                                channel.set(smooth.filter[f].cutoff * std::exp2(cut),
-                                            smooth.filter[f].res, p.filter[f].type, sr);
+                                channel.set(cutoff, res, p.filter[f].type, sr);
+                        }
                 }
             }
     }
