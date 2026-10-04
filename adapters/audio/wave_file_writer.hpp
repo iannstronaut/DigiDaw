@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <filesystem>
 #include <cstdint>
 #include <algorithm>
 
@@ -27,6 +28,13 @@ public:
 
         if (left_channel.size() != right_channel.size()) {
             return domain::Result<void>(domain::ErrorCode::InvalidArgument);
+        }
+
+        // Ensure parent directory exists if specified
+        std::filesystem::path out_p(filepath);
+        if (out_p.has_parent_path()) {
+            std::error_code ec;
+            std::filesystem::create_directories(out_p.parent_path(), ec);
         }
 
         std::ofstream file(filepath, std::ios::binary);
@@ -69,13 +77,21 @@ public:
             float r = std::clamp(right_channel[i], -1.0f, 1.0f);
 
             if (bit_depth == WaveBitDepth::PCM16) {
-                int16_t l16 = static_cast<int16_t>(l * 32767.0f);
-                int16_t r16 = static_cast<int16_t>(r * 32767.0f);
+                int16_t l16 = (l < 0.0f)
+                    ? static_cast<int16_t>(std::clamp(l * 32768.0f, -32768.0f, 32767.0f))
+                    : static_cast<int16_t>(std::clamp(l * 32767.0f, -32768.0f, 32767.0f));
+                int16_t r16 = (r < 0.0f)
+                    ? static_cast<int16_t>(std::clamp(r * 32768.0f, -32768.0f, 32767.0f))
+                    : static_cast<int16_t>(std::clamp(r * 32767.0f, -32768.0f, 32767.0f));
                 file.write(reinterpret_cast<const char*>(&l16), 2);
                 file.write(reinterpret_cast<const char*>(&r16), 2);
             } else if (bit_depth == WaveBitDepth::PCM24) {
-                int32_t l24 = static_cast<int32_t>(l * 8388607.0f);
-                int32_t r24 = static_cast<int32_t>(r * 8388607.0f);
+                int32_t l24 = (l < 0.0f)
+                    ? static_cast<int32_t>(std::clamp(l * 8388608.0f, -8388608.0f, 8388607.0f))
+                    : static_cast<int32_t>(std::clamp(l * 8388607.0f, -8388608.0f, 8388607.0f));
+                int32_t r24 = (r < 0.0f)
+                    ? static_cast<int32_t>(std::clamp(r * 8388608.0f, -8388608.0f, 8388607.0f))
+                    : static_cast<int32_t>(std::clamp(r * 8388607.0f, -8388608.0f, 8388607.0f));
                 file.write(reinterpret_cast<const char*>(&l24), 3);
                 file.write(reinterpret_cast<const char*>(&r24), 3);
             } else if (bit_depth == WaveBitDepth::Float32) {

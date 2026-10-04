@@ -224,6 +224,9 @@ public:
     }
 
     ~DigiDawWindow() {
+        if (render_thread_.joinable()) {
+            render_thread_.join();
+        }
         release_gpu_resources();
         if (mem_dc_) DeleteDC(mem_dc_);
         if (mem_bmp_) DeleteObject(mem_bmp_);
@@ -1597,6 +1600,22 @@ private:
             }
 
             case WM_KEYDOWN: {
+                if (render_modal_open_) {
+                    if (wp == VK_ESCAPE) {
+                        if (!render_in_progress_) {
+                            close_render_modal();
+                            InvalidateRect(hwnd, NULL, FALSE);
+                        }
+                        return 0;
+                    }
+                    if (wp == VK_RETURN) {
+                        if (!render_in_progress_) {
+                            execute_render_export();
+                            InvalidateRect(hwnd, NULL, FALSE);
+                        }
+                        return 0;
+                    }
+                }
                 if (wp == VK_F11) {
                     toggle_fullscreen();
                     InvalidateRect(hwnd, NULL, FALSE);
@@ -1686,7 +1705,14 @@ private:
                 break;
             }
 
+            case WM_USER + 101:
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+
             case WM_DESTROY:
+                if (render_thread_.joinable()) {
+                    render_thread_.join();
+                }
                 PostQuitMessage(0);
                 return 0;
         }
@@ -1978,6 +2004,9 @@ private:
         }
         if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
             render_effect_editor_d2d();
+        }
+        if (render_modal_open_) {
+            render_export_modal_d2d();
         }
 
         if (is_dragging_sample_) {
@@ -3833,6 +3862,9 @@ private:
         if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
             render_effect_editor_gdi();
         }
+        if (render_modal_open_) {
+            render_export_modal_gdi();
+        }
 
         if (is_dragging_sample_) {
             int bx = current_mouse_x_ + 14;
@@ -5404,7 +5436,11 @@ private:
     }
 
     void on_mouse_down(int x, int y) {
-        // A. If plugin editor or effect editor modal is open, handle modal clicks
+        // A. If render modal, plugin editor or effect editor modal is open, handle modal clicks
+        if (render_modal_open_) {
+            handle_render_modal_click(x, y);
+            return;
+        }
         if (active_editor_effect_track_ >= 0 && active_editor_effect_slot_ >= 0) {
             handle_effect_editor_click(x, y);
             return;
@@ -5510,7 +5546,8 @@ private:
             return;
         }
         if (x >= client_w_ - 41 && x <= client_w_ - 10 && y >= 8 && y <= 40) {
-            render_wav();
+            open_render_modal();
+            InvalidateRect(hwnd_, NULL, FALSE);
             return;
         }
 
@@ -7227,7 +7264,7 @@ private:
             }
             if (x >= client_w_ - 41 && x <= client_w_ - 10) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
-                status_message_ = "Export Project to WAV Audio File";
+                status_message_ = "Export / Render Project Audio (WAV / FLAC)";
                 return;
             }
         }
@@ -8437,7 +8474,121 @@ private:
     }
 
     void render_wav() {
-        std::string out_wav = engine_.session().project().name() + "_export.wav";
+        open_render_modal();
+    }
+
+    void open_render_modal() {
+        render_modal_open_ = true;
+        render_in_progress_.store(false);
+        render_progress_.store(0.0f);
+        if (render_output_path_.empty()) {
+            std::string proj_name = engine_.session().project().name();
+            if (proj_name.empty()) proj_name = "DigiDAW_Project";
+            std::string safe_name;
+            for (char c : proj_name) {
+                if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') safe_name += c;
+                else safe_name += '_';
+            }
+            std::string ext = (render_format_ == app::RenderFormat::Flac) ? ".flac" : ".wav";
+            render_output_path_ = "D:\\Project\\Learn\\DigiDaw\\" + safe_name + "_export" + ext;
+        } else {
+            sync_render_output_extension();
+        }
+        {
+            std::lock_guard<std::mutex> lk(render_status_mutex_);
+            render_status_text_ = "Ready to export";
+        }
+    }
+
+    void close_render_modal() {
+        if (render_in_progress_.load()) return;
+        render_modal_open_ = false;
+    }
+
+    void set_render_format(app::RenderFormat fmt) {
+        render_format_ = fmt;
+        if (render_format_ == app::RenderFormat::Flac) {
+            if (render_bit_depth_ == app::RenderBitDepth::Bit32Float) {
+                render_bit_depth_ = app::RenderBitDepth::Bit24;
+            }
+        }
+        sync_render_output_extension();
+    }
+
+    void sync_render_output_extension() {
+        std::string target_ext = (render_format_ == app::RenderFormat::Flac) ? ".flac" : ".wav";
+        size_t dot_pos = render_output_path_.find_last_of('.');
+        size_t slash_pos = render_output_path_.find_last_of("\\/");
+        if (dot_pos != std::string::npos && (slash_pos == std::string::npos || dot_pos > slash_pos)) {
+            render_output_path_ = render_output_path_.substr(0, dot_pos) + target_ext;
+        } else {
+            render_output_path_ += target_ext;
+        }
+    }
+
+    void browse_render_output_path() {
+        OPENFILENAMEA ofn;
+        char szFile[MAX_PATH] = {0};
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd_;
+        if (!render_output_path_.empty()) {
+            strncpy(szFile, render_output_path_.c_str(), sizeof(szFile) - 1);
+        }
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = sizeof(szFile);
+        char filter[] = "WAV Audio (*.wav)\0*.wav\0FLAC Audio (*.flac)\0*.flac\0All Files (*.*)\0*.*\0";
+        ofn.lpstrFilter = filter;
+        ofn.nFilterIndex = (render_format_ == app::RenderFormat::Flac) ? 2 : 1;
+        ofn.lpstrDefExt = (render_format_ == app::RenderFormat::Flac) ? "flac" : "wav";
+        ofn.lpstrFileTitle = NULL;
+        ofn.nMaxFileTitle = 0;
+        ofn.lpstrInitialDir = NULL;
+        ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+
+        if (GetSaveFileNameA(&ofn) == TRUE) {
+            render_output_path_ = szFile;
+            if (ofn.nFilterIndex == 2) {
+                set_render_format(app::RenderFormat::Flac);
+            } else if (ofn.nFilterIndex == 1) {
+                set_render_format(app::RenderFormat::Wav);
+            } else {
+                std::string s(szFile);
+                size_t dot = s.find_last_of('.');
+                if (dot != std::string::npos) {
+                    std::string ext = s.substr(dot);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".flac") set_render_format(app::RenderFormat::Flac);
+                    else if (ext == ".wav") set_render_format(app::RenderFormat::Wav);
+                    else sync_render_output_extension();
+                } else {
+                    sync_render_output_extension();
+                }
+            }
+        }
+    }
+
+    void execute_render_export() {
+        if (render_in_progress_.load()) return;
+
+        // Stop real-time transport if playback is active
+        if (engine_.transport().is_playing()) {
+            engine_.transport().stop();
+        }
+
+        render_in_progress_.store(true);
+        render_progress_.store(0.0f);
+        {
+            std::lock_guard<std::mutex> lk(render_status_mutex_);
+            render_status_text_ = "Preparing project & devices...";
+        }
+        InvalidateRect(hwnd_, NULL, FALSE);
+        UpdateWindow(hwnd_);
+
+        if (render_thread_.joinable()) {
+            render_thread_.join();
+        }
+
         auto ppq = engine_.session().project().time_map().ppq();
         domain::Tick max_end_tick = 4 * ppq; // Minimum 1 bar
         for (const auto& trk : engine_.session().project().tracks()) {
@@ -8447,20 +8598,364 @@ private:
         }
         auto duration = max_end_tick;
 
+        // Retrieve active channel devices so all loaded samples, presets, and customized states are preserved!
         std::unordered_map<domain::ChannelId, std::shared_ptr<domain::IDevice>> devs;
         for (const auto& ch : engine_.session().project().channels()) {
-            auto inst_res = engine_.plugin_manager().instantiate(ch.device_uid());
-            if (inst_res.is_ok()) devs[ch.id()] = inst_res.value();
+            auto dev = engine_.get_or_create_channel_device(ch.id());
+            if (dev) devs[ch.id()] = dev;
         }
 
-        auto res = app::OfflineRenderer::render_to_wav(
-            engine_.session().project(), devs, out_wav, duration, 44100.0);
+        app::RenderOptions opts;
+        opts.format = render_format_;
+        opts.bit_depth = render_bit_depth_;
+        opts.sample_rate = 44100.0;
+        opts.block_size = 512;
+        opts.output_path = render_output_path_;
+        opts.duration_ticks = duration;
 
-        if (res.is_ok()) {
-            int total_bars = static_cast<int>((duration + 4 * ppq - 1) / (4 * ppq));
-            status_message_ = "WAV Export completed (" + std::to_string(total_bars) + " Bars): " + out_wav;
-        } else {
-            status_message_ = "Render failed: " + std::string(res.error().message());
+        HWND hwnd = hwnd_;
+        render_thread_ = std::thread([this, hwnd, devs, opts, duration, ppq]() {
+            {
+                std::lock_guard<std::mutex> lk(render_status_mutex_);
+                render_status_text_ = "Rendering audio...";
+            }
+            PostMessage(hwnd, WM_USER + 101, 0, 0);
+
+            // Lock audio engine so realtime audio callback won't access devices simultaneously
+            std::lock_guard<std::recursive_mutex> lock(engine_.audio_mutex());
+
+            auto res = app::OfflineRenderer::render(
+                engine_.session().project(), devs, opts,
+                [this, hwnd](float progress) {
+                    render_progress_.store(progress);
+                    PostMessage(hwnd, WM_USER + 101, 0, 0);
+                }
+            );
+
+            render_in_progress_.store(false);
+            if (res.is_ok()) {
+                render_progress_.store(1.0f);
+                int total_bars = static_cast<int>((duration + 4 * ppq - 1) / (4 * ppq));
+                std::string fmt_str = (opts.format == app::RenderFormat::Flac) ? "FLAC" : "WAV";
+                {
+                    std::lock_guard<std::mutex> lk(render_status_mutex_);
+                    render_status_text_ = "Export completed successfully (" + std::to_string(total_bars) + " Bars)!";
+                }
+                status_message_ = fmt_str + " Export completed: " + opts.output_path;
+            } else {
+                {
+                    std::lock_guard<std::mutex> lk(render_status_mutex_);
+                    render_status_text_ = "Export failed: " + std::string(res.error().message());
+                }
+                status_message_ = "Render failed: " + std::string(res.error().message());
+            }
+            PostMessage(hwnd, WM_USER + 101, 0, 0);
+        });
+    }
+
+    void render_export_modal_d2d() {
+        if (!render_modal_open_) return;
+        const auto& t = D2DRenderer::theme();
+
+        float mw = 580.0f;
+        float mh = 430.0f;
+        float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+        float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+        render_modal_bounds_ = D2D1::RectF(mx, my, mx + mw, my + mh);
+
+        // 1. Dimmed Fullscreen Backdrop Overlay
+        D2D1_RECT_F overlay_rc = D2D1::RectF(0.0f, 0.0f, static_cast<float>(client_w_), static_cast<float>(client_h_));
+        D2DRenderer::draw_rounded_box(d2d_target_, overlay_rc, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), D2D1::ColorF(0, 0, 0, 0), 0.0f);
+
+        // 2. Modal Dialog Window Frame (Dark elevated surface with strong border)
+        D2DRenderer::draw_rounded_box(d2d_target_, render_modal_bounds_, t.bg_elevated, t.border_strong, 8.0f);
+
+        // 3. Header Bar with Title & Close [✕] Button
+        D2D1_RECT_F hdr_rc = D2D1::RectF(mx, my, mx + mw, my + 44.0f);
+        D2DRenderer::draw_rounded_box(d2d_target_, hdr_rc, t.bg_surface, t.border_subtle, 8.0f);
+
+        D2D1_RECT_F title_rc = D2D1::RectF(mx + 18.0f, my, mx + mw - 60.0f, my + 44.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_bold_, "💿 Export / Render Audio Project", title_rc, t.accent_bright);
+
+        D2D1_RECT_F close_rc = D2D1::RectF(mx + mw - 38.0f, my + 8.0f, mx + mw - 10.0f, my + 36.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, close_rc, "✕", false, t.danger, t.bg_control, 4.0f);
+
+        // --- Section A: Output File Location ---
+        float y_pos = my + 54.0f;
+        D2D1_RECT_F lbl_loc_rc = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 20.0f, y_pos + 18.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, "OUTPUT FILE LOCATION:", lbl_loc_rc, t.text_secondary);
+
+        y_pos += 22.0f;
+        // Textbox displaying filepath
+        D2D1_RECT_F path_box_rc = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 125.0f, y_pos + 32.0f);
+        D2DRenderer::draw_rounded_box(d2d_target_, path_box_rc, t.bg_surface, t.border_subtle, 4.0f);
+        D2D1_RECT_F path_text_rc = D2D1::RectF(path_box_rc.left + 8.0f, path_box_rc.top, path_box_rc.right - 8.0f, path_box_rc.bottom);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, render_output_path_, path_text_rc, t.text_primary, DWRITE_TEXT_ALIGNMENT_LEADING);
+
+        // [ Browse... ] button
+        D2D1_RECT_F browse_rc = D2D1::RectF(mx + mw - 115.0f, y_pos, mx + mw - 20.0f, y_pos + 32.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_main_, browse_rc, "📁 Browse...", false, t.accent, t.bg_control, 4.0f);
+
+        // --- Section B: File Format ---
+        y_pos += 46.0f;
+        D2D1_RECT_F lbl_fmt_rc = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 20.0f, y_pos + 18.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, "FILE FORMAT:", lbl_fmt_rc, t.text_secondary);
+
+        y_pos += 22.0f;
+        float fmt_btn_w = (mw - 40.0f - 12.0f) * 0.5f;
+        D2D1_RECT_F btn_wav = D2D1::RectF(mx + 20.0f, y_pos, mx + 20.0f + fmt_btn_w, y_pos + 34.0f);
+        D2D1_RECT_F btn_flac = D2D1::RectF(mx + 20.0f + fmt_btn_w + 12.0f, y_pos, mx + mw - 20.0f, y_pos + 34.0f);
+
+        bool is_wav = (render_format_ == app::RenderFormat::Wav);
+        bool is_flac = (render_format_ == app::RenderFormat::Flac);
+        D2DRenderer::draw_button(d2d_target_, dwrite_main_, btn_wav, is_wav ? "● WAV (Waveform Audio)" : "○ WAV (Waveform Audio)", is_wav, t.accent, t.bg_control, 4.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_main_, btn_flac, is_flac ? "● FLAC (Free Lossless Audio)" : "○ FLAC (Free Lossless Audio)", is_flac, t.accent, t.bg_control, 4.0f);
+
+        // --- Section C: Bit Depth / Bitrate ---
+        y_pos += 48.0f;
+        D2D1_RECT_F lbl_bit_rc = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 20.0f, y_pos + 18.0f);
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, "BIT DEPTH / BITRATE:", lbl_bit_rc, t.text_secondary);
+
+        y_pos += 22.0f;
+        float bit_btn_w = (mw - 40.0f - 20.0f) / 3.0f;
+        D2D1_RECT_F btn_b16 = D2D1::RectF(mx + 20.0f, y_pos, mx + 20.0f + bit_btn_w, y_pos + 34.0f);
+        D2D1_RECT_F btn_b24 = D2D1::RectF(mx + 20.0f + bit_btn_w + 10.0f, y_pos, mx + 20.0f + 2.0f * bit_btn_w + 10.0f, y_pos + 34.0f);
+        D2D1_RECT_F btn_b32 = D2D1::RectF(mx + 20.0f + 2.0f * (bit_btn_w + 10.0f), y_pos, mx + mw - 20.0f, y_pos + 34.0f);
+
+        bool is_b16 = (render_bit_depth_ == app::RenderBitDepth::Bit16);
+        bool is_b24 = (render_bit_depth_ == app::RenderBitDepth::Bit24);
+        bool is_b32 = (render_bit_depth_ == app::RenderBitDepth::Bit32Float);
+
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, btn_b16, is_b16 ? "● 16-bit PCM (1,411k)" : "○ 16-bit PCM (1,411k)", is_b16, t.accent, t.bg_control, 4.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, btn_b24, is_b24 ? "● 24-bit PCM (2,116k)" : "○ 24-bit PCM (2,116k)", is_b24, t.accent, t.bg_control, 4.0f);
+        std::string b32_label = is_wav
+            ? (is_b32 ? "● 32-bit Float (2,822k)" : "○ 32-bit Float (2,822k)")
+            : "○ 32-bit Float (WAV only)";
+        D2DRenderer::draw_button(d2d_target_, dwrite_small_, btn_b32, b32_label, is_b32, t.accent, t.bg_control, 4.0f);
+
+        // --- Section D: Progress & Status ---
+        y_pos += 46.0f;
+        D2D1_RECT_F status_rc = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 20.0f, y_pos + 18.0f);
+        std::string cur_status;
+        {
+            std::lock_guard<std::mutex> lk(render_status_mutex_);
+            cur_status = render_status_text_;
+        }
+        bool in_prog = render_in_progress_.load();
+        float cur_prog = render_progress_.load();
+        D2DRenderer::draw_text(d2d_target_, dwrite_small_, cur_status, status_rc, in_prog ? t.accent_bright : t.text_secondary);
+
+        y_pos += 20.0f;
+        D2D1_RECT_F pbar_bg = D2D1::RectF(mx + 20.0f, y_pos, mx + mw - 20.0f, y_pos + 8.0f);
+        D2DRenderer::draw_rounded_box(d2d_target_, pbar_bg, t.bg_control, t.border_subtle, 3.0f);
+        if (cur_prog > 0.0f) {
+            float fill_w = (mw - 40.0f) * std::clamp(cur_prog, 0.0f, 1.0f);
+            D2D1_RECT_F pbar_fill = D2D1::RectF(mx + 20.0f, y_pos, mx + 20.0f + fill_w, y_pos + 8.0f);
+            D2DRenderer::draw_rounded_box(d2d_target_, pbar_fill, t.accent, t.accent_bright, 3.0f);
+        }
+
+        // --- Section E: Action Buttons ---
+        float bot_y = my + mh - 50.0f;
+        D2D1_RECT_F cancel_rc = D2D1::RectF(mx + mw - 245.0f, bot_y, mx + mw - 145.0f, bot_y + 36.0f);
+        D2D1_RECT_F export_rc = D2D1::RectF(mx + mw - 135.0f, bot_y, mx + mw - 20.0f, bot_y + 36.0f);
+
+        D2DRenderer::draw_button(d2d_target_, dwrite_main_, cancel_rc, "Cancel", false, t.bg_control, t.bg_control, 4.0f);
+        D2DRenderer::draw_button(d2d_target_, dwrite_bold_, export_rc, in_prog ? "Exporting..." : "Export Audio", true, t.accent, t.accent, 4.0f);
+    }
+
+    void render_export_modal_gdi() {
+        if (!render_modal_open_) return;
+        const auto& t = get_theme();
+
+        int mw = 580;
+        int mh = 430;
+        int mx = (client_w_ - mw) / 2;
+        int my = (client_h_ - mh) / 2;
+        render_modal_gdi_bounds_ = RECT{mx, my, mx + mw, my + mh};
+
+        // Modal backdrop box
+        GuiRenderer::draw_rounded_box(mem_dc_, render_modal_gdi_bounds_, t.bg_elevated, t.border_strong, 8);
+
+        // Header bar
+        RECT hdr_rc{mx, my, mx + mw, my + 44};
+        GuiRenderer::draw_rounded_box(mem_dc_, hdr_rc, t.bg_surface, t.border_subtle, 8);
+
+        RECT title_rc{mx + 18, my, mx + mw - 60, my + 44};
+        SelectObject(mem_dc_, font_bold_);
+        GuiRenderer::draw_text(mem_dc_, "Export / Render Audio Project", title_rc, t.accent_bright, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT close_rc{mx + mw - 38, my + 8, mx + mw - 10, my + 36};
+        GuiRenderer::draw_button(mem_dc_, close_rc, "✕", false, t.danger, t.bg_control);
+
+        // Section A: Output Location
+        int y_pos = my + 54;
+        RECT lbl_loc_rc{mx + 20, y_pos, mx + mw - 20, y_pos + 18};
+        SelectObject(mem_dc_, font_small_);
+        GuiRenderer::draw_text(mem_dc_, "OUTPUT FILE LOCATION:", lbl_loc_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        y_pos += 22;
+        RECT path_box_rc{mx + 20, y_pos, mx + mw - 125, y_pos + 32};
+        GuiRenderer::draw_rounded_box(mem_dc_, path_box_rc, t.bg_surface, t.border_subtle, 4);
+        RECT path_text_rc{path_box_rc.left + 8, path_box_rc.top, path_box_rc.right - 8, path_box_rc.bottom};
+        GuiRenderer::draw_text(mem_dc_, render_output_path_, path_text_rc, t.text_primary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        RECT browse_rc{mx + mw - 115, y_pos, mx + mw - 20, y_pos + 32};
+        SelectObject(mem_dc_, font_main_);
+        GuiRenderer::draw_button(mem_dc_, browse_rc, "Browse...", false, t.accent, t.bg_control);
+
+        // Section B: File Format
+        y_pos += 46;
+        RECT lbl_fmt_rc{mx + 20, y_pos, mx + mw - 20, y_pos + 18};
+        SelectObject(mem_dc_, font_small_);
+        GuiRenderer::draw_text(mem_dc_, "FILE FORMAT:", lbl_fmt_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        y_pos += 22;
+        int fmt_btn_w = (mw - 40 - 12) / 2;
+        RECT btn_wav{mx + 20, y_pos, mx + 20 + fmt_btn_w, y_pos + 34};
+        RECT btn_flac{mx + 20 + fmt_btn_w + 12, y_pos, mx + mw - 20, y_pos + 34};
+
+        bool is_wav = (render_format_ == app::RenderFormat::Wav);
+        bool is_flac = (render_format_ == app::RenderFormat::Flac);
+        SelectObject(mem_dc_, font_main_);
+        GuiRenderer::draw_button(mem_dc_, btn_wav, is_wav ? "● WAV (Waveform Audio)" : "○ WAV (Waveform Audio)", is_wav, t.accent, t.bg_control);
+        GuiRenderer::draw_button(mem_dc_, btn_flac, is_flac ? "● FLAC (Free Lossless Audio)" : "○ FLAC (Free Lossless Audio)", is_flac, t.accent, t.bg_control);
+
+        // Section C: Bit Depth / Bitrate
+        y_pos += 48;
+        RECT lbl_bit_rc{mx + 20, y_pos, mx + mw - 20, y_pos + 18};
+        SelectObject(mem_dc_, font_small_);
+        GuiRenderer::draw_text(mem_dc_, "BIT DEPTH / BITRATE:", lbl_bit_rc, t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        y_pos += 22;
+        int bit_btn_w = (mw - 40 - 20) / 3;
+        RECT btn_b16{mx + 20, y_pos, mx + 20 + bit_btn_w, y_pos + 34};
+        RECT btn_b24{mx + 20 + bit_btn_w + 10, y_pos, mx + 20 + 2 * bit_btn_w + 10, y_pos + 34};
+        RECT btn_b32{mx + 20 + 2 * (bit_btn_w + 10), y_pos, mx + mw - 20, y_pos + 34};
+
+        bool is_b16 = (render_bit_depth_ == app::RenderBitDepth::Bit16);
+        bool is_b24 = (render_bit_depth_ == app::RenderBitDepth::Bit24);
+        bool is_b32 = (render_bit_depth_ == app::RenderBitDepth::Bit32Float);
+
+        SelectObject(mem_dc_, font_small_);
+        GuiRenderer::draw_button(mem_dc_, btn_b16, is_b16 ? "● 16-bit (1,411k)" : "○ 16-bit (1,411k)", is_b16, t.accent, t.bg_control);
+        GuiRenderer::draw_button(mem_dc_, btn_b24, is_b24 ? "● 24-bit (2,116k)" : "○ 24-bit (2,116k)", is_b24, t.accent, t.bg_control);
+        std::string b32_gdi = is_wav
+            ? (is_b32 ? "● 32-bit (2,822k)" : "○ 32-bit (2,822k)")
+            : "○ 32-bit (WAV only)";
+        GuiRenderer::draw_button(mem_dc_, btn_b32, b32_gdi, is_b32, t.accent, t.bg_control);
+
+        // Section D: Progress & Status
+        y_pos += 46;
+        RECT status_rc{mx + 20, y_pos, mx + mw - 20, y_pos + 18};
+        std::string cur_status_gdi;
+        {
+            std::lock_guard<std::mutex> lk(render_status_mutex_);
+            cur_status_gdi = render_status_text_;
+        }
+        bool in_prog_gdi = render_in_progress_.load();
+        float cur_prog_gdi = render_progress_.load();
+        GuiRenderer::draw_text(mem_dc_, cur_status_gdi, status_rc, in_prog_gdi ? t.accent_bright : t.text_secondary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        y_pos += 20;
+        RECT pbar_bg{mx + 20, y_pos, mx + mw - 20, y_pos + 8};
+        GuiRenderer::draw_rounded_box(mem_dc_, pbar_bg, t.bg_control, t.border_subtle, 3);
+        if (cur_prog_gdi > 0.0f) {
+            int fill_w = static_cast<int>((mw - 40) * std::clamp(cur_prog_gdi, 0.0f, 1.0f));
+            RECT pbar_fill{mx + 20, y_pos, mx + 20 + fill_w, y_pos + 8};
+            GuiRenderer::draw_rounded_box(mem_dc_, pbar_fill, t.accent, t.accent_bright, 3);
+        }
+
+        // Section E: Bottom Buttons
+        int bot_y = my + mh - 50;
+        RECT cancel_rc{mx + mw - 245, bot_y, mx + mw - 145, bot_y + 36};
+        RECT export_rc{mx + mw - 135, bot_y, mx + mw - 20, bot_y + 36};
+
+        SelectObject(mem_dc_, font_main_);
+        GuiRenderer::draw_button(mem_dc_, cancel_rc, "Cancel", false, t.bg_control, t.bg_control);
+        SelectObject(mem_dc_, font_bold_);
+        GuiRenderer::draw_button(mem_dc_, export_rc, in_prog_gdi ? "Exporting..." : "Export Audio", true, t.accent, t.accent);
+    }
+
+    void handle_render_modal_click(int x, int y) {
+        float mw = 580.0f;
+        float mh = 430.0f;
+        float mx = (static_cast<float>(client_w_) - mw) * 0.5f;
+        float my = (static_cast<float>(client_h_) - mh) * 0.5f;
+
+        // If render is actively running in background, ignore controls except if we handle cancel
+        if (render_in_progress_.load()) {
+            return;
+        }
+
+        // Click outside bounds -> close modal
+        if (x < mx || x > mx + mw || y < my || y > my + mh) {
+            close_render_modal();
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+
+        // Close [✕] button
+        if (x >= mx + mw - 38.0f && x <= mx + mw - 10.0f && y >= my + 8.0f && y <= my + 36.0f) {
+            close_render_modal();
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+
+        // Path box or [ Browse... ] button (clicking path box also invokes file browser)
+        float y_pos = my + 54.0f + 22.0f;
+        if (x >= mx + 20.0f && x <= mx + mw - 20.0f && y >= y_pos && y <= y_pos + 32.0f) {
+            browse_render_output_path();
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+
+        // Format selection buttons
+        y_pos += 46.0f + 22.0f;
+        float fmt_btn_w = (mw - 40.0f - 12.0f) * 0.5f;
+        if (x >= mx + 20.0f && x <= mx + 20.0f + fmt_btn_w && y >= y_pos && y <= y_pos + 34.0f) {
+            set_render_format(app::RenderFormat::Wav);
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+        if (x >= mx + 20.0f + fmt_btn_w + 12.0f && x <= mx + mw - 20.0f && y >= y_pos && y <= y_pos + 34.0f) {
+            set_render_format(app::RenderFormat::Flac);
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+
+        // Bit depth buttons
+        y_pos += 48.0f + 22.0f;
+        float bit_btn_w = (mw - 40.0f - 20.0f) / 3.0f;
+        if (x >= mx + 20.0f && x <= mx + 20.0f + bit_btn_w && y >= y_pos && y <= y_pos + 34.0f) {
+            render_bit_depth_ = app::RenderBitDepth::Bit16;
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+        if (x >= mx + 20.0f + bit_btn_w + 10.0f && x <= mx + 20.0f + 2.0f * bit_btn_w + 10.0f && y >= y_pos && y <= y_pos + 34.0f) {
+            render_bit_depth_ = app::RenderBitDepth::Bit24;
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+        if (x >= mx + 20.0f + 2.0f * (bit_btn_w + 10.0f) && x <= mx + mw - 20.0f && y >= y_pos && y <= y_pos + 34.0f) {
+            if (render_format_ == app::RenderFormat::Flac) {
+                // 32-bit Float is exclusive to WAV: auto-switch to WAV format
+                set_render_format(app::RenderFormat::Wav);
+            }
+            render_bit_depth_ = app::RenderBitDepth::Bit32Float;
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+
+        // Bottom buttons: Cancel and Export
+        float bot_y = my + mh - 50.0f;
+        if (x >= mx + mw - 245.0f && x <= mx + mw - 145.0f && y >= bot_y && y <= bot_y + 36.0f) {
+            close_render_modal();
+            InvalidateRect(hwnd_, NULL, FALSE);
+            return;
+        }
+        if (x >= mx + mw - 135.0f && x <= mx + mw - 20.0f && y >= bot_y && y <= bot_y + 36.0f) {
+            execute_render_export();
+            return;
         }
     }
 
@@ -8616,6 +9111,19 @@ private:
     float simulated_meter_l_{0.0f};
     float simulated_meter_r_{0.0f};
     std::string status_message_{""};
+
+    // Export / Render Modal State
+    bool render_modal_open_{false};
+    app::RenderFormat render_format_{app::RenderFormat::Wav};
+    app::RenderBitDepth render_bit_depth_{app::RenderBitDepth::Bit16};
+    std::string render_output_path_{"D:\\Project\\Learn\\DigiDaw\\export.wav"};
+    std::atomic<float> render_progress_{0.0f};
+    std::atomic<bool> render_in_progress_{false};
+    std::string render_status_text_{"Ready to export"};
+    std::mutex render_status_mutex_;
+    std::thread render_thread_;
+    D2D1_RECT_F render_modal_bounds_{0, 0, 0, 0};
+    RECT render_modal_gdi_bounds_{0, 0, 0, 0};
 
     // Transport & SPM
     domain::Tick song_position_marker_{0}; // Song Position Marker (SPM)

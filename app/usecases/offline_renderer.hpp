@@ -4,62 +4,83 @@
 #include "../../domain/project/project.hpp"
 #include "../../domain/devices/device.hpp"
 #include "../../adapters/audio/wave_file_writer.hpp"
+#include "../../adapters/audio/flac_file_writer.hpp"
 #include "../../domain/common/result.hpp"
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
 #include <vector>
+#include <functional>
+#include <cmath>
 
 namespace digidaw::app {
 
+enum class RenderFormat : uint8_t {
+    Wav = 0,
+    Flac = 1
+};
+
+enum class RenderBitDepth : uint8_t {
+    Bit16 = 16,
+    Bit24 = 24,
+    Bit32Float = 32
+};
+
+struct RenderOptions {
+    RenderFormat format{RenderFormat::Wav};
+    RenderBitDepth bit_depth{RenderBitDepth::Bit16};
+    double sample_rate{44100.0};
+    size_t block_size{512};
+    std::string output_path{};
+    domain::Tick duration_ticks{0};
+};
+
 class OfflineRenderer {
 public:
-    static domain::Result<void> render_to_wav(
+    using ProgressCallback = std::function<void(float progress)>;
+
+    static domain::Result<void> render(
         domain::Project& project,
         const std::unordered_map<domain::ChannelId, std::shared_ptr<domain::IDevice>>& channel_devices,
-        const std::string& output_wav_path,
-        domain::Tick duration_ticks,
-        double sample_rate = 44100.0,
-        size_t block_size = 512,
-        adapters::audio::WaveBitDepth bit_depth = adapters::audio::WaveBitDepth::PCM16) {
+        const RenderOptions& options,
+        ProgressCallback progress_cb = nullptr) {
 
-        if (sample_rate <= 0.0 || block_size == 0 || duration_ticks <= 0) {
+        if (options.sample_rate <= 0.0 || options.block_size == 0 || options.duration_ticks <= 0 || options.output_path.empty()) {
             return domain::Result<void>(domain::ErrorCode::InvalidArgument);
         }
 
         // Prepare devices
         for (const auto& [_, dev] : channel_devices) {
             if (dev) {
-                dev->prepare(sample_rate, block_size);
+                dev->prepare(options.sample_rate, options.block_size);
                 dev->reset();
             }
         }
 
         auto& mixer = project.mixer_graph();
-        mixer.prepare(sample_rate, block_size);
+        mixer.prepare(options.sample_rate, options.block_size);
 
         Transport transport(project);
         transport.set_mode(PlaybackMode::Song);
         transport.seek(0);
         transport.play();
 
-        const double total_seconds = project.time_map().tick_to_seconds(duration_ticks);
-        const auto total_frames = static_cast<size_t>(std::ceil(total_seconds * sample_rate));
+        const double total_seconds = project.time_map().tick_to_seconds(options.duration_ticks);
+        const auto total_frames = static_cast<size_t>(std::ceil(total_seconds * options.sample_rate));
 
         std::vector<float> recorded_left;
         std::vector<float> recorded_right;
         recorded_left.reserve(total_frames);
         recorded_right.reserve(total_frames);
 
-        domain::OwningAudioBuffer master_buf(block_size);
+        domain::OwningAudioBuffer master_buf(options.block_size);
         std::unordered_map<domain::MixerTrackId, domain::OwningAudioBuffer> track_inputs;
         // Allocate track input buffers for each track in mixer
         for (const auto& [track_id, _] : mixer.tracks()) {
-            track_inputs[track_id] = domain::OwningAudioBuffer(block_size);
+            track_inputs[track_id] = domain::OwningAudioBuffer(options.block_size);
         }
 
         // Resource optimization: identify active channels from non-empty, unmuted arrangement tracks.
-        // Empty arrangement tracks (clips().empty() or is_muted()) are early-skipped, requiring zero buffer allocation.
         bool any_solo = false;
         for (const auto& trk : project.tracks()) {
             if (trk.solo()) { any_solo = true; break; }
@@ -88,13 +109,13 @@ public:
         std::unordered_map<domain::ChannelId, domain::OwningAudioBuffer> channel_buffers;
         for (const auto& ch : project.channels()) {
             if (active_arrangement_channels.contains(ch.id())) {
-                channel_buffers[ch.id()] = domain::OwningAudioBuffer(block_size);
+                channel_buffers[ch.id()] = domain::OwningAudioBuffer(options.block_size);
             }
         }
 
         size_t frames_rendered = 0;
         while (frames_rendered < total_frames) {
-            const size_t current_block_frames = std::min(block_size, total_frames - frames_rendered);
+            const size_t current_block_frames = std::min(options.block_size, total_frames - frames_rendered);
             master_buf.resize_frames(current_block_frames);
             auto master_view = master_buf.view();
             master_view.clear();
@@ -106,7 +127,7 @@ public:
             }
 
             // 1. Advance transport and get MIDI events for channels
-            auto scheduled_events = transport.advance_block(current_block_frames, sample_rate);
+            auto scheduled_events = transport.advance_block(current_block_frames, options.sample_rate);
 
             // 2. Synthesize audio from each active channel device
             for (const auto& ch : project.channels()) {
@@ -175,12 +196,62 @@ public:
             }
 
             frames_rendered += current_block_frames;
+            if (progress_cb && total_frames > 0) {
+                progress_cb(static_cast<float>(frames_rendered) / static_cast<float>(total_frames));
+            }
         }
 
-        // 5. Write to WAV
-        return adapters::audio::WaveFileWriter::write_wav(
-            output_wav_path, recorded_left, recorded_right,
-            static_cast<uint32_t>(sample_rate), bit_depth);
+        if (progress_cb) {
+            progress_cb(1.0f);
+        }
+
+        // 5. Output encoding
+        if (options.format == RenderFormat::Flac) {
+            adapters::audio::FlacBitDepth flac_depth = adapters::audio::FlacBitDepth::PCM16;
+            if (options.bit_depth == RenderBitDepth::Bit24 || options.bit_depth == RenderBitDepth::Bit32Float) {
+                flac_depth = adapters::audio::FlacBitDepth::PCM24;
+            }
+            return adapters::audio::FlacFileWriter::write_flac(
+                options.output_path, recorded_left, recorded_right,
+                static_cast<uint32_t>(options.sample_rate), flac_depth);
+        } else {
+            adapters::audio::WaveBitDepth wav_depth = adapters::audio::WaveBitDepth::PCM16;
+            if (options.bit_depth == RenderBitDepth::Bit24) {
+                wav_depth = adapters::audio::WaveBitDepth::PCM24;
+            } else if (options.bit_depth == RenderBitDepth::Bit32Float) {
+                wav_depth = adapters::audio::WaveBitDepth::Float32;
+            }
+            return adapters::audio::WaveFileWriter::write_wav(
+                options.output_path, recorded_left, recorded_right,
+                static_cast<uint32_t>(options.sample_rate), wav_depth);
+        }
+    }
+
+    // Backwards compatibility convenience function
+    static domain::Result<void> render_to_wav(
+        domain::Project& project,
+        const std::unordered_map<domain::ChannelId, std::shared_ptr<domain::IDevice>>& channel_devices,
+        const std::string& output_wav_path,
+        domain::Tick duration_ticks,
+        double sample_rate = 44100.0,
+        size_t block_size = 512,
+        adapters::audio::WaveBitDepth bit_depth = adapters::audio::WaveBitDepth::PCM16) {
+
+        RenderOptions opt;
+        opt.format = RenderFormat::Wav;
+        if (bit_depth == adapters::audio::WaveBitDepth::Float32) {
+            opt.bit_depth = RenderBitDepth::Bit32Float;
+        } else if (bit_depth == adapters::audio::WaveBitDepth::PCM24) {
+            opt.bit_depth = RenderBitDepth::Bit24;
+        } else {
+            opt.bit_depth = RenderBitDepth::Bit16;
+        }
+        opt.output_path = output_wav_path;
+        opt.duration_ticks = duration_ticks;
+        opt.sample_rate = sample_rate;
+        opt.block_size = block_size;
+
+        return render(project, channel_devices, opt);
     }
 };
 
