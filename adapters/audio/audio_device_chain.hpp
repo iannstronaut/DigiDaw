@@ -8,6 +8,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include "miniaudio_driver.hpp"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -18,10 +19,11 @@
 namespace digidaw::adapters::audio {
 
 enum class AudioDriverType : uint8_t {
-    ASIO = 0,
-    WASAPI = 1,
-    DirectSound = 2,
-    Null = 3
+    Miniaudio = 0,
+    ASIO = 1,
+    WASAPI = 2,
+    DirectSound = 3,
+    Null = 4
 };
 
 class NullAudioDevice : public app::IAudioDevice {
@@ -298,7 +300,17 @@ private:
 class AudioDeviceChain : public app::IAudioDevice {
 public:
     explicit AudioDeviceChain(bool force_dummy = false, bool simulate_asio_failure = false)
-        : force_dummy_(force_dummy), simulate_asio_failure_(simulate_asio_failure) {}
+        : force_dummy_(force_dummy), simulate_asio_failure_(simulate_asio_failure) {
+        if (force_dummy_) {
+            active_driver_ = AudioDriverType::Null;
+            active_driver_name_ = "Null Device";
+        }
+    }
+
+    ~AudioDeviceChain() override {
+        stop();
+        close();
+    }
 
     domain::Result<void> open(double sample_rate, size_t buffer_size, app::AudioProcessCallback callback) override {
         sample_rate_ = sample_rate;
@@ -306,8 +318,17 @@ public:
         callback_ = std::move(callback);
 
         if (!force_dummy_) {
+            // 1. Primary: Battle-tested industry-standard miniaudio driver (WASAPI / DirectSound / WinMM)
+            auto ma_dev = std::make_unique<MiniaudioDevice>();
+            if (ma_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
+                active_driver_ = AudioDriverType::Miniaudio;
+                active_driver_name_ = ma_dev->device_name();
+                current_device_ = std::move(ma_dev);
+                return domain::Result<void>::ok();
+            }
+
 #ifdef _WIN32
-            // 1. Primary: Windows Audio Session API (WASAPI Low-Latency 32-bit Float)
+            // 2. Secondary Fallback: Scratch-built WASAPI driver
             auto wasapi_dev = std::make_unique<WasapiAudioDevice>();
             if (wasapi_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
                 current_device_ = std::move(wasapi_dev);
@@ -316,7 +337,7 @@ public:
                 return domain::Result<void>::ok();
             }
 
-            // 2. High-Performance Event-Driven WaveOut Fallback
+            // 3. Tertiary Fallback: High-Performance Event-Driven WaveOut
             auto win_dev = std::make_unique<WaveOutAudioDevice>();
             if (win_dev->open(sample_rate_, buffer_size_, callback_).is_ok()) {
                 current_device_ = std::move(win_dev);
@@ -354,15 +375,30 @@ public:
         return current_device_ && current_device_->is_running();
     }
 
-    [[nodiscard]] double sample_rate() const noexcept override { return sample_rate_; }
-    [[nodiscard]] size_t buffer_size() const noexcept override { return buffer_size_; }
+    [[nodiscard]] double sample_rate() const noexcept override {
+        return current_device_ ? current_device_->sample_rate() : sample_rate_;
+    }
+    [[nodiscard]] size_t buffer_size() const noexcept override {
+        return current_device_ ? current_device_->buffer_size() : buffer_size_;
+    }
 
     [[nodiscard]] std::string device_name() const override {
+        if (current_device_) {
+            return current_device_->device_name();
+        }
         return active_driver_name_;
     }
 
     [[nodiscard]] AudioDriverType active_driver_type() const noexcept {
         return active_driver_;
+    }
+
+    [[nodiscard]] app::IAudioDevice* current_device() noexcept {
+        return current_device_.get();
+    }
+
+    [[nodiscard]] const app::IAudioDevice* current_device() const noexcept {
+        return current_device_.get();
     }
 
 private:
@@ -380,7 +416,7 @@ private:
     size_t buffer_size_{512};
     app::AudioProcessCallback callback_;
     AudioDriverType active_driver_{AudioDriverType::Null};
-    std::string active_driver_name_{"Null Device"};
+    std::string active_driver_name_{"miniaudio (Primary Engine: WASAPI / DirectSound)"};
     std::unique_ptr<app::IAudioDevice> current_device_;
 };
 

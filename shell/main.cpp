@@ -348,6 +348,7 @@ int main(int argc, char* argv[]) {
 
         if (arg1 == "--info") {
             std::cout << "[Engine Info]\n";
+            std::cout << "  Audio Driver: " << engine.audio_device().device_name() << "\n";
             std::cout << "  Sample Rate:  " << engine.audio_device().sample_rate() << " Hz\n";
             std::cout << "  Buffer Size:  " << engine.audio_device().buffer_size() << " frames\n";
             std::cout << "  Available Plugins:\n";

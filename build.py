@@ -46,6 +46,25 @@ def main():
         f"-I{os.path.join(root_dir, 'sdk')}",
     ]
 
+    # Compile and cache miniaudio_impl.o (battle-tested industry-standard audio driver)
+    miniaudio_src = os.path.join(root_dir, "adapters", "audio", "miniaudio_impl.cpp")
+    miniaudio_header = os.path.join(root_dir, "adapters", "audio", "third_party", "miniaudio.h")
+    miniaudio_obj = os.path.join(bin_dir, "miniaudio_impl.o")
+    need_compile_ma = not os.path.exists(miniaudio_obj)
+    if not need_compile_ma:
+        obj_mtime = os.path.getmtime(miniaudio_obj)
+        if os.path.getmtime(miniaudio_src) > obj_mtime or (os.path.exists(miniaudio_header) and os.path.getmtime(miniaudio_header) > obj_mtime):
+            need_compile_ma = True
+    if need_compile_ma:
+        print("[Build] Compiling miniaudio driver implementation (miniaudio_impl.o)...")
+        cmd_ma = [gpp] + common_flags + ["-c", miniaudio_src, "-o", miniaudio_obj]
+        t0 = time.time()
+        res_ma = subprocess.run(cmd_ma, cwd=root_dir)
+        if res_ma.returncode != 0:
+            print("\n[Build FAILED] Failed to compile miniaudio_impl.cpp!")
+            sys.exit(res_ma.returncode)
+        print(f"[Build SUCCESS] Compiled miniaudio_impl.o in {time.time() - t0:.2f}s\n")
+
     test_sources = [
         os.path.join(root_dir, "tests", "main_test.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_domain_time.cpp"),
@@ -62,12 +81,14 @@ def main():
         os.path.join(root_dir, "tests", "unit", "test_licensing.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_xaudio_plugins.cpp"),
         os.path.join(root_dir, "tests", "unit", "test_xosc_plugin.cpp"),
+        os.path.join(root_dir, "tests", "unit", "test_miniaudio_driver.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_project_odp.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_offline_renderer.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_bridge_and_scanner.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_script_host.cpp"),
         os.path.join(root_dir, "tests", "integration", "test_script_automation.cpp"),
-        os.path.join(root_dir, "adapters", "c_api", "c_api_impl.cpp")
+        os.path.join(root_dir, "adapters", "c_api", "c_api_impl.cpp"),
+        miniaudio_obj
     ]
 
     test_exe = os.path.join(bin_dir, "run_tests.exe")
@@ -110,7 +131,8 @@ def main():
 
     shell_sources = [
         os.path.join(root_dir, "shell", "main.cpp"),
-        os.path.join(root_dir, "adapters", "c_api", "c_api_impl.cpp")
+        os.path.join(root_dir, "adapters", "c_api", "c_api_impl.cpp"),
+        miniaudio_obj
     ]
 
     # Compile and embed Windows Resource Script (Per-Monitor V2 High-DPI Manifest & Comctl32 v6)
