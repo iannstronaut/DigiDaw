@@ -41,5 +41,5 @@ Desktop.ini
 docs/
 AGENT.md
 REQUIREMENT_LEDGER.md
-# .agent/
-# DESIGN.md
+.agent/
+DESIGN.md
